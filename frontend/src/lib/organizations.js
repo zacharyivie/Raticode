@@ -1,5 +1,6 @@
 import { providerPermissionDefault } from "./providerPermissions.js";
 import { apiJson } from "./api.js";
+import { longDate } from "./timeText.js";
 
 const READS = new Set(["availability", "list", "read", "history", "events", "export", "help", "tasks", "attempts", "routines", "outcomes", "rehearse", "diagnostics", "workflow_preview", "run_events", "audit_verify", "run_input", "knowledge_search", "knowledge_read", "ticket_changes", "repository"]);
 export async function organizationRequest(projectRoot = "", action = "list", organizationId, params = {}) {
@@ -28,10 +29,10 @@ export async function organizationRequest(projectRoot = "", action = "list", org
   return payload.result;
 }
 
-export function historyByDate(history, locale) {
+export function historyByDate(history) {
   const buckets = new Map();
   for (const revision of history) {
-    const date = new Date(revision.at).toLocaleDateString(locale, { year: "numeric", month: "long", day: "numeric" });
+    const date = longDate(revision.at);
     if (!buckets.has(date)) buckets.set(date, []);
     buckets.get(date).push(revision);
   }
@@ -93,7 +94,7 @@ export function projectPeople(employees, project, tasks) {
   const assigned = new Set(tasks.filter(task => task.project === project.id).map(task => task.assignee));
   return employees.filter(employee => employee.id === project.owner || assigned.has(employee.id)).map(employee => ({
     ...employee,
-    assignment: [employee.id === project.owner && "Initiative owner", assigned.has(employee.id) && "Task assignee"].filter(Boolean).join(", "),
+    assignment: [employee.id === project.owner && "Initiative owner", assigned.has(employee.id) && "Ticket assignee"].filter(Boolean).join(", "),
   }));
 }
 
@@ -177,7 +178,7 @@ export const dangerousPermission = mode => DANGEROUS_MODES.has(mode);
 
 // What needs the user right now, for the overview strip.
 // Rem's requests expire after a day; older ones can no longer be approved.
-export const CONSENT_TTL_MS = 24 * 60 * 60 * 1000;
+const CONSENT_TTL_MS = 24 * 60 * 60 * 1000;
 // Requests waiting on the user. In Auto mode, Rem's review decides the rest (waitingOn "rem").
 export function pendingRequests(runtime = {}, now = Date.now()) {
   return Object.values(runtime.consentRequests || {}).filter(request => request.status === "pending" && request.waitingOn !== "rem" && now - Date.parse(request.at) < CONSENT_TTL_MS);
@@ -249,8 +250,9 @@ export function attentionSummary(tasks = [], runtime = {}) {
 }
 
 // The backend's waiting reasons keep their saved wording ("Assign an employee"), which scripts
-// and the phone match on; people read the glossary's word for organization members.
-const WAITING_REASON_WORDS = { "Assign an employee": "Assign a worker", "Employee is held": "Worker is held" };
+// and the phone match on; people read the glossary's word for organization members. Tickets
+// blocked at their run limit by earlier versions keep the old "task" wording in their saved reason.
+const WAITING_REASON_WORDS = { "Assign an employee": "Assign a worker", "Employee is held": "Worker is held", "Run limit for this task reached. Reopen it to allow more runs.": "Run limit for this ticket reached. Reopen it to allow more runs." };
 export const waitingReasonText = reason => WAITING_REASON_WORDS[reason] || reason;
 
 // Why Start would leave work waiting: setup gaps first, then the reasons the rehearsal gives
@@ -304,8 +306,8 @@ const FIELD_LABELS = {
   provider: "Provider", model: "Model", effort: "Effort", permissionMode: "Permission mode", resources: "Tools",
   skills: "Skills", paused: "Paused", heartbeatSeconds: "Heartbeat", memory: "Persistent memory",
   monthlyBudgetUsd: "Monthly budget", monthlyTurnLimit: "Monthly run limit", maxConcurrency: "Workers at once",
-  maxTaskTurns: "Runs per task", turnTimeoutSeconds: "Run time limit", monthlyTokenLimit: "Monthly token limit",
-  maxChildTasksPerTurn: "Tasks one run can create", maxDelegationDepth: "Delegation depth", workspaceIsolation: "Workspace isolation", blockGitPush: "Block git push", pullBacklog: "Pull from Backlog", remSecondBrain: "Second Brain",
+  maxTaskTurns: "Runs per ticket", turnTimeoutSeconds: "Run time limit", monthlyTokenLimit: "Monthly token limit",
+  maxChildTasksPerTurn: "Tickets one run can create", maxDelegationDepth: "Delegation depth", workspaceIsolation: "Workspace isolation", blockGitPush: "Block git push", pullBacklog: "Pull from Backlog", remSecondBrain: "Second Brain",
   remReportTheme: "Report theme", packageFiles: "Package files", metadata: "Metadata", owner: "Owner",
   manager: "Manager", workspacePath: "Workspace folder", mcpServers: "MCP servers", shell: "Run commands", web: "Search the web",
 };
@@ -331,7 +333,7 @@ export function changeLabel(path, ...configs) {
 
 function taskTitle(payload, tasks) {
   const title = payload.task?.title || tasks.find(task => task.id === payload.taskId)?.title;
-  return title ? `“${title}”` : "a task";
+  return title ? `“${title}”` : "a ticket";
 }
 
 // Groups provider stream updates by turn so a single turn reads as one entry.

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { apiJson } from "../lib/api";
+import { dateTime } from "../lib/timeText.js";
 
 // Jev is a classification provider for jev workflow nodes, not a coding provider, so it
 // gets its own card. The key goes to the backend once and lives in the system keychain;
@@ -71,7 +72,7 @@ export default function JevProviderSettings({ labelledBy = "", onStatusChange } 
       <button type="button" className="text-xs font-semibold text-red-700 disabled:opacity-50" disabled={Boolean(busy)} onClick={() => run("remove", "/classifiers/jev/key", { method: "DELETE" })}>{busy === "remove" ? "Removing…" : "Remove key"}</button>
     </div> : null}
     {status?.checkedAt ? <p className={`text-xs ${status.checkError ? "text-red-700" : "text-muted"}`}>
-      {status.checkError ? `Check failed: ${status.checkError}` : "Jev accepted the key."} Checked {new Date(status.checkedAt).toLocaleString()}.
+      {status.checkError ? `Check failed: ${status.checkError}` : "Jev accepted the key."} Checked {dateTime(status.checkedAt)}.
     </p> : null}
     {models.length ? <p className="text-xs text-muted">Models Jev lists: {models.join(", ")}</p> : null}
     {status?.defaultModel ? <p className="text-xs text-muted">Nodes use {status.defaultModel} unless they set model. Text a jev node classifies is sent to TypeSafe, and each call is billed by input tokens.</p> : null}

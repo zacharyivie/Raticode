@@ -130,6 +130,7 @@ API_PATHS = (
     "/rem/messages",
     "/rem/notices",
     "/rem/objectives",
+    "/rem/objectives/ask",
     "/rem/reset",
     "/rem/runs",
     "/rem/runs/acknowledge",

@@ -95,7 +95,14 @@
 .sb-toolbar h2 { font-size: 14px; font-weight: 600; line-height: 1.3; }
 .sb-toolbar small { display: block; font-size: 10.5px; color: rgb(var(--color-muted)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-toolbar-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.sb-toolbar-actions > .sb-pill { margin-right: 4px; }
+.sb-toolbar-actions > :is(.sb-pill, .sb-popover-anchor) { margin-right: 4px; }
+/* "Index needs attention" keeps the pill's look as a button that opens the error. */
+.sb-pill-button { display: inline-flex; padding: 0; border: 0; border-radius: 999px; background: none; cursor: pointer; }
+.sb-pill-button:hover .sb-pill, .sb-pill-button[aria-expanded=true] .sb-pill { box-shadow: inset 0 0 0 1px currentColor; }
+.sb-index-warning { width: 320px; display: grid; gap: 8px; }
+.sb-index-warning > p:first-child { font-size: 13px; font-weight: 600; }
+.sb-index-error { max-height: 140px; overflow: auto; margin: 0; padding: 8px 10px; border-radius: 8px; background: rgb(var(--color-ink) / .05); font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; cursor: text; }
+@layer utilities { .sb-index-warning.sb-index-warning:focus-visible { outline: none !important; } }
 .sb-tabs { display: flex; gap: 18px; padding: 0 20px; background: var(--sb-panel); border-bottom: 1px solid var(--sb-hairline); overflow-x: auto; flex-shrink: 0; scrollbar-width: none; }
 .sb-tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 10px 2px 8px; border-bottom: 2px solid transparent; color: rgb(var(--color-muted)); font-size: 12px; white-space: nowrap; }
 .sb-tabs button:hover { color: rgb(var(--color-ink)); }

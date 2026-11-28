@@ -16,11 +16,13 @@ object Kanban {
     const val SEEN = "selfwork.report.seen"
     /** When the self-work running now stops: the user's condition and latest time; desktops whose view has `stop` take it. */
     const val STOP = "selfwork.stop"
+    /** The user's change to the self-work objectives, global or one project's own; desktops whose view has `projects` take it. */
+    const val OBJECTIVES = "selfwork.objectives"
     const val PARTICIPANT = "kanban.participant"
     /** One ticket and its history: status changes with their reasons, and comments. */
     const val TIMELINE = "kanban.timeline"
     val READS = setOf(BOARD, SELF_WORK, TIMELINE)
-    val ACTIONS = setOf(TICKET, SETTINGS, SEEN, PARTICIPANT, STOP)
+    val ACTIONS = setOf(TICKET, SETTINGS, SEEN, PARTICIPANT, STOP, OBJECTIVES)
     const val UPDATE_DESKTOP = "Update Raticode on your computer to use the global board and Rem's self-work here."
     const val UPDATE_PARTICIPANTS = "Update Raticode on your computer to see the board's people and their projects here."
     const val UPDATE_COMMENTS = "Update Raticode on your computer to see each ticket's history and comments here."
@@ -180,10 +182,15 @@ object Kanban {
     /**
      * Undo sends a ticket back with another move, so it's offered only where that move exists, as the desktop's
      * canUndoMove does: never after starting work, never for a paused ticket, and not back into In review or Blocked,
-     * which goes through a review. [ticket] is the ticket as it was before the move.
+     * which goes through a review. A ticket of unknown scope has no Undo. [ticket] is the ticket as it was before the
+     * move. Both apps are tested against protocol/probes/kanban-cases/undo-move.json.
      */
     fun canUndoMove(ticket: KanbanTicket, column: String): Boolean {
-        val back = if (ticket.isRem) setOf("backlog", "todo", "done", "cancelled") else setOf("backlog", "todo")
+        val back = when (ticket.scope) {
+            SCOPE_REM -> setOf("backlog", "todo", "done", "cancelled")
+            SCOPE_ORG -> setOf("backlog", "todo")
+            else -> emptySet()
+        }
         return column != "running" && column != "in_progress" && ticket.paused.isBlank() && ticket.status in back
     }
 
@@ -360,6 +367,55 @@ object Kanban {
         val parts = choice.removePrefix(HANDOVER).split(HANDOVER_WORKER, limit = 2)
         return params.put("to_organization_id", parts[0]).put("assignee_id", parts.getOrElse(1) { "" })
     }
+    /** Rem's ticket changes its plan (title, details, priority, kind and Done when) while nothing runs on it, proposals included, as on the desktop. */
+    fun canEdit(ticket: KanbanTicket) = ticket.isRem && !ticket.running && ticket.paused.isBlank() && ticket.status in setOf("backlog", "todo", "blocked")
+
+    /** The kinds the edit sheet offers: build, research and maintain, and an errand's own kind so it isn't lost. */
+    fun editKinds(ticket: KanbanTicket) = KINDS.filter { it.first != "errand" || ticket.kind == "errand" }
+
+    /** The board sends a description's first [DESCRIPTION_SHOWN] characters; one that long may be cut, so the edit leaves it as it is. */
+    const val DESCRIPTION_SHOWN = 4000
+    fun descriptionCut(draft: TicketDraft) = draft.description.length >= DESCRIPTION_SHOWN
+    const val TITLE_MAX = 500
+    const val DONE_WHEN_MAX = 1000
+
+    /** Done when as the desktop keeps it: one check per line, blank lines dropped. */
+    private fun doneWhenText(text: String) = text.lines().map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n")
+
+    /** The fields the edit sheet starts from: [ticket] as it is now. */
+    fun draftOf(ticket: KanbanTicket) = TicketDraft(ticket.title, ticket.description, ticket.priority.ifBlank { "medium" },
+        ticket.kind.ifBlank { "develop" }, ticket.doneWhen, ticket.revision)
+
+    /**
+     * A draft moved onto [newer], a later copy of the ticket it started from ([start]): fields the user hasn't touched follow
+     * [newer], what they typed stays, and the result starts from [newer]'s revision. Saving it then leaves the other change alone.
+     */
+    fun rebaseDraft(start: TicketDraft, draft: TicketDraft, newer: TicketDraft) = TicketDraft(
+        if (draft.title == start.title) newer.title else draft.title,
+        if (draft.description == start.description) newer.description else draft.description,
+        if (draft.priority == start.priority) newer.priority else draft.priority,
+        if (draft.kind == start.kind) newer.kind else draft.kind,
+        if (draft.doneWhen == start.doneWhen) newer.doneWhen else draft.doneWhen,
+        newer.revision)
+
+    /**
+     * The edit for what changed between [start] (the ticket's fields when the sheet opened, or last rebased) and [draft], sent at
+     * [start]'s revision, so the desktop refuses it if the ticket changed since; null when nothing changed or the title is empty.
+     * A description the board may have cut, and Done when on a desktop that doesn't send it, are left as they are.
+     */
+    fun editParams(ticket: KanbanTicket, start: TicketDraft, draft: TicketDraft): JSONObject? {
+        val name = draft.title.trim().take(TITLE_MAX).takeIf { it.isNotBlank() } ?: return null
+        val params = address(ticket, "edit").put("expected_revision", start.revision)
+        val addressOnly = params.length()
+        if (name != start.title.trim()) params.put("title", name)
+        if (!descriptionCut(start) && draft.description.trim() != start.description.trim()) params.put("description", draft.description.trim())
+        if (draft.priority != start.priority && PRIORITIES.any { it.first == draft.priority }) params.put("priority", draft.priority)
+        if (draft.kind != start.kind && KINDS.any { it.first == draft.kind }) params.put("type", draft.kind)
+        val checks = doneWhenText(draft.doneWhen).take(DONE_WHEN_MAX)
+        if (ticket.doneWhenKnown && checks != doneWhenText(start.doneWhen)) params.put("done_when", checks)
+        return if (params.length() > addressOnly) params else null
+    }
+
     fun moveParams(ticket: KanbanTicket, column: String) = address(ticket, "move").put("column", column)
     fun commentParams(ticket: KanbanTicket, body: String) = address(ticket, "comment").put("body", body.trim())
     /** The read for a ticket's history, by its board ID: `organization/ticket`, with no organization for Rem's. */
@@ -548,7 +604,7 @@ object Kanban {
         // An older desktop never names one: its proposals all came from itself.
         proposedOn = t.optString("proposed_on").take(100),
         // An older desktop doesn't send it, and the ticket shows no finish line.
-        doneWhen = t.optString("done_when").take(1000),
+        doneWhen = t.optString("done_when").take(1000), doneWhenKnown = t.has("done_when"),
         // An older desktop sends neither, and the ticket says nothing about objectives.
         objective = t.optJSONObject("objective")?.optString("text").orEmpty().take(OBJECTIVE_TEXT_MAX),
         objectiveLeft = t.optString("objective_left").take(500))
@@ -597,11 +653,34 @@ object Kanban {
                 a.optString("choice").take(128), a.optString("rem_setting_label").take(140).ifBlank { "Default sign-in" }, a.strings("accounts").take(100).map { it.take(128) }) }
                 .filter { it.provider.isNotBlank() },
             json.optJSONObject("stop")?.let(::stop),
-            json.optJSONObject("objectives")?.let(::objectives))
+            json.optJSONObject("objectives")?.let(::objectives),
+            // An older desktop has no levels of effort, and the phone keeps the objectives read-only.
+            json.optJSONArray("projects")?.let { json.objects("projects").take(PROJECTS_MAX).map(::project).filter { it.projectId.isNotBlank() } })
     }
 
+    private fun project(p: JSONObject) = SelfWorkProject(p.optString("project_id").take(36), p.optString("name").take(160).ifBlank { "Project" },
+        p.optInt("effort_percent").coerceIn(0, EFFORT_MAX), p.optInt("target_threads").coerceIn(0, 64), p.optInt("running_threads").coerceIn(0, 64))
+
     /** The self-work objectives the desktop lists, open ones first and newest first. An older desktop sends none, and the page shows no card. */
-    private fun objectives(o: JSONObject): SelfWorkObjectives {
+    private fun objectives(o: JSONObject): SelfWorkObjectives = objectivesIn(o).copy(
+        // Each of Rem's projects' own objectives, by project ID; none from an older desktop.
+        projects = o.optJSONObject("projects")?.let { all ->
+            all.keys().asSequence().take(PROJECTS_MAX).mapNotNull { key -> all.optJSONObject(key)?.let { key.take(36) to objectivesIn(it) } }.toMap()
+        }.orEmpty(),
+        // An older desktop leaves it out: its edits keep each objective where it is.
+        movable = o.optBoolean("movable"),
+        // Each project's latest Ask Rem by project ID, and whether this desktop takes the ask; neither from an older one.
+        asking = o.optJSONObject("asking")?.let { all ->
+            all.keys().asSequence().take(PROJECTS_MAX).mapNotNull { key -> all.optJSONObject(key)?.let(::objectiveAsk)?.let { key.take(36) to it } }.toMap()
+        }.orEmpty(),
+        askable = o.optBoolean("askable"))
+
+    private fun objectiveAsk(a: JSONObject): ObjectiveAsk? = a.optString("state").takeIf { it in ASK_STATES }
+        ?.let { ObjectiveAsk(it, a.optString("message").take(400), a.optInt("added").coerceIn(0, 5)) }
+
+    private val ASK_STATES = setOf("asking", "added", "failed")
+
+    private fun objectivesIn(o: JSONObject): SelfWorkObjectives {
         val items = o.objects("items").take(OBJECTIVES_MAX).map { i ->
             SelfWorkObjective(i.optString("id").take(64), i.optString("text").take(OBJECTIVE_TEXT_MAX), i.optString("done_when").take(500),
                 i.optBoolean("done"), i.optString("done_by").take(20), i.optString("done_evidence").take(700), i.optString("created_by").take(20),
@@ -613,8 +692,100 @@ object Kanban {
         val done = items.count { it.done } - stale
         // The counts cover the whole list, beyond what one answer holds; worked out from the items when missing.
         return SelfWorkObjectives(ordered, o.optInt("open", items.size - done - stale).coerceAtLeast(0), o.optInt("done", done).coerceAtLeast(0),
-            o.optInt("stale", stale).coerceAtLeast(0), o.optInt("total", items.size).coerceAtLeast(items.size))
+            o.optInt("stale", stale).coerceAtLeast(0), o.optInt("total", items.size).coerceAtLeast(items.size), o.optLong("revision", 0))
     }
+
+    // Rem's projects: level of effort and their own objectives ------------------------------------------------------------
+
+    private const val PROJECTS_MAX = 40
+    const val EFFORT_MAX = 100
+    /** How far one tap moves a project's level of effort. */
+    const val EFFORT_STEP = 5
+    const val OBJECTIVE_DONE_WHEN_MAX = 500
+
+    /** Whether the desktop takes objective changes and levels of effort from the phone: it sends `projects`. */
+    fun canChangeObjectives(view: SelfWorkView) = view.projects != null
+
+    /**
+     * Whether each project's level of effort has − and +. The levels total 100%, so Rem's only project holds 100% and
+     * the desktop refuses any other number for it: then the project's line shows its level of effort without buttons.
+     */
+    fun canChangeEffort(view: SelfWorkView) = canChangeObjectives(view) && view.projects.orEmpty().size > 1
+
+    /** A project's threads now against its share, as the desktop words it: "2 of 7 threads". */
+    fun projectThreads(project: SelfWorkProject) = "${project.runningThreads} of ${project.targetThreads} ${if (project.targetThreads == 1) "thread" else "threads"}"
+
+    /** A project section's second line: its level of effort and threads. */
+    fun projectLine(project: SelfWorkProject) = "Level of effort ${project.effortPercent}% · ${projectThreads(project)}"
+
+    /** `selfwork.settings` params that set one project's level of effort; the desktop rescales the others to total 100. */
+    fun effortParams(settings: SelfWorkSettings, projectId: String, percent: Int) = JSONObject().put("expected_revision", settings.revision)
+        .put("project_effort", JSONObject().put(projectId, percent.coerceIn(0, EFFORT_MAX)))
+
+    /** `selfwork.objectives` params that add an objective: a global one, or [projectId]'s own. Null with no text. */
+    fun addObjectiveParams(objectives: SelfWorkObjectives, text: String, doneWhen: String, projectId: String? = null): JSONObject? {
+        val goal = text.trim().take(OBJECTIVE_TEXT_MAX).takeIf { it.isNotBlank() } ?: return null
+        return JSONObject().put("action", "add").put("text", goal).put("done_when", doneWhen.trim().take(OBJECTIVE_DONE_WHEN_MAX))
+            .put("expected_revision", objectives.revision).apply { projectId?.takeIf { it.isNotBlank() }?.let { put("project_id", it) } }
+    }
+
+    /**
+     * `selfwork.objectives` params that edit an objective's text and finish line. [scope] is where it applies: a project ID,
+     * [EVERY_PROJECT] for the global ones, or null to leave it where it is, as an older desktop (not [SelfWorkObjectives.movable])
+     * needs. Null with no text.
+     */
+    fun editObjectiveParams(objectives: SelfWorkObjectives, item: SelfWorkObjective, text: String, doneWhen: String, scope: String? = null): JSONObject? {
+        val goal = text.trim().take(OBJECTIVE_TEXT_MAX).takeIf { it.isNotBlank() } ?: return null
+        return JSONObject().put("action", "edit").put("id", item.id).put("text", goal).put("done_when", doneWhen.trim().take(OBJECTIVE_DONE_WHEN_MAX))
+            .put("expected_revision", objectives.revision).apply {
+                when {
+                    scope == null || !objectives.movable -> Unit
+                    scope == EVERY_PROJECT -> put("global", true)
+                    else -> put("project_id", scope)
+                }
+            }
+    }
+
+    /** An edit's Applies to for the global objectives, which steer every project. */
+    const val EVERY_PROJECT = ""
+
+    /** The list [item] is in: [EVERY_PROJECT] for the global ones, else its project's ID. */
+    fun objectiveScope(objectives: SelfWorkObjectives, item: SelfWorkObjective) =
+        objectives.projects.entries.firstOrNull { (_, own) -> own.items.any { it.id == item.id } }?.key ?: EVERY_PROJECT
+
+    /** `selfwork.objectives` params that check an objective off, or reopen a done one. */
+    fun toggleObjectiveParams(objectives: SelfWorkObjectives, item: SelfWorkObjective) = JSONObject()
+        .put("action", if (item.done) "uncheck" else "check").put("id", item.id).put("expected_revision", objectives.revision)
+
+    /**
+     * `selfwork.objectives` params for Ask Rem: the desktop has Rem read [projectId]'s project and add three to five broad,
+     * open-ended objectives self-work can follow for a whole session. Desktops whose objectives view has `askable` take it.
+     */
+    fun askObjectivesParams(projectId: String) = JSONObject().put("action", "ask").put("project_id", projectId)
+
+    /** What Ask Rem's button says when held down or read aloud. */
+    const val ASK_REM_HINT = "Rem reads this project's docs, code, recent commits, board and objectives, then adds 3 to 5 broad, " +
+        "open-ended objectives self-work can follow for a whole session."
+
+    /**
+     * What a project's Ask Rem row shows, as the desktop's askLine: whether the button waits, whether the line is an error, and
+     * the line. [sending] is this phone's own press until the desktop answers.
+     */
+    fun askLine(ask: ObjectiveAsk?, sending: Boolean = false): AskLine = when {
+        ask?.state == "asking" -> AskLine(true, false, ask.message)
+        sending -> AskLine(true, false, "Asking Rem…")
+        ask?.state == "failed" -> AskLine(false, true, ask.message)
+        ask?.state == "added" -> AskLine(false, false, ask.message)
+        else -> AskLine(false, false, "")
+    }
+
+    /** `selfwork.objectives` params that remove an objective. */
+    fun removeObjectiveParams(objectives: SelfWorkObjectives, item: SelfWorkObjective) = JSONObject()
+        .put("action", "remove").put("id", item.id).put("expected_revision", objectives.revision)
+
+    /** A project's own objectives, or an empty list when it has none yet. */
+    fun projectObjectives(objectives: SelfWorkObjectives, projectId: String) =
+        objectives.projects[projectId] ?: SelfWorkObjectives(emptyList(), 0, 0, 0, 0, objectives.revision)
 
     // Self-work objectives ------------------------------------------------------------------------------------------------
 
@@ -792,6 +963,8 @@ data class KanbanTicket(val id: String, val scope: String, val organizationId: S
                         val proposedOn: String = "",
                         /** Its finish line as stored: each non-empty line is one check its review makes. */
                         val doneWhen: String = "",
+                        /** False from an older desktop that doesn't send Done when, which then can't change it either. */
+                        val doneWhenKnown: Boolean = true,
                         /** The text of the open self-work objective it advances, or empty. */
                         val objective: String = "",
                         /** Why self-work leaves it while objectives are open, or empty. */
@@ -804,6 +977,8 @@ data class KanbanTicket(val id: String, val scope: String, val organizationId: S
     val uid get() = "$organizationId/$id"
     val owner get() = if (isRem) "Rem" else organizationName.ifBlank { "Organization" }
 }
+/** What the edit sheet holds for a Rem ticket: its five editable fields, and the ticket's revision they were read at. */
+data class TicketDraft(val title: String, val description: String, val priority: String, val kind: String, val doneWhen: String, val revision: Long)
 /** A move sent from this phone: [before] is the ticket as it was, [column] where it went. [back] marks an Undo. */
 data class KanbanMove(val before: KanbanTicket, val column: String, val back: Boolean = false) {
     fun params() = Kanban.moveParams(before, column)
@@ -897,8 +1072,12 @@ data class SelfWorkView(val settings: SelfWorkSettings, val limits: SelfWorkLimi
                         val accounts: List<SelfWorkAccount> = emptyList(),
                         /** When self-work stops; null from a desktop without stop conditions. */
                         val stop: SelfWorkStop? = null,
-                        /** Self-work's objectives; null from a desktop that doesn't send them. Read-only here: Rem's chat changes them. */
-                        val objectives: SelfWorkObjectives? = null)
+                        /** Self-work's objectives; null from a desktop that doesn't send them. Changed here when [projects] is set, else read-only. */
+                        val objectives: SelfWorkObjectives? = null,
+                        /** Rem's projects with their level of effort and threads; null from a desktop without them, which takes no objective changes. */
+                        val projects: List<SelfWorkProject>? = null)
+/** One of Rem's projects in self-work: its share of the threads in percent, and the threads it holds now against its target. */
+data class SelfWorkProject(val projectId: String, val name: String, val effortPercent: Int, val targetThreads: Int, val runningThreads: Int)
 /**
  * One self-work objective. [doneWhen] is its finish line, empty for an open-ended one; [doneBy] is `rem` or `user`;
  * [stale] marks one done in a self-work session that has ended.
@@ -906,10 +1085,24 @@ data class SelfWorkView(val settings: SelfWorkSettings, val limits: SelfWorkLimi
 data class SelfWorkObjective(val id: String, val text: String, val doneWhen: String, val done: Boolean, val doneBy: String, val doneEvidence: String,
                              val createdBy: String, val stale: Boolean)
 /** [items] are open first, then done, then stale, newest first in each; [open] and [done] count this session's, [stale] earlier ones, [total] all. */
-data class SelfWorkObjectives(val items: List<SelfWorkObjective>, val open: Int, val done: Int, val stale: Int, val total: Int) {
+data class SelfWorkObjectives(val items: List<SelfWorkObjective>, val open: Int, val done: Int, val stale: Int, val total: Int,
+                              /** The list's revision, which a change names so two devices can't overwrite each other. */
+                              val revision: Long = 0,
+                              /** Each of Rem's projects' own objectives, by project ID. */
+                              val projects: Map<String, SelfWorkObjectives> = emptyMap(),
+                              /** Whether an edit may move an objective to another project or the global ones; false from an older desktop. */
+                              val movable: Boolean = false,
+                              /** Each project's latest Ask Rem, by project ID. */
+                              val asking: Map<String, ObjectiveAsk> = emptyMap(),
+                              /** Whether the desktop takes Ask Rem from the phone; false from an older desktop. */
+                              val askable: Boolean = false) {
     val current get() = items.filterNot { it.stale }
     val staleItems get() = items.filter { it.stale }
 }
+/** One project's latest Ask Rem on the desktop: [state] is asking, added or failed; [message] is the line for the user. */
+data class ObjectiveAsk(val state: String, val message: String, val added: Int)
+/** An Ask Rem row: [busy] while Rem is writing (the button waits), [error] when [text] says why it failed. */
+data class AskLine(val busy: Boolean, val error: Boolean, val text: String)
 /** A ticket's objective line: [short] for its card, [detail] for its page; [off] when self-work leaves it. */
 data class TicketObjective(val off: Boolean, val short: String, val detail: String)
 /**

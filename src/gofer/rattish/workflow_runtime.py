@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import math
 import time
 import uuid
 from collections import OrderedDict
@@ -37,6 +38,7 @@ from gofer.rattish.runtime import (
     DEFAULT_NODE_HANDLERS,
     NodeExecutionResult,
     NodeHandlerRegistry,
+    PredicateTypeMismatchError,
     RuntimeErrorInfo,
     _error_document,
     _evaluate_predicate,
@@ -563,6 +565,15 @@ class _WorkflowScheduler:
             if result.cached_at is not None:
                 # No provider call was made: the activation records 0 tokens and $0.
                 self.usage.add_cached(node["id"], run_number)
+            for notice in result.notices:
+                self._emit_node_event(
+                    str(notice["type"]),
+                    node["id"],
+                    activation,
+                    run_number,
+                    attempt=attempts_before + attempt + 1,
+                    **{key: value for key, value in notice.items() if key != "type"},
+                )
             if result.outcome == "success" or attempt == node["execution"]["retry_count"]:
                 return result, attempt + 1
             details = result.error.details if result.error is not None else {}
@@ -572,19 +583,19 @@ class _WorkflowScheduler:
             # Another attempt would make more calls after a usage limit was crossed.
             if self.usage.stop_requested():
                 return result, attempt + 1
+            delay_ms = node["execution"]["retry_delay_ms"]
+            # A rate limit names how long to wait; waiting less would only fail again.
+            retry_after_ms = details.get("retry_after_ms")
+            if isinstance(retry_after_ms, int) and retry_after_ms > delay_ms:
+                delay_ms = retry_after_ms
             self._emit_node_event(
                 "node_retried",
                 node["id"],
                 activation,
                 run_number,
                 attempt=attempts_before + attempt + 1,
-                message=result.error.message if result.error else "Node failed; retrying.",
+                message=_retry_message(result.error, delay_ms),
             )
-            delay_ms = node["execution"]["retry_delay_ms"]
-            # A rate limit names how long to wait; waiting less would only fail again.
-            retry_after_ms = details.get("retry_after_ms")
-            if isinstance(retry_after_ms, int) and retry_after_ms > delay_ms:
-                delay_ms = retry_after_ms
             if delay_ms:
                 await anyio.sleep(delay_ms / 1000)
         raise AssertionError("An activation must execute at least one attempt.")
@@ -842,24 +853,39 @@ class _WorkflowScheduler:
         self, node: Mapping[str, Any], result: NodeExecutionResult, lineage_id: str
     ) -> list[Mapping[str, Any]]:
         routes = node["routes"]
-        conditionals = [route for route in routes if route["mode"] == "conditional"]
-        matched_conditionals = [
-            route
-            for route in conditionals
-            if result.outcome in route["eligible_outcomes"]
-            and not (
-                result.outcome == "allowed_failure" and _predicate_uses_output(route["predicate"])
-            )
-            and _evaluate_predicate(
-                route["predicate"],
-                result,
-                self.workflow_inputs,
-                self.trigger_events,
-                self.outputs_by_lineage.get(lineage_id, {}),
-                self.statuses_by_lineage.get(lineage_id, {}),
-                self.errors_by_lineage.get(lineage_id, {}),
-            )
-        ]
+        matched_conditionals = []
+        for route in routes:
+            if (
+                route["mode"] != "conditional"
+                or result.outcome not in route["eligible_outcomes"]
+                or (
+                    result.outcome == "allowed_failure"
+                    and _predicate_uses_output(route["predicate"])
+                )
+            ):
+                continue
+            try:
+                matches = _evaluate_predicate(
+                    route["predicate"],
+                    result,
+                    self.workflow_inputs,
+                    self.trigger_events,
+                    self.outputs_by_lineage.get(lineage_id, {}),
+                    self.statuses_by_lineage.get(lineage_id, {}),
+                    self.errors_by_lineage.get(lineage_id, {}),
+                )
+            except PredicateTypeMismatchError as exc:
+                # Neither this route nor otherwise is a safe guess, so the run stops here.
+                self.error = RuntimeErrorInfo(
+                    "workflow_control",
+                    "RATTISH_RUNTIME_PREDICATE_TYPE_MISMATCH",
+                    f"The condition on the route from {node['id']!r} to {route['target']!r} "
+                    f"failed: {exc}",
+                    {"node_id": node["id"], "target": route["target"], **exc.details()},
+                )
+                return []
+            if matches:
+                matched_conditionals.append(route)
         matched = [
             route
             for route in routes
@@ -1117,3 +1143,14 @@ def _used_provider(
     if version and result.cached_at is None:
         summary["provider_version"] = version
     return summary
+
+
+def _retry_message(error: RuntimeErrorInfo | None, delay_ms: int) -> str:
+    """The node_retried message: why the attempt failed and how long the next one waits."""
+    if not delay_ms:
+        return error.message if error else "Node failed; retrying."
+    seconds = math.ceil(delay_ms / 100) / 10
+    wait = f"{seconds:g} second{'' if seconds == 1 else 's'}"
+    if error is None:
+        return f"Node failed; retrying in {wait}."
+    return f"{error.message} Retrying in {wait}."

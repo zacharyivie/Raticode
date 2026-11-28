@@ -13,7 +13,7 @@ import pytest
 
 from gofer.ui.brain_folders import LEFT_OUT_REFUSAL
 from gofer.ui.server import GoferUiServer
-from tests.helpers.brain_library import wait_idle
+from tests.helpers.brain_library import wait_idle, write
 from tests.unit.test_brain_agent_tokens import OWNER, call
 
 
@@ -26,12 +26,6 @@ def api(tmp_path: Path):
     server.shutdown()
     server.server_close()
     thread.join(timeout=2)
-
-
-def write(root: Path, relative: str, text: str) -> None:
-    path = root / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 @pytest.fixture

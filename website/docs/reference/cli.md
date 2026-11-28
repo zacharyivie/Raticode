@@ -159,6 +159,13 @@ The commands above work on files. Everything stateful lives in the backend: Rem,
 
 The CLI finds a [headless backend](./headless.md) on its own. It can't find the desktop app's backend yet, because the app doesn't publish its address or token. With only the desktop app running, these commands can't reach it.
 
+When no backend answers (exit 6) or the backend refuses the token (exit 5), the error tells you what to do next:
+
+- **The desktop app is open with this data folder.** The error says so: `The Raticode desktop app is running with the data folder PATH, and its backend doesn't share its address or token with the CLI yet.` It links this section and doesn't suggest `Raticode serve --headless`, which would refuse to start beside the app anyway. New in 0.6.2.
+- **No backend is running for this data folder.** It suggests starting one with `Raticode serve --headless`, or pointing `RATICODE_URL` at a running backend. A 401 says the token was rejected, or that no token was found and where to put one.
+
+The CLI knows the desktop app is open because the app's backend holds the data folder's lock, `headless/.backend.lock`, and `headless/backend.json` beside it records only that it's the desktop app and its process ID. Neither file holds a token or an address.
+
 `Raticode api METHOD PATH` calls any endpoint, like `gh api`. Paths are relative to `/api`:
 
 ```bash

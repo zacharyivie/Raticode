@@ -89,7 +89,7 @@ const overview = {
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(__dirname, ".."), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", cacheDir: testViteCacheDir(), root: path.join(__dirname, ".."), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "usage-ui-test",
     resolveId(id) { if (id === "/usage-entry.jsx") return id; },
     load(id) { if (id === "/usage-entry.jsx") return `import React from "react"; import {createRoot} from "react-dom/client"; import SettingsPopover from "/src/components/SettingsPopover.jsx"; import {DEFAULT_APP_SETTINGS} from "/src/lib/settings.js"; import "/src/styles/index.css"; createRoot(document.getElementById("root")).render(React.createElement(SettingsPopover, {open: true, initialCategory: "usage", settings: DEFAULT_APP_SETTINGS}));`; },
@@ -428,7 +428,7 @@ async function main() {
   await wait("document.querySelector('.usage-chart-tooltip li[data-hovered]') !== null");
   assert.equal(await evaluate("document.querySelector('.usage-chart-tooltip li[data-hovered]').textContent.startsWith('Claude Code')"), true);
   const tip = await evaluate("document.querySelector('.usage-chart-tooltip').textContent");
-  assert.match(tip, /Week of Aug 31, 2026/);
+  assert.match(tip, /Week of Aug 31(, 2026)?/);
   assert.match(tip, /400 tokens/);
   assert.match(tip, /Claude Code300/);
   assert.match(tip, /75%/);
@@ -515,7 +515,8 @@ async function main() {
   await wait("document.querySelector('.usage-token-table') !== null");
   assert.ok(requests.some(request => request.url.startsWith("/api/usage/overview?range=custom&start=2026-03-10&end=2026-04-10&tz=")));
   assert.equal(await evaluate("localStorage.getItem('raticode.usage.tokenRange')"), JSON.stringify({ key: "custom", start: "2026-03-10", end: "2026-04-10" }));
-  assert.equal(await evaluate("document.querySelector('[role=tabpanel]:not([hidden]) .usage-filters').textContent.includes('Mar 10, 2026 to Apr 10, 2026')"), true);
+  // Dates in the current year leave the year out, like every date in the app.
+  assert.match(await evaluate("document.querySelector('[role=tabpanel]:not([hidden]) .usage-filters').textContent"), /Mar 10(, 2026)? to Apr 10(, 2026)?/);
   failRefresh = true;
   await click("Refresh usage");
   await wait("document.querySelector('[role=alert]')?.textContent.includes('Showing the last loaded results')");

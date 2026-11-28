@@ -5,10 +5,10 @@ require("./test-tmp.cjs");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { FRAME_NAME, MIN_SIZE, createBrowserWindowManager, placeOnScreen } = require("../browser-window.cjs");
+const { tempFolder } = require("./temp-folder.cjs");
 
 const LEFT = { id: 1, workArea: { x: 0, y: 0, width: 1920, height: 1040 } };
 const RIGHT = { id: 2, workArea: { x: 1920, y: 0, width: 2560, height: 1400 } };
@@ -65,7 +65,8 @@ class FakeWindow extends EventEmitter {
 }
 
 function setup({ displays = [LEFT, RIGHT], saved, beforeClose, closeTimeoutMs } = {}) {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-browser-window-"));
+  // Removed when the test that called setup() ends.
+  const dataDir = tempFolder("raticode-browser-window-");
   if (saved) fs.writeFileSync(path.join(dataDir, "browser-window.json"), JSON.stringify(saved));
   const main = new FakeWindow({ x: 0, y: 0, width: 1440, height: 960 });
   const screen = Object.assign(new EventEmitter(), {

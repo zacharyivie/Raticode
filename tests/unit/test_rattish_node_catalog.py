@@ -64,6 +64,8 @@ def test_catalog_text_does_not_change_the_contract_fingerprint() -> None:
     document = json.loads((PROJECT_ROOT / "rattish/contracts/read-file.json").read_text())
     reworded = {**document, "catalog": {**document["catalog"], "summary": "Something else"}}
     without = {key: value for key, value in document.items() if key != "catalog"}
+    for field in without["configuration_schema"]["properties"].values():
+        field.pop("description", None)
 
     assert contract_fingerprint(document) == contract_fingerprint(reworded)
     assert contract_fingerprint(document) == json_fingerprint(without)

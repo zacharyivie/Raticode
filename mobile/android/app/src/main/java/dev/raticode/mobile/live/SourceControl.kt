@@ -125,16 +125,7 @@ object SourceControl {
      * would refuse the unknown op; the open screen asks again once the desktop says it supports it.
      */
     fun dropQueuedReads(state: JSONObject): Boolean {
-        val outbox = state.optJSONArray("outbox") ?: return false
-        val kept = JSONArray()
-        for (i in 0 until outbox.length()) {
-            val event = JSONObject(outbox.getString(i))
-            val op = event.optJSONObject("payload")?.optString("op").orEmpty()
-            if (event.optString("type") != "desktop.read" || !isOp(op)) kept.put(outbox.getString(i))
-        }
-        if (kept.length() == outbox.length()) return false
-        state.put("outbox", kept)
-        return true
+        return Outbox.drop(state) { it.optString("type") == "desktop.read" && isOp(it.optJSONObject("payload")?.optString("op").orEmpty()) }
     }
 
     /** Unified diff lines without the file headers, with each line's number in the file it belongs to. */

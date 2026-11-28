@@ -12,6 +12,7 @@ import pytest
 
 from gofer.ui import second_brain
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
 
 ARCHIVE = "Rem Conversations"
@@ -23,13 +24,6 @@ REPORT = (
     "<html><head><title>Port plan</title></head><body><h1>Port plan</h1>"
     "<p>The harbor survey found two risks.</p></body></html>"
 )
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def make_brain(library: BrainLibrary, tmp_path: Path, *, archive: bool = True) -> dict[str, Any]:
@@ -48,6 +42,7 @@ def make_brain(library: BrainLibrary, tmp_path: Path, *, archive: bool = True) -
     return brain
 
 
+# Looks in one brain's documents, unlike the shared doc_at.
 def doc_at(library: BrainLibrary, brain: dict[str, Any], path: str) -> dict[str, Any]:
     return next(doc for doc in library.entities("documents", brain["id"]) if doc["path"] == path)
 

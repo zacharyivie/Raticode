@@ -81,13 +81,39 @@ def json_fingerprint(value: Any) -> str:
 # Keys that only change how editors present a node type. They never reach compiled IR,
 # so they stay out of the fingerprint and editing them can't invalidate saved workflows.
 PRESENTATION_KEYS = frozenset({"catalog"})
+# The help line an editor shows under each configuration field is presentation too.
+_FIELD_HELP_KEYS = frozenset({"description", "title"})
+
+
+def _without_field_help(schema: Any) -> Any:
+    """Drop description/title annotations from a configuration schema and its subschemas.
+
+    Only schema positions are walked, so a field that is itself named "description"
+    keeps its name.
+    """
+    if isinstance(schema, list):
+        return [_without_field_help(item) for item in schema]
+    if not isinstance(schema, Mapping):
+        return schema
+    result: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key in _FIELD_HELP_KEYS and isinstance(value, str):
+            continue
+        if key == "properties" and isinstance(value, Mapping):
+            result[key] = {name: _without_field_help(child) for name, child in value.items()}
+        elif key in {"items", "additionalProperties", "anyOf"}:
+            result[key] = _without_field_help(value)
+        else:
+            result[key] = value
+    return result
 
 
 def contract_fingerprint(document: Mapping[str, Any]) -> str:
     """Fingerprint the parts of a contract that affect compilation and runtime."""
-    return json_fingerprint(
-        {key: value for key, value in document.items() if key not in PRESENTATION_KEYS}
-    )
+    identity = {key: value for key, value in document.items() if key not in PRESENTATION_KEYS}
+    if "configuration_schema" in identity:
+        identity["configuration_schema"] = _without_field_help(identity["configuration_schema"])
+    return json_fingerprint(identity)
 
 
 @dataclass(frozen=True, slots=True)

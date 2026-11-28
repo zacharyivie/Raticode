@@ -41,7 +41,7 @@ class _Comment:
 def format_rattish(source: str, *, source_id: str = "workflow.rattish") -> str:
     """Return the canonical spelling and layout of one strict Rattish document."""
     ast = parse_rattish(source, source_id=source_id)
-    rendered = _Renderer().document(ast)
+    rendered = _Renderer(source).document(ast)
     rendered = _attach_comments(rendered, _comments(source, ast))
     return "\n".join(line.text.rstrip() for line in rendered).rstrip() + "\n"
 
@@ -72,6 +72,9 @@ def _replace_text(path: Path, source: str) -> None:
 
 
 class _Renderer:
+    def __init__(self, source: str) -> None:
+        self._source_lines = source.splitlines()
+
     def document(self, ast: dict[str, Any]) -> list[_Line]:
         version = ast["version_directive"]
         lines = [self._line(f"rattish: {version['value']}", version)]
@@ -140,7 +143,8 @@ class _Renderer:
             for item in value["items"]:
                 prefix = "  " * depth
                 if item["kind"] == "map":
-                    lines.append(self._line(f"{prefix}-", item, exact=True))
+                    dash = self._dash_line(item)
+                    lines.append(_Line(f"{prefix}-", dash, dash))
                     lines.extend(self._map_entries(item, depth + 1))
                 else:
                     lines.append(
@@ -154,6 +158,20 @@ class _Renderer:
         if value["kind"] == "map":
             return self._map_entries(value, depth)
         raise ValueError(f"Unsupported block value kind {value['kind']!r}.")
+
+    def _dash_line(self, item: dict[str, Any]) -> int:
+        """Return the source line of the bare '-' above a map list item.
+
+        The item's span starts at its first entry, and only blank or comment lines can
+        sit between that entry and its '-'.
+        """
+        line = int(item["span"]["start"]["line"]) - 1
+        while line > 1:
+            text = self._source_lines[line - 1].strip()
+            if text and not text.startswith("#"):
+                break
+            line -= 1
+        return line
 
     def _map_entries(self, value: dict[str, Any], depth: int) -> list[_Line]:
         lines: list[_Line] = []
@@ -319,8 +337,12 @@ class _Renderer:
     def _line(text: str, node: dict[str, Any], *, exact: bool = False) -> _Line:
         span = node["span"]
         start = span["start"]["line"]
-        end = start if exact else max(start, span["end"]["line"])
-        return _Line(text, start, end)
+        end = span["end"]["line"]
+        # A span that stops at column 1 ends with the previous line's newline, so a
+        # comment on the next line must not attach here.
+        if span["end"]["column"] == 1:
+            end -= 1
+        return _Line(text, start, start if exact else max(start, end))
 
 
 def _attach_comments(lines: list[_Line], comments: list[_Comment]) -> list[_Line]:

@@ -1,4 +1,5 @@
-import { createLogger, defineConfig } from "vite";
+import { fileURLToPath } from "node:url";
+import { createLogger, defineConfig, searchForWorkspaceRoot } from "vite";
 import react from "@vitejs/plugin-react";
 import { developmentApiProxy } from "./dev/api-proxy.js";
 import { bundleBudget } from "./benchmarks/bundle-budget.js";
@@ -42,6 +43,8 @@ export default defineConfig({
     rolldownOptions: { plugins: [monacoPatches()] },
   },
   server: {
+    // What's new imports the repository's CHANGELOG.md, outside this folder.
+    fs: { allow: [searchForWorkspaceRoot(process.cwd()), fileURLToPath(new URL("../CHANGELOG.md", import.meta.url))] },
     proxy: {
       "/api": apiProxy.proxy,
     },

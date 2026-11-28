@@ -10,13 +10,7 @@ import pytest
 
 from gofer.ui import second_brain
 from gofer.ui.brain_library import BrainLibrary
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 
 
 def build(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:

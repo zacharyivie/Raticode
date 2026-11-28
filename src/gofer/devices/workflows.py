@@ -177,6 +177,9 @@ RUN_STATUS = {
     "stopped": "stopped",
     "disconnected": "interrupted",
 }
+# Run rows that say why the run stopped, cut like the desktop's run lists.
+ENDED_WITH_ERROR = frozenset({"failed", "interrupted", "stopped"})
+RUN_ERROR_LIMIT = 300
 NODE_STATUS = {
     "success": "succeeded",
     "allowed_failure": "failed",
@@ -663,15 +666,15 @@ class PhoneWorkflows:
         return name
 
     def _clean(self, value: Any, registered: Any, project: str, limit: int) -> str:
-        text = _text(value, 4000)
+        return self._hide_folders(_text(value, 4000), registered.project_root, project)[:limit]
+
+    def _hide_folders(self, text: str, root: Any, project: str) -> str:
+        """Names the project and Raticode's data folder instead of their paths."""
         base = self.base
-        for folder, label in (
-            (str(registered.project_root), project),
-            (str(base) if base else "", "Raticode data"),
-        ):
+        for folder, label in ((str(root), project), (str(base) if base else "", "Raticode data")):
             if folder:
                 text = text.replace(folder, label)
-        return text[:limit]
+        return text
 
     # Reads -------------------------------------------------------------------
 
@@ -719,7 +722,7 @@ class PhoneWorkflows:
             # A workflow that no longer compiles still shows the graph it last ran.
             ir = (detail.get("rattishRun") or {}).get("compiled_snapshot")
         nodes, edges = self._graph(ir)
-        runs = [self._run(run) for run in data["runs"]["runs"]]
+        runs = [self._row(run, registered.project_root, project) for run in data["runs"]["runs"]]
         waiting = data["runs"]["awaitingNodes"]
         plan = data["plan"]
         shown = None
@@ -730,6 +733,9 @@ class PhoneWorkflows:
             # The detail was read last. A run that ended in between must not
             # show as both running and finished in one answer.
             fresh = {key: value for key, value in shown.items() if key not in {"error", "nodes"}}
+            error = self._message(detail.get("error"))
+            row_error = self._run_error(error, registered.project_root, project)
+            fresh.update(self._error_field(fresh["status"], row_error))
             runs = [fresh if run["run_id"] == shown["run_id"] else run for run in runs]
             if runs and runs[0]["run_id"] == shown["run_id"]:
                 summary["latest_run"] = fresh
@@ -777,7 +783,7 @@ class PhoneWorkflows:
             if project is None:
                 continue  # Closed on the desktop after the read.
             usage = run.get("usage") or {}
-            shown = self._run(run)
+            shown = self._row(run, run["projectRoot"], project)
             if switched(run.get("fallbacks")):
                 # The phone shows this line under each run; the run detail names the providers.
                 shown["summary"] = f"{shown['summary']} · switched provider"
@@ -815,10 +821,12 @@ class PhoneWorkflows:
 
     def _trigger(self, item: dict[str, Any], registered: Any, project: str) -> dict[str, Any]:
         """A trigger as the phone lists it. A webhook's address and token stay here."""
+        from gofer.rattish.triggers import describe_trigger
+
         record = item["record"]
         config = record.config
         if record.kind == "cron":
-            description = f"{config.get('expression')} ({config.get('timezone')})"
+            description = describe_trigger(record)
         elif record.kind == "file":
             pattern = "" if config.get("glob") in {None, "*"} else f" ({config.get('glob')})"
             description = f"{config.get('path')}{pattern}"
@@ -954,15 +962,7 @@ class PhoneWorkflows:
 
     def _clean_long(self, value: str, registered: Any, project: str) -> str:
         """Like ``_clean`` for text longer than its 4000-character cut."""
-        text = value[: DIFF_LIMIT + 1]
-        base = self.base
-        for folder, label in (
-            (str(registered.project_root), project),
-            (str(base) if base else "", "Raticode data"),
-        ):
-            if folder:
-                text = text.replace(folder, label)
-        return text
+        return self._hide_folders(value[: DIFF_LIMIT + 1], registered.project_root, project)
 
     @staticmethod
     def _recency(item: dict[str, Any]) -> str:
@@ -973,7 +973,7 @@ class PhoneWorkflows:
         registered = item["registered"]
         ir = item["ir"]
         runs = item["runs"]["runs"]
-        latest = self._run(runs[0]) if runs else None
+        latest = self._row(runs[0], registered.project_root, project) if runs else None
         if ir is None:
             status, description = "invalid", INVALID
         else:
@@ -996,8 +996,34 @@ class PhoneWorkflows:
             "file_inputs": _file_inputs(ir),
         }
 
+    def _row(self, run: dict[str, Any], root: Any, project: str) -> dict[str, Any]:
+        """A run list's row, with a failed run's error naming folders like the rest."""
+        return self._run(run, self._run_error(run.get("error"), root, project))
+
+    def _run_error(self, value: Any, root: Any, project: str) -> str:
+        text = self._hide_folders(_text(value, RUN_ERROR_LIMIT), root, project)
+        # Run lists keep the first 300 characters, which can end partway through a folder's
+        # path, after the whole-path names above no longer match it.
+        for folder in (str(root), str(self.base) if self.base else ""):
+            for length in range(min(len(folder) - 1, len(text)), 1, -1):
+                if text.endswith(folder[:length]):
+                    return text[:-length] + "…"
+        return text
+
     @staticmethod
-    def _run(run: dict[str, Any]) -> dict[str, Any]:
+    def _message(error: Any) -> Any:
+        """A run record's error message; older records keep it as plain text."""
+        return error.get("message") if isinstance(error, dict) else error
+
+    @staticmethod
+    def _error_field(status: str, error: str) -> dict[str, str]:
+        """Why a run stopped, for the rows of runs that ended badly; nothing for the rest."""
+        if status in ENDED_WITH_ERROR and error:
+            return {"error": error[:RUN_ERROR_LIMIT]}
+        return {}
+
+    @staticmethod
+    def _run(run: dict[str, Any], error: str = "") -> dict[str, Any]:
         status = RUN_STATUS.get(str(run.get("status")), _text(run.get("status"), 40))
         if run.get("stopRequested") and status == "running":
             status = "stopping"
@@ -1027,6 +1053,7 @@ class PhoneWorkflows:
             "summary": summary,
             "duration_seconds": seconds,
             "resumed_from": _text(run.get("resumedFrom"), 128),
+            **PhoneWorkflows._error_field(status, error),
         }
 
     @staticmethod
@@ -1134,15 +1161,9 @@ class PhoneWorkflows:
                     "detail": line,
                 }
             )
-        error = detail.get("error") or {}
         return {
             **run,
-            "error": self._clean(
-                error.get("message") if isinstance(error, dict) else error,
-                registered,
-                project,
-                600,
-            ),
+            "error": self._clean(self._message(detail.get("error")), registered, project, 600),
             "nodes": nodes,
         }
 

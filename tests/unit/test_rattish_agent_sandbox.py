@@ -649,3 +649,28 @@ def test_triggers_section_and_cli_name_steps_that_widen_their_sandbox(tmp_path: 
     assert "Widens its sandbox: step 'fetch' (its shell can reach any host)." in " ".join(
         result.output.split()
     )
+
+
+def test_a_step_in_a_worktree_project_cant_change_the_repositorys_hooks_or_config(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    repo, work, data = tmp_path / "repo", tmp_path / "work", tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run([*git, "init", "-q", str(repo)], check=True)
+    subprocess.run([*git, "-C", str(repo), "commit", "-qm", "init", "--allow-empty"], check=True)
+    subprocess.run([*git, "-C", str(repo), "worktree", "add", "-q", str(work)], check=True)
+    common = (repo / ".git").resolve()
+
+    settings = claude_step_settings(
+        working_dir=work, data_dir=data, scratch=data / "s", extra_paths=[], network=[]
+    )
+
+    files = settings["sandbox"]["filesystem"]
+    assert str(common) in files["allowWrite"]
+    for path in (common / "hooks", common / "config", common / "worktrees/work/commondir"):
+        assert str(path) in files["denyWrite"]
+        assert f"Edit(/{path}/**)" in settings["permissions"]["deny"]

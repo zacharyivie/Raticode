@@ -190,6 +190,8 @@ def test_rem_writes_only_high_order_goals(board, text):
 def test_rem_keeps_only_a_few_open_objectives_of_its_own(board):
     home, _, _ = board
     finish = "Its open reliability tickets are all done"
+    # On its own Rem adds only to an empty list, as one batch sharing one time.
+    stamp = objectives.now()
     for number in range(objectives.MAX_OPEN_BY_REM):
         change(
             home,
@@ -200,6 +202,7 @@ def test_rem_keeps_only_a_few_open_objectives_of_its_own(board):
             },
             actor="rem",
             source="self_work",
+            stamp=stamp,
         )
     with pytest.raises(objectives.ObjectiveRefused, match="at most"):
         change(
@@ -211,7 +214,44 @@ def test_rem_keeps_only_a_few_open_objectives_of_its_own(board):
             },
             actor="rem",
             source="self_work",
+            stamp=stamp,
         )
+
+
+@pytest.mark.parametrize("source", ["self_work", "own"])
+def test_on_its_own_rem_adds_no_objective_while_any_is_open(board, source):
+    home, _, _ = board
+    rems = dict(HARDEN_CLI)
+    # Open-ended or with a finish line, global or one project's, the user's or Rem's own:
+    # any open objective holds Rem back.
+    for opened in (
+        {"text": "Bolster existing logic throughout the studio"},
+        {"text": "Improve UX quality of the board", "done_when": "No board UX ticket open"},
+        {"text": "Speed up the research tools", "project": project_of(home)},
+    ):
+        change(home, {"action": "add", **opened}, actor="user")
+        with pytest.raises(objectives.ObjectiveRefused, match="still open") as refused:
+            change(
+                home, {"action": "add", **rems}, actor="rem", source=source, stamp=objectives.now()
+            )
+        assert refused.value.code == "unauthorized"
+        assert every_text(home) == [opened["text"]]
+        with home.store.read() as db:
+            [item] = objectives.read(db, home.store)["items"]
+        change(home, {"action": "remove", "id": item["id"]}, actor="user")
+    # Rem's own open one, from before, holds it back too.
+    change(home, {"action": "add", **rems}, actor="rem", source=source)
+    with pytest.raises(objectives.ObjectiveRefused, match="still open"):
+        change(
+            home,
+            {"action": "add", "text": UX, "done_when": "No studio UX ticket is left open"},
+            actor="rem",
+            source=source,
+        )
+    # The user, directly or by asking in chat, may always add more.
+    change(home, {"action": "add", "text": "Keep the docs honest"}, actor="user")
+    change(home, {"action": "add", "text": UX}, actor="rem", source="chat")
+    assert sorted(texts(home)) == sorted([HARDEN_CLI["text"], "Keep the docs honest", UX])
 
 
 def test_rem_checks_off_only_against_written_criteria_with_evidence(board):
@@ -547,42 +587,134 @@ def test_research_proposals_record_the_objective_they_serve(board):
     assert stored(home, "Faster file listing").get("objective_id") == perf
 
 
-def test_running_out_of_work_lets_rem_add_objectives_and_research_again(board):
-    home, fake, _ = board
-    change(home, {"action": "add", "text": "Raise UX quality of the studio"}, actor="user")
-    set_options(home, max_threads=4)
-    fake.answers[f"Find work for “{UX}” in project"] = (
+def session_of(home: RemHome) -> dict[str, Any]:
+    with home.store.read() as db:
+        return dict(home.store.setting(db, "self_work_state")["session"])
+
+
+def every_text(home: RemHome) -> list[str]:
+    """Every objective's text, each project's own included."""
+    with home.store.read() as db:
+        return [i["text"] for i in objectives.read(db, home.store)["items"]]
+
+
+def out_of_work(home: RemHome, fake: Any, goal: str) -> None:
+    """Research for ``goal`` finds nothing, so self-work runs out of work."""
+    fake.answers[f"Find work for “{goal}” in project"] = (
         'Done.\n```json\n{"proposals":[],"duplicates":[]}\n```'
     )
-    prompts = planner(
+
+
+HARDEN_CLI = {
+    "text": "Harden the command line against bad input",
+    "done_when": "Every CLI command rejects a malformed path with a clear error",
+}
+# The user's open-ended objectives, and the three Rem added beside them on 2026-11-26.
+USERS_OPEN_ENDED = [
+    "Bolster existing logic throughout the studio",
+    "Improve UX quality across the studio",
+    "Remove dead, overly complex and duplicated code",
+]
+RIVALS = [
+    {
+        "text": "Restore a clean, trustworthy full test suite",
+        "done_when": "The full test suite passes twice in a row with no skipped failures",
+    },
+    {
+        "text": "Improve reliability of unattended workflow runs",
+        "done_when": "Every unattended run failure in this session's research has a fix",
+    },
+    {
+        "text": "Strengthen test coverage of recently split modules",
+        "done_when": "Each module split out this month has its own test file",
+    },
+]
+
+
+def test_out_of_work_rem_adds_nothing_beside_the_users_open_ended_objectives(board):
+    home, fake, _ = board
+    for text in USERS_OPEN_ENDED:
+        change(home, {"action": "add", "text": text}, actor="user")
+    set_options(home, max_threads=4)
+    for text in USERS_OPEN_ENDED:
+        out_of_work(home, fake, text)
+    prompts = planner(home, {"objectives": RIVALS})
+    at(home, 15)
+    tick(home)
+    wait_for(lambda: quiet(home) and bool(session_of(home).get("exhausted")), 8)
+    planned(home)
+    # Rem can't check off an open-ended objective, so it doesn't even ask its model.
+    assert prompts == []
+    assert sorted(texts(home)) == sorted(USERS_OPEN_ENDED)
+    said = [m["body"] for m in home.store.conversation()["messages"]]
+    assert not any("added self-work objectives" in body for body in said)
+    # Nor may a plan Rem's model wrote on its own add one while those are open.
+    plan = objectives.PlannedObjectives.model_validate({"objectives": RIVALS})
+    home.self_work._apply_plan("out_of_work", str(session_of(home)["id"]), plan)
+    assert sorted(texts(home)) == sorted(USERS_OPEN_ENDED)
+
+
+def test_out_of_work_rem_adds_objectives_only_once_none_is_open(board):
+    home, fake, _ = board
+    change(
         home,
         {
-            "objectives": [
-                {
-                    "text": "Harden the command line against bad input",
-                    "done_when": "Every CLI command rejects a malformed path with a clear error",
-                }
-            ]
+            "action": "add",
+            "text": "Speed up the studio's slowest screens",
+            "done_when": "Each of the studio's screens opens in under a second",
         },
+        actor="user",
     )
+    goal = listed(home)[0]
+    set_options(home, max_threads=4)
+    out_of_work(home, fake, goal["text"])
+    done = {"id": goal["id"], "evidence": "The screen timing test shows each under 0.4 s."}
+    prompts = planner(home, {"objectives": [HARDEN_CLI], "done": [done]})
     at(home, 15)
     tick(home)
     wait_for(lambda: quiet(home) and home.self_work._planner is not None, 8)
     planned(home)
-    assert len(prompts) == 1 and "run out of work" in prompts[0]
-    assert "Harden the command line against bad input" in texts(home)
-    with home.store.read() as db:
-        session = home.store.setting(db, "self_work_state")["session"]
-    assert session["round"] == 1, "new objectives start a new research round at once"
+    assert len(prompts) == 1 and "objectives are still open" in prompts[0]
+    # It checked the open one off first, so the list was empty when it added its own.
+    by_text = {i["text"]: i for i in listed(home)}
+    assert by_text[goal["text"]]["done"] and by_text[goal["text"]]["done_by"] == "rem"
+    assert not by_text[HARDEN_CLI["text"]]["done"]
+    said = [m["body"] for m in home.store.conversation()["messages"]]
+    assert any("Ran out of work with every objective done" in body for body in said)
+    assert session_of(home)["round"] == 1, "new objectives start a new research round at once"
     # The research after it looks for work on the new objective.
     wait_for(
         lambda: (
             not tick(home)
-            and "Find work for “Harden the command line against bad input” in project"
-            in worker_titles(fake)
+            and f"Find work for “{HARDEN_CLI['text']}” in project" in worker_titles(fake)
         ),
         8,
     )
+
+
+def test_out_of_work_rem_adds_none_while_one_it_could_not_check_off_stays_open(board):
+    home, fake, _ = board
+    for text, finish in (
+        ("Speed up the studio's slowest screens", "Each studio screen opens in under a second"),
+        ("Harden the board against lost edits", "No board edit is lost in the stress test"),
+    ):
+        change(home, {"action": "add", "text": text, "done_when": finish}, actor="user")
+    first, second = listed(home)
+    set_options(home, max_threads=4)
+    out_of_work(home, fake, first["text"])
+    out_of_work(home, fake, second["text"])
+    done = {"id": first["id"], "evidence": "The board stress test lost no edit in 500 runs."}
+    prompts = planner(home, {"objectives": [HARDEN_CLI], "done": [done]})
+    at(home, 15)
+    tick(home)
+    wait_for(lambda: quiet(home) and home.self_work._planner is not None, 8)
+    planned(home)
+    assert len(prompts) == 1
+    by_text = {i["text"]: i for i in listed(home)}
+    assert by_text[first["text"]]["done"] and not by_text[second["text"]]["done"]
+    assert HARDEN_CLI["text"] not in by_text
+    said = " ".join(m["body"] for m in home.store.conversation()["messages"])
+    assert "added self-work objectives" not in said and "Left out" not in said
 
 
 # The objectives are a hard gate -----------------------------------------------------

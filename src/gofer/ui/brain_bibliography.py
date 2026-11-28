@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from gofer.ui.brain_documents import MAX_TEXT, safe_relative, source_path
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
+from gofer.utils.paths import chosen_destination
 
 if TYPE_CHECKING:
     from gofer.ui.brain_library import BrainLibrary
@@ -139,6 +140,7 @@ def bibliography_operation(library: BrainLibrary, params: dict[str, Any]) -> dic
         target = Path(params["path"])
         if not target.is_absolute() or target.exists():
             raise ValueError("Choose a new absolute bibliography filename")
+        target = chosen_destination(target)
         items = []
         for doc in library.entities("documents", brain["id"]):
             item = doc.get("metadata", {}).get("bibliography") or {

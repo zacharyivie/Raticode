@@ -28,6 +28,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from gofer.rattish.triggers import describe_cron
 from gofer.ui.rem_home_models import ACTIVE, WEEKDAYS, Recipe, RemConflict, now
 from gofer.ui.rem_home_store import NEWEST_RUN
 
@@ -85,7 +86,9 @@ def describe_schedule(schedule: dict[str, Any]) -> str:
         days = ", ".join(day.title() for day in schedule.get("weekdays") or [])
         return f"every {days} at {schedule.get('local_time')} ({zone})"
     if kind == "cron":
-        return f"cron {schedule.get('cron')} ({zone})"
+        cron = str(schedule.get("cron") or "")
+        words = describe_cron(cron)
+        return f"{words[0].lower()}{words[1:]} ({zone})" if words else f"cron {cron} ({zone})"
     return str(kind or "once")
 
 

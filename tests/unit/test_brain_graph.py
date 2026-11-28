@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from gofer.ui.brain_documents import extract
@@ -20,30 +21,17 @@ from gofer.ui.brain_graph import (
     windows,
 )
 from gofer.ui.brain_library import BrainLibrary
-from tests.helpers.brain_library import wait_idle
-
-# Building the graph after a scan takes longer than other library tasks.
-GRAPH_TIMEOUT = 20
-
-REPO = "/work/Raticode/Raticode"
-
-
-def html(title: str, body: str, meta: str = "") -> str:
-    return f"<html><head><title>{title}</title>{meta}</head><body><p>{body}</p></body></html>"
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
-
-
-def write(root: Path, relative: str, text: str) -> Path:
-    path = root / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return path
+from tests.helpers.brain_library import (
+    GRAPH_TIMEOUT,
+    REPO,
+    build_brain,
+    doc_at,
+    html,
+    topic_brain,
+    wait_idle,
+    write,
+)
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 
 
 def receipt_store(data_dir: Path, artifacts: list[dict[str, Any]], project_dir: str) -> None:
@@ -71,64 +59,6 @@ def receipt_store(data_dir: Path, artifacts: list[dict[str, Any]], project_dir: 
     )
     db.commit()
     db.close()
-
-
-def build_brain(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, Any], Path]:
-    root = tmp_path / "brain"
-    write(
-        root, "Reports/Raticode/org-audit.html", html("Organizations audit", "Tickets approvals.")
-    )
-    write(
-        root, "Reports/Taskurotta/release.html", html("Release handbook", "Signing notarization.")
-    )
-    write(
-        root,
-        "reports/rem/Reports/Raticode/search.html",
-        html("Search audit", "Vector search repair notes."),
-    )
-    write(root, "reports/rem/youtube/digest.md", "# Digest\n\nVideos about embeddings.\n")
-    write(
-        root,
-        "Notes/vectors.md",
-        "---\nproject: Agent Lab\n---\n# Vectors\n\nSee [[Notes/plain]] for cosine notes.\n",
-    )
-    write(root, "Notes/plain.md", "# Plain\n\nCosine similarity basics.\n")
-    write(
-        root, "Notes/meta.html", html("Meta", "Body.", '<meta name="project" content="Raticode">')
-    )
-    write(root, "Inbox/loose.md", "# Loose\n\nUnfiled idea.\n")
-    archive = root / "Rem Conversations"
-    write(archive, "README.raticode.md", "# Rem conversation archive\n")
-    snapshot = {
-        "messages": [{"body": f"Saved [link](<{root}/Reports/Raticode/org-audit.html>)"}],
-    }
-    write(archive, "threads/abc.json", json.dumps(snapshot))
-    write(
-        archive,
-        "index.json",
-        json.dumps(
-            {
-                "version": 1,
-                "threads": {
-                    "abc": {
-                        "threadId": "thread-1",
-                        "title": "Organizations audit thread",
-                        "projectRoot": f"{REPO}/.worktrees/org-fix",
-                        "updatedAt": "2026-11-04T10:00:00Z",
-                        "messageCount": 4,
-                        "snapshot": "threads/abc.json",
-                    }
-                },
-            }
-        ),
-    )
-    brain = library.open({"root": str(root)})
-    wait_idle(library, timeout=GRAPH_TIMEOUT)
-    return library.brain(brain["id"]), root
-
-
-def doc_at(library: BrainLibrary, path: str) -> dict[str, Any]:
-    return next(doc for doc in library.entities("documents") if doc["path"] == path)
 
 
 def test_project_names_roots_and_report_folders():
@@ -293,91 +223,6 @@ def test_combined_search_fuses_document_ranks(library, tmp_path, monkeypatch):
     assert {titles[hit["docId"]] for hit in exact["hits"]} == {"A", "C"}
 
 
-def topic_brain(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
-    root = tmp_path / "topics"
-    cooking = "pasta tomato sauce basil garlic simmer noodles kitchen recipe"
-    vectors = "vector embedding cosine index retrieval search ranking corpus"
-    for index in range(4):
-        write(root, f"cook/c{index}.md", f"# Cooking {index}\n\n{cooking} variant{index}\n")
-        write(root, f"search/s{index}.md", f"# Search {index}\n\n{vectors} variant{index}\n")
-    brain = library.open({"root": str(root)})
-    wait_idle(library, timeout=GRAPH_TIMEOUT)
-    return brain
-
-
-def test_topics_group_similar_documents_label_them_and_keep_ids(library, tmp_path):
-    brain = topic_brain(library, tmp_path)
-    first = library.topics(brain["id"])
-    assert first["basis"] == "words"
-    paths = {doc["id"]: doc["path"] for doc in library.entities("documents")}
-    groups = [{paths[d].split("/")[0] for d in topic["members"]} for topic in first["topics"]]
-    assert sorted(map(sorted, groups)) == [["cook"], ["search"]]
-    labels = " ".join(" ".join(topic["terms"]) for topic in first["topics"])
-    assert "pasta" in labels or "tomato" in labels or "sauce" in labels
-    assert all(-1.5 <= topic["x"] <= 1.5 for topic in first["topics"])
-    # A user's name sticks to its topic, and recomputing keeps topic identities.
-    topic = first["topics"][0]
-    library.put(
-        "topics",
-        {"id": topic["id"], "brainId": brain["id"], "name": "Mine", "members": topic["members"]},
-    )
-    library._topic_cache.clear()
-    second = library.topics(brain["id"])
-    assert {t["id"] for t in second["topics"]} == {t["id"] for t in first["topics"]}
-    assert next(t for t in second["topics"] if t["id"] == topic["id"])["label"] == "Mine"
-    layout = library.topic_layout(brain["id"], topic["id"])
-    assert {node["docId"] for node in layout["nodes"]} == set(topic["members"])
-
-
-def test_connections_label_evidence_suggestions_and_organization_use(library, tmp_path):
-    brain, root = build_brain(library, tmp_path)
-    vectors = doc_at(library, "Notes/vectors.md")
-    plain = doc_at(library, "Notes/plain.md")
-    library.observe(plain, "read", {"threadId": "thread-1", "projectRoot": REPO})
-    organization = {
-        "id": "org-1",
-        "config": {"name": "Lab", "slug": "lab", "projects": []},
-        "runtime": {
-            "tasks": [{"id": "task-9", "number": 9, "title": "Use cosine notes", "claim": ""}],
-            "knowledge": {
-                "k1": {
-                    "id": "k1",
-                    "title": "Plain",
-                    "summary": "",
-                    "body": "Cosine similarity basics.",
-                    "version": 1,
-                    "source": {"path": str(root / "Notes/plain.md")},
-                }
-            },
-            "links": {
-                "l1": {"id": "l1", "kind": "read", "from": "ticket:task-9", "to": "kb:k1"},
-            },
-            "claims": {
-                "c1": {
-                    "id": "c1",
-                    "taskId": "task-9",
-                    "text": "Uses the cosine basics",
-                    "evidence": {"kind": "quote", "entryId": "k1", "quote": "Cosine similarity"},
-                }
-            },
-        },
-    }
-    library.organization_source = lambda: [organization]
-    result = library.connections(plain["id"])
-    assert result["links"]["citedBy"] == [vectors["id"]]
-    kinds = {(item["kind"], item["basis"]) for item in result["usedBy"]}
-    assert ("thread", "observed") in kinds
-    assert ("ticket", "observed") in kinds and ("claim", "asserted") in kinds
-    ticket = next(item for item in result["usedBy"] if item["kind"] == "ticket")
-    assert ticket["ticket"] == "LAB-9" and ticket["organization"] == "Lab"
-    claim = next(item for item in result["usedBy"] if item["kind"] == "claim")
-    assert claim["state"] == "ok"
-    assert all(item["basis"] == "words" for item in result["similar"])
-    # A broken organization store never hides the note's own connections.
-    library.organization_source = lambda: (_ for _ in ()).throw(RuntimeError("down"))
-    assert library.connections(plain["id"])["links"]["citedBy"] == [vectors["id"]]
-
-
 def test_project_and_topic_records_are_validated(library, tmp_path):
     brain, _ = build_brain(library, tmp_path)
     saved = library.mutate(
@@ -424,6 +269,18 @@ def test_rem_thread_tools_record_reads_use_combined_search_and_save_history(
         return original(self, {**params, "mode": "exact"})
 
     monkeypatch.setattr(BrainLibrary, "search", spy)
+    embedded: list[str] = []
+
+    class Model:
+        """Stands in for the local embedding model, which tests never download."""
+
+        def embed(self, texts):
+            embedded.extend(texts)
+            return (np.array([1.0, 0.0], dtype=np.float32) for _ in texts)
+
+        query_embed = embed
+
+    monkeypatch.setattr(BrainLibrary, "_local_model", lambda self: Model())
 
     def serve(call, definitions, rules, name):
         call("search", {"query": "cosine"})
@@ -439,6 +296,7 @@ def test_rem_thread_tools_record_reads_use_combined_search_and_save_history(
         {"threadId": "thread-7", "projectRoot": REPO, "provider": "codex", "model": "gpt"},
     )
     assert searched == ["hybrid"]
+    assert embedded, "the combined search used no vectors"
     used = library.connections(plain["id"])["usedBy"]
     assert [(item["kind"], item["basis"], item["threadId"]) for item in used] == [
         ("thread", "observed", "thread-7")

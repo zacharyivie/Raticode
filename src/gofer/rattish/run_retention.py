@@ -18,19 +18,32 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Collection
+import sys
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from gofer.rattish.run_values import delete_run_files
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.logging import get_logger
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 logger = get_logger(__name__)
 
 DEFAULT_RETENTION_SETTINGS = {"keepDays": 14, "keepFailedDays": 30, "keepLast": 100}
 RETENTION_SETTINGS_FILE = "retention.json"
+RETENTION_LOCK_FILE = "retention.lock"
+UNREADABLE_RETENTION_MESSAGE = (
+    "Retention settings couldn't be read, so automatic clean-up is paused. "
+    "Save them again to resume."
+)
 # Saved statuses the Studio shows as failed runs; keepFailedDays applies to them.
 FAILED_RUN_STATUSES = frozenset({"failed", "preflight_failed", "invalid_inputs"})
 
@@ -70,25 +83,95 @@ def coerce_retention_settings(value: Any) -> dict[str, int]:
     return settings
 
 
-def saved_retention_settings(data_dir: Path, workflow_id: str) -> dict[str, int]:
-    """The workflow's own retention settings, else the global ones, else the defaults."""
+def retention_settings_path(data_dir: Path) -> Path:
+    return data_dir / "settings" / RETENTION_SETTINGS_FILE
+
+
+def read_retention_document(data_dir: Path) -> dict[str, Any] | None:
+    """The saved retention document, ``{}`` when there is none, or ``None`` if it can't be read.
+
+    ``None`` means the file exists but can't be read or isn't a JSON object. Clean-up deletes
+    nothing until the settings are saved again, so a damaged file never turns
+    long limits back into the defaults.
+    """
     try:
-        document = json.loads(
-            (data_dir / "settings" / RETENTION_SETTINGS_FILE).read_text(encoding="utf-8")
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        document = {}
-    if not isinstance(document, dict):
-        document = {}
+        text = retention_settings_path(data_dir).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeError):
+        return None
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def retention_workflows(document: dict[str, Any]) -> dict[str, Any]:
     workflows = document.get("workflows")
-    if isinstance(workflows, dict) and workflow_id in workflows:
+    return workflows if isinstance(workflows, dict) else {}
+
+
+def saved_retention_settings(data_dir: Path, workflow_id: str) -> dict[str, int] | None:
+    """The workflow's own retention settings, else the global ones, else the defaults.
+
+    ``None`` when the settings file can't be read.
+    """
+    document = read_retention_document(data_dir)
+    if document is None:
+        return None
+    workflows = retention_workflows(document)
+    if workflow_id in workflows:
         return coerce_retention_settings(workflows[workflow_id])
     return coerce_retention_settings(document.get("global"))
 
 
+@contextmanager
+def _retention_settings_lock(data_dir: Path) -> Iterator[None]:
+    """Hold settings/retention.lock against every thread and process for one save."""
+    path = retention_settings_path(data_dir).with_name(RETENTION_LOCK_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if sys.platform == "win32":
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)
+
+
+def save_retention_settings(data_dir: Path, workflow_id: str | None, settings: Any) -> None:
+    """Save one workflow's retention settings, or the global ones without ``workflow_id``.
+
+    The read, change and write happen under one lock, so saves at the same time
+    each keep the others' changes. A file that can't be read is replaced, which
+    resumes clean-up.
+    """
+    with _retention_settings_lock(data_dir):
+        document = read_retention_document(data_dir) or {}
+        workflows = retention_workflows(document)
+        if workflow_id:
+            workflows[workflow_id] = coerce_retention_settings(settings)
+        else:
+            document["global"] = coerce_retention_settings(settings)
+        document.setdefault("global", DEFAULT_RETENTION_SETTINGS)
+        document["workflows"] = workflows
+        replace_file(
+            retention_settings_path(data_dir),
+            json.dumps(document, indent=2, sort_keys=True).encode("utf-8"),
+        )
+
+
 def read_run_record(path: Path, *, settled: bool = False) -> RunRecord:
     """One run record, with a run whose runner is gone reported as interrupted."""
-    from gofer.rattish.run_service import effective_run_status
+    from gofer.rattish.run_service import effective_run_status, fold_run_journal
 
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -106,6 +189,9 @@ def read_run_record(path: Path, *, settled: bool = False) -> RunRecord:
             # This process saves a final record before the run stops counting as
             # active, so the run may have finished after the read.
             return read_run_record(path, settled=True)
+        if status == "interrupted":
+            document = fold_run_journal(path) or document
+            status = effective_run_status(document)
         document["status"] = status
     return RunRecord(document, path)
 
@@ -227,26 +313,19 @@ def prune_run_records(
     keep_last: int | None = None,
     keep_days: int | None = None,
     keep_failed_days: int | None = None,
-    use_saved_settings: bool = False,
     dry_run: bool = True,
     keep_run_ids: Collection[str] = (),
     full_candidates: bool = True,
 ) -> PruneResult:
     """Pick, and unless ``dry_run`` delete, run records the settings no longer keep.
 
-    With ``use_saved_settings`` the workflow's saved retention settings replace
-    the three limits. Unreadable records are counted in ``skipped`` and kept.
+    Unreadable records are counted in ``skipped`` and kept.
     Runs are picked from cached summaries. With ``full_candidates`` each
     candidate's full record is read before anything is deleted, for callers that
     show the candidates; otherwise their documents hold only the summary fields.
     """
     from gofer.rattish.run_service import is_rattish_run_being_resumed
 
-    if use_saved_settings:
-        settings = saved_retention_settings(data_dir, workflow_id)
-        keep_last = settings["keepLast"]
-        keep_days = settings["keepDays"]
-        keep_failed_days = settings["keepFailedDays"]
     records, skipped = summary_run_records(data_dir, workflow_id, directory)
     protected = _protected_by_status_and_approvals(records, data_dir, workflow_id) | set(
         keep_run_ids
@@ -294,10 +373,19 @@ def apply_run_retention(
     """Delete the workflow's runs that its saved retention settings no longer keep.
 
     Called after every run settles. Never raises: a failed clean-up must not
-    change the outcome of the run that triggered it.
+    change the outcome of the run that triggered it. Deletes nothing while the
+    settings file can't be read.
     """
     try:
         settings = saved_retention_settings(data_dir, workflow_id)
+        if settings is None:
+            logger.warning(
+                "Skipped clean-up of old runs of %s: %s couldn't be read. "
+                "Save the retention settings again to resume.",
+                workflow_id,
+                retention_settings_path(data_dir),
+            )
+            return []
         # Most workflows keep fewer runs than keepLast, so skip reading them.
         if run_record_count(directory) <= settings["keepLast"]:
             return []

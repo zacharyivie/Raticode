@@ -10,15 +10,9 @@ import pytest
 
 from gofer.ui import brain_library
 from gofer.ui.brain_library import BrainLibrary, open_to_others
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def mode(path: Path) -> int:

@@ -761,7 +761,7 @@ async def main():
                                     async def waiting_step(node, run_context, bindings):
                                         while not pathlib.Path(folder, "release-workflow").exists():
                                             await anyio.sleep(0.05)
-                                        return HandlerResult(True, {"stdout": "done", "stderr": "", "exit_code": 0})
+                                        return HandlerResult(True, {"stdout": "done", "stderr": "", "exit_code": 0, "truncated": False})
                                     async def fake_run(*args, **kwargs):
                                         return await run_rattish_file(*args, **kwargs, handlers=NodeHandlerRegistry({"raticode.bash_command": waiting_step}))
                                     workflow_api.run_rattish_file = fake_run

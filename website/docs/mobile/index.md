@@ -81,4 +81,13 @@ After pairing, the app opens on the first page of its bottom bar. By default tha
 
 **More › Bottom bar** lets you pick up to four pages and their order from Rem, Threads, Organizations, Swarms, Source control, Files, Workflows, Approvals, Usage, Voice assistant, Desktop settings, Developer log and Browser. **More** stays last and lists everything else.
 
+## Help and reporting a problem
+
+**More › Help** has two buttons, and both open in your browser:
+
+- **Documentation** opens these Raticode Mobile guides.
+- **Report a problem** opens a new GitHub issue with the phone app's version and your Android version already filled in, and a blank **What happened** section for you to write. It never adds file names, project names or settings. Review the issue before you submit it.
+
+You don't need to look up the version yourself. For the desktop app, use **Help › Report a Problem** in Raticode on the computer; see [Support](../support.md).
+
 See also [Permissions and local data](../advanced/security.md) and [Desktop fleet](../advanced/fleet.md).

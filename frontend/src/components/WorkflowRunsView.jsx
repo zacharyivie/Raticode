@@ -4,7 +4,8 @@ import { RunErrorReason, RunStatus } from "./RunSummary.jsx";
 import AskRemButton from "./AskRemButton.jsx";
 import { runCanAskRem } from "../lib/askRemAboutFailure.js";
 import { STATUS_FILTERS, TIME_RANGES, fetchAllWorkflowRuns, formatDuration, sinceLabel, startedByLabel, usageCells } from "../lib/allWorkflowRuns.js";
-import { formatRunAge, usageLimitWaitText } from "../lib/workflowRuns.js";
+import { usageLimitWaitText } from "../lib/workflowRuns.js";
+import { dateTime, timeAgo } from "../lib/timeText.js";
 import { switchedProvider } from "../lib/providerFallback.js";
 import { startPolling } from "../lib/refresh.js";
 import { budgetSummary, parseDailyLimit, pauseSummary, triggersApi } from "../lib/rattishTriggers.js";
@@ -16,7 +17,7 @@ const SELECT = "rounded-md border border-line bg-surface px-2 py-1 text-xs text-
 
 // One switch over every trigger on this computer. Pausing keeps each trigger's own
 // on/off setting, so turning it off again brings back exactly the ones that were on.
-export function TriggerPauseSwitch({ api = triggersApi, poll = startPolling }) {
+function TriggerPauseSwitch({ api = triggersApi, poll = startPolling }) {
   const [state, setState] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -54,7 +55,7 @@ const LIMIT_INPUT = "h-7 w-24 rounded-md border border-line bg-surface px-2 text
 
 // The optional limit over every triggered run on this computer, next to Pause all
 // triggers. Typed values stay as typed until Save.
-export function TriggerDailyLimit({ dailyBudget, save }) {
+function TriggerDailyLimit({ dailyBudget, save }) {
   const [editing, setEditing] = useState(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -188,7 +189,7 @@ export default function WorkflowRunsView({ request = null, onAskRem, onOpenRun, 
                 {onAskRem && runCanAskRem(run.status) ? <AskRemButton className="ml-2 align-middle" label={`Ask Rem about this failure in run ${run.id} of ${run.workflowName}`} onAsk={() => onAskRem(run)} /> : null}
                 <RunErrorReason className="mt-0.5" status={run.status} error={run.error} expandable />
               </td>
-              <td className="whitespace-nowrap px-3 py-2 text-muted" title={run.startedAt ? new Date(run.startedAt).toLocaleString() : undefined}>{formatRunAge(run.startedAt)}</td>
+              <td className="whitespace-nowrap px-3 py-2 text-muted" title={dateTime(run.startedAt) || undefined}>{timeAgo(run.startedAt)}</td>
               <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{formatDuration(run.durationSeconds, running)}</td>
               <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{tokens}</td>
               <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{cost}</td>

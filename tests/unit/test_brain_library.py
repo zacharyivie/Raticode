@@ -11,16 +11,11 @@ from typing import Any
 import pytest
 
 from gofer.ui import brain_library as library_module
+from gofer.ui import brain_packages
 from gofer.ui.brain_documents import checked_archive, extract, source_path
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_task
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def opened(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1413,15 +1408,15 @@ def test_document_export_is_plain_zip_and_html_preview_blocks_navigation(library
 def test_document_export_names_an_oversized_file_before_reading_any(library, tmp_path, monkeypatch):
     brain, _ = opened(library, tmp_path)
     (Path(brain["root"]) / "attachment.bin").write_bytes(b"x" * 4096)
-    monkeypatch.setattr(library_module, "MAX_FILE", 1024)
+    monkeypatch.setattr(brain_packages, "MAX_FILE", 1024)
     reads: list[str] = []
-    real_read = library_module.read_source
+    real_read = brain_packages.read_source
 
     def counted(root: Path, relative: str, *args: Any) -> bytes:
         reads.append(relative)
         return real_read(root, relative, *args)
 
-    monkeypatch.setattr(library_module, "read_source", counted)
+    monkeypatch.setattr(brain_packages, "read_source", counted)
     destination = tmp_path / "documents.zip"
     with pytest.raises(ValueError, match=r"^attachment\.bin is .* limit for one file"):
         library.export_package(

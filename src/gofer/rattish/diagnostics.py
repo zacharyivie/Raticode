@@ -120,6 +120,20 @@ def close_names(name: str, candidates: Iterable[str], *, limit: int = 3) -> list
     return [by_key[match] for match in matches]
 
 
+def replacement_details(
+    source: bytes, span: SourceSpan, name: str, candidates: Iterable[str]
+) -> dict[str, list[str]]:
+    """``{"replacements": [...]}`` when ``span`` covers exactly ``name`` and it has close names.
+
+    An editor swaps the span's text for one replacement as a one-click fix, so a span that
+    holds anything else, such as a quoted value or a whole declaration, gets none.
+    """
+    if source[span.start.offset : span.end.offset] != name.encode("utf-8"):
+        return {}
+    replacements = [match for match in close_names(name, candidates) if match != name]
+    return {"replacements": replacements} if replacements else {}
+
+
 def did_you_mean(name: str, candidates: Iterable[str]) -> tuple[str, ...]:
     """A one-item suggestion tuple naming the closest candidates, or nothing."""
     matches = close_names(name, candidates)

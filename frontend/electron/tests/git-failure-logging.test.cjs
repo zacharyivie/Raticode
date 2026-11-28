@@ -1,3 +1,4 @@
+require("./test-tmp.cjs");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { readGitStatus, readGitHistory } = require("../git-status.cjs");

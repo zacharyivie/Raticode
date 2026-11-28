@@ -20,6 +20,19 @@ A theme applies to later HTML reports, slides and PDFs, wherever they're saved. 
 
 Rem reads the selected theme and report format when it's about to write a report. It calls the `rules` tool of whichever report tools the thread has: `reports`, a research task's `rem_artifacts`, or `second_brain`. Its instructions only say to do that, so turns that never write a report don't carry the theme's text. A read-only review never saves a report, so it gets the theme as a file and reads it only when a check is about a report's format or design. The file sits in the reviewer's private scratch folder, or in Raticode's data folder for apps that are given access to it. An Antigravity review can only open the project, so it gets the theme in its instructions, as does any other thread with none of those tools.
 
+## Phones and narrow windows
+
+Every theme, including your own, comes with the same screen rules, and they win when a theme's design asks for something else. They keep a report readable on a phone with large text, in a narrow desktop pane and in a wide window:
+
+- The title never sits on top of the banner art on a phone: below 760px it follows the art.
+- Headings keep tight letter-spacing on small screens, and long words wrap instead of running off the edge.
+- The report says whether its colors are dark or light and sets a plain base color, so a phone's web view doesn't swap a dark page for white.
+- Text keeps at least 4.5:1 contrast, wide tables and diagrams scroll inside their own box, and the end of the report clears the phone's navigation bar.
+
+When Rem saves an HTML report without the `viewport` tag phones need, or without saying whether its colors are dark or light, the report is still saved as written and the save tool warns Rem, so the next one has them.
+
+These rules apply to reports written with Raticode 0.6.2 or later. Reports saved earlier keep their styling, but from Raticode Mobile 0.38.0 the phone viewer shows each one on its own base color (see [Files on your phone](../mobile/workspace.md)).
+
 ## Make your own
 
 1. Choose **New theme** and describe the design. You can attach references by dictation, paste or drag and drop: up to five files, 20 MB each, 40 MB total (the chat limits).

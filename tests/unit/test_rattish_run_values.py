@@ -68,7 +68,7 @@ class Fake:
                 [dict(event) for event in context.trigger_events],
             )
         )
-        result = {"stdout": node["id"], "stderr": "", "exit_code": 0}
+        result = {"stdout": node["id"], "stderr": "", "exit_code": 0, "truncated": False}
         if node["id"] in self.fail:
             self.fail.discard(node["id"])
             return HandlerResult(False, {**result, "exit_code": 1})

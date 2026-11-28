@@ -37,3 +37,29 @@ test("App.jsx leaves Rem's chat pane and thread helpers to their own files", () 
   assert.match(pane, /^export function ChatPane\(/m);
   assert.doesNotMatch(pane, /from "\.\.\/pages\/App\.jsx"/, "ChatPane must not import App");
 });
+
+// App() renders each of these once. They live in their own files so App.jsx holds App
+// and the helpers it shares; none of them may import App.jsx back.
+const APP_COMPONENT_FILES = {
+  "WorkflowSidebar.jsx": ["WorkflowSidebar"],
+  "WorkflowDialogs.jsx": ["CreateWorkflowDialog"],
+  "EmptyWorkspace.jsx": ["EmptyWorkspace", "WorkflowHealthPanel"],
+  "AppChrome.jsx": ["TopBar", "GlobalToolbar", "ApplicationMenus", "ApplicationMenuItem", "RecentProjectsMenuItem", "TextZoomBar", "RemSidePane"],
+};
+// WorkflowSaveStatus was deleted before the move. If it returns, it belongs in AppChrome.jsx.
+const REMOVED_APP_COMPONENTS = ["WorkflowSaveStatus"];
+
+test("App.jsx leaves its sidebar, dialogs, empty workspace and window chrome to their own files", () => {
+  const app = fs.readFileSync(new URL("../pages/App.jsx", import.meta.url), "utf8");
+  const moved = [...Object.values(APP_COMPONENT_FILES).flat(), ...REMOVED_APP_COMPONENTS];
+  assert.equal(moved.length, 12);
+  for (const name of moved) {
+    assert.doesNotMatch(app, new RegExp(`^(export )?(async )?(function|const|let|class) ${name}\\b`, "m"), `${name} is defined in App.jsx again`);
+  }
+  assert.ok(app.split("\n").length < 6250, "App.jsx is 6,250 lines or more");
+  for (const [file, names] of Object.entries(APP_COMPONENT_FILES)) {
+    const source = fs.readFileSync(new URL(`../components/${file}`, import.meta.url), "utf8");
+    for (const name of names) assert.match(source, new RegExp(`^(export )?function ${name}\\(`, "m"), `${name} isn't defined in ${file}`);
+    assert.doesNotMatch(source, /from "\.\.\/pages\/App\.jsx"/, `${file} must not import App.jsx`);
+  }
+});

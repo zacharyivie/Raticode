@@ -36,7 +36,7 @@ export function pageOrigin(url) {
   }
 }
 
-export function untrustedPageText(value) {
+function untrustedPageText(value) {
   return String(value ?? "")
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f‪-‮⁦-⁩]/g, "")

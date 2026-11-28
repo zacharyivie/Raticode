@@ -1,8 +1,10 @@
+import { clockTime } from "./timeText.js";
+
 const STORAGE_KEY = "taskurotta.workflow-runs.v1";
 const ACTIVE = new Set(["submitting", "queued", "running", "stopping", "claimed", "cancel_requested"]);
 const TERMINAL = new Set(["success", "error", "stopped", "cancelled"]);
 
-export function normalizeWorkflowRunStatus(run) {
+function normalizeWorkflowRunStatus(run) {
   const status = String(run.status ?? "").toLowerCase();
   if (["passed", "succeeded", "completed"].includes(status)) return "success";
   if (["failed", "failure"].includes(status)) return "error";
@@ -15,7 +17,7 @@ export function normalizeWorkflowRunStatus(run) {
   return run.success === true ? "success" : run.success === false ? "error" : "unknown";
 }
 
-export function runRecordKey(record) {
+function runRecordKey(record) {
   return JSON.stringify([
     record.projectPath ?? "", record.worktreePath ?? "",
     record.workflowId ?? "", record.runId ?? record.id ?? "",
@@ -167,20 +169,6 @@ export function workflowListStatus(workflow, records = [], { submitting = false 
   };
 }
 
-export function formatRunAge(value, now = Date.now()) {
-  const time = Date.parse(value ?? "");
-  if (!Number.isFinite(time)) return "";
-  const seconds = Math.max(0, Math.round((now - time) / 1000));
-  if (seconds < 45) return "just now";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
 export function exactWorkflowRunStopPath(record) {
   if (!record?.workflowId || !record?.runId || !["running", "queued"].includes(record.status) || record.stale) return null;
   return `/workflows/${encodeURIComponent(record.workflowId)}/runs/${encodeURIComponent(record.runId)}/stop`;
@@ -231,13 +219,12 @@ export function workflowRunProblems(nodes = {}, events = []) {
 }
 
 // A triggered run that hit its provider's usage limit and resumes after the reset, as
-// run lists show it: "Waiting for usage limit · resumes 05:02". "" for any other run.
-export function usageLimitWaitText(run, locale = undefined) {
+// run lists show it: "Waiting for usage limit · resumes 5:02 AM". "" for any other run.
+export function usageLimitWaitText(run) {
   const wait = run?.usageLimitWait;
   if (!wait) return "";
   const label = wait.label || "Waiting for usage limit";
   const resumeAt = wait.resumeAt ? new Date(wait.resumeAt) : null;
   if (!resumeAt || Number.isNaN(resumeAt.getTime())) return label;
-  const time = resumeAt.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
-  return `${label} · resumes ${time}`;
+  return `${label} · resumes ${clockTime(resumeAt)}`;
 }

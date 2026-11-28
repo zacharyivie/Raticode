@@ -16,6 +16,7 @@ command, option and help text is on the website. Regenerate it with
 
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import json
@@ -217,24 +218,22 @@ class GoferUiRequestHandler:
         except ValueError:
             return
         try:
-            if parsed.path.startswith("/api/rem/"):
-                self._dispatch_rem_home_request(method)
-                return
+            if method == "GET" and parsed.path == "/api/health":
+                pass
+            if (
+                method == "GET"
+                and parsed.path.startswith("/api/workflows/")
+                and parsed.path.endswith("/logs")
+            ):
+                pass
+            if method == "POST" and parsed.path in {{"/api/chat/steer", "/api/chat/stop"}}:
+                if parsed.path == "/api/chat/steer":
+                    pass
+            {extra}
             if parsed.path == "/api/swarms" or parsed.path.startswith("/api/swarms/"):
                 self._dispatch_swarm_request(method)
                 return
         finally:
-            pass
-
-    def _dispatch_rem_home_request(self, method):
-        parts = []
-        if parts[0] == "kanban":
-            pass
-        if method == "GET" and parts == ["tasks"]:
-            pass
-
-    def _rem_kanban_request(self, method, parts, known):
-        if method == "GET" and not parts:
             pass
 
     def _dispatch_rem_resources_request(self, method):
@@ -243,24 +242,6 @@ class GoferUiRequestHandler:
     def _dispatch_swarm_request(self, method):
         if method == "GET" and not swarm_id:
             pass
-
-    def _dispatch_GET(self):
-        if parsed.path == "/api/health":
-            pass
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/logs"):
-            pass
-        {extra}
-
-    def _dispatch_POST(self):
-        if parsed.path in {{"/api/chat/steer", "/api/chat/stop"}}:
-            if parsed.path == "/api/chat/steer":
-                pass
-
-    def _dispatch_PUT(self):
-        pass
-
-    def _dispatch_DELETE(self):
-        pass
 """
 
 
@@ -285,13 +266,11 @@ def test_reader_finds_a_newly_added_route() -> None:
         "GET /api/workflows/*/logs",
         "POST /api/chat/steer",
         "POST /api/chat/stop",
-        "GET /api/rem/tasks",
-        "GET /api/rem/kanban",
         "GET /api/swarms",
         "GET /api/rattish/triggers",
         "POST /api/worktree-setup/approve",
     } <= before
-    after = _routes('if parsed.path == "/api/brand-new":\n            pass')
+    after = _routes('if method == "GET" and parsed.path == "/api/brand-new":\n                pass')
     assert after - before == {"GET /api/brand-new"}
 
 
@@ -329,9 +308,265 @@ PILOT_ROUTES = {
 }
 
 
-def test_route_table_declares_the_trigger_secret_setup_and_shortcut_routes() -> None:
-    assert table_routes() == PILOT_ROUTES
-    assert PILOT_ROUTES <= backend_routes()
+# The Rem home and kanban routes _dispatch_rem_home_request and _rem_kanban_request
+# answered before they moved into the route table (dev a7ad6c12's parity reader).
+REM_ROUTES = {
+    "DELETE /api/rem/memories/*",
+    "DELETE /api/rem/tasks/*",
+    "GET /api/rem/calls",
+    "GET /api/rem/context",
+    "GET /api/rem/conversation",
+    "GET /api/rem/decisions",
+    "GET /api/rem/events",
+    "GET /api/rem/history",
+    "GET /api/rem/kanban",
+    "GET /api/rem/memories",
+    "GET /api/rem/messages",
+    "GET /api/rem/notices",
+    "GET /api/rem/objectives",
+    "GET /api/rem/runs/*",
+    "GET /api/rem/search",
+    "GET /api/rem/tasks",
+    "GET /api/rem/tasks/*",
+    "GET /api/rem/threads/*",
+    "GET /api/rem/threads/*/context",
+    "PATCH /api/rem/memories/*",
+    "PATCH /api/rem/tasks/*",
+    "POST /api/rem/context",
+    "POST /api/rem/decisions",
+    "POST /api/rem/decisions/paths",
+    "POST /api/rem/decisions/scan",
+    "POST /api/rem/kanban/participant",
+    "POST /api/rem/kanban/patch",
+    "POST /api/rem/kanban/report/seen",
+    "POST /api/rem/kanban/stop",
+    "POST /api/rem/kanban/ticket",
+    "POST /api/rem/kanban/timeline",
+    "POST /api/rem/kanban/window",
+    "POST /api/rem/memories",
+    "POST /api/rem/messages",
+    "POST /api/rem/messages/*/undo-memory",
+    "POST /api/rem/objectives",
+    "POST /api/rem/objectives/ask",
+    "POST /api/rem/reset",
+    "POST /api/rem/runs/*/acknowledge",
+    "POST /api/rem/runs/acknowledge",
+    "POST /api/rem/runs/*/cancel",
+    "POST /api/rem/runs/*/pause",
+    "POST /api/rem/runs/*/resume",
+    "POST /api/rem/runs/*/retry_review",
+    "POST /api/rem/runs/*/run_there",
+    "POST /api/rem/runs/*/wake",
+    "POST /api/rem/tasks",
+    "POST /api/rem/tasks/*/pause",
+    "POST /api/rem/tasks/*/run",
+    "POST /api/rem/tasks/*/workflow",
+    "POST /api/rem/threads/*/messages",
+    "PUT /api/rem/kanban/settings",
+    "PUT /api/rem/memory-mode",
+}
+
+
+# Moved out of _dispatch_GET, _dispatch_POST and _dispatch_DELETE with their manifest keys.
+WORKFLOW_ROUTES = {
+    "DELETE /api/workflows/*",
+    "GET /api/workflows",
+    "GET /api/workflows/*/approvals",
+    "GET /api/workflows/*/document",
+    "GET /api/workflows/*/events",
+    "GET /api/workflows/*/logs",
+    "GET /api/workflows/*/logs/*",
+    "GET /api/workflows/*/logs/latest",
+    "GET /api/workflows/*/retention",
+    "GET /api/workflows/*/run-worktrees",
+    "GET /api/workflows/*/tests",
+    "GET /api/workflows/*/tests/results/*",
+    "POST /api/workflows",
+    "POST /api/workflows/*/approvals/*/approve",
+    "POST /api/workflows/*/approvals/*/reject",
+    "POST /api/workflows/*/document/analyze",
+    "POST /api/workflows/*/document/mutate",
+    "POST /api/workflows/*/document/save",
+    "POST /api/workflows/*/duplicate",
+    "POST /api/workflows/*/logs/prune",
+    "POST /api/workflows/*/metadata",
+    "POST /api/workflows/*/plan",
+    "POST /api/workflows/*/rename",
+    "POST /api/workflows/*/retention",
+    "POST /api/workflows/*/run",
+    "POST /api/workflows/*/runs/*/resume",
+    "POST /api/workflows/*/runs/*/stop",
+    "POST /api/workflows/*/stop",
+    "POST /api/workflows/*/tests",
+    "POST /api/workflows/*/tests/estimate",
+    "POST /api/workflows/*/tests/results/*/stop",
+    "POST /api/workflows/*/tests/run",
+    "POST /api/workflows/convert-toml",
+}
+
+
+# Rem's chat routes, moved out of _dispatch_GET, _dispatch_POST and _dispatch_DELETE
+# with the keys the if-chain reader gave them.
+CHAT_ROUTES = {
+    "DELETE /api/chat",
+    "DELETE /api/chat/threads/*",
+    "GET /api/chat/attachments/locate",
+    "GET /api/chat/events",
+    "GET /api/chat/providers",
+    "GET /api/chat/steering",
+    "GET /api/chat/transcribe/engines",
+    "GET /api/chat/transcribe/model",
+    "POST /api/chat",
+    "POST /api/chat/attachments",
+    "POST /api/chat/attachments/copy",
+    "POST /api/chat/changes/redo",
+    "POST /api/chat/changes/undo",
+    "POST /api/chat/commit-message",
+    "POST /api/chat/steer",
+    "POST /api/chat/stop",
+    "POST /api/chat/stream",
+    "POST /api/chat/transcribe",
+    "POST /api/chat/transcribe/cancel",
+    "POST /api/chat/transcribe/chunk",
+    "POST /api/chat/transcribe/engines",
+    "POST /api/chat/transcribe/engines/test",
+    "POST /api/chat/transcribe/finish",
+    "POST /api/chat/transcribe/model",
+    "POST /api/chat/transcribe/start",
+    "POST /api/chat/voice-tidy",
+}
+
+
+# Rattish runs, cache and starters, MCP tools and organization webhooks, moved out of
+# _dispatch_request. Two keys are narrower than the if-chain's: mcp-tools answered every
+# method ("* /api/rem-resources/mcp-tools") and a webhook any path under its prefix.
+INLINE_ROUTES = {
+    "DELETE /api/rattish/cache",
+    "GET /api/rattish/cache",
+    "GET /api/rattish/runs",
+    "GET /api/rattish/runs/*/changes",
+    "GET /api/rattish/runs/*/failure",
+    "GET /api/rattish/starters",
+    "GET /api/rem-resources/mcp-tools",
+    "POST /api/organization-webhooks/*/*",
+    "POST /api/rattish/runs/*/discard",
+    "POST /api/rattish/runs/*/land",
+    "POST /api/rattish/runs/*/rerun",
+}
+
+
+# The provider, usage, computers, classifier, device, Rattish bundle and single routes,
+# the last ones moved out of _dispatch_GET, _dispatch_POST and _dispatch_DELETE before
+# those were deleted.
+FINAL_ROUTES = {
+    "DELETE /api/classifiers/jev/key",
+    "DELETE /api/provider/profiles/*",
+    "GET /api/classifiers/jev",
+    "GET /api/computers",
+    "GET /api/computers/placement",
+    "GET /api/devices",
+    "GET /api/doctor",
+    "GET /api/generation-jobs",
+    "GET /api/health",
+    "GET /api/instance/proof",
+    "GET /api/link-preview",
+    "GET /api/media-image",
+    "GET /api/provider/accounts",
+    "GET /api/provider/auth",
+    "GET /api/provider/capabilities",
+    "GET /api/provider/claude-accounts",
+    "GET /api/provider/commit-settings",
+    "GET /api/provider/profiles",
+    "GET /api/provider/voice-tidy",
+    "GET /api/retention",
+    "GET /api/usage/alerts",
+    "GET /api/usage/credentials",
+    "GET /api/usage/overview",
+    "GET /api/usage/verified-work",
+    "POST /api/classifiers/jev/check",
+    "POST /api/classifiers/jev/key",
+    "POST /api/classifiers/jev/settings",
+    "POST /api/computers",
+    "POST /api/computers/placement",
+    "POST /api/desktop/path-grants",
+    "POST /api/devices",
+    "POST /api/generation-jobs",
+    "POST /api/generation-jobs/dismiss",
+    "POST /api/projects/open",
+    "POST /api/provider/accounts",
+    "POST /api/provider/auth",
+    "POST /api/provider/claude-accounts",
+    "POST /api/provider/commit-message/clean",
+    "POST /api/provider/commit-settings",
+    "POST /api/provider/profiles",
+    "POST /api/provider/profiles/*/check",
+    "POST /api/provider/settings",
+    "POST /api/provider/voice-tidy",
+    "POST /api/rattish/workflows/*/export",
+    "POST /api/rattish/workflows/import",
+    "POST /api/rattish/workflows/import/preview",
+    "POST /api/report-themes/generate",
+    "POST /api/retention",
+    "POST /api/usage/alerts",
+    "POST /api/usage/credentials",
+    "POST /api/usage/refresh",
+}
+
+# Paths _dispatch_request still hands to a dispatcher of their own: body-action APIs,
+# social posts and swarms. Exact paths, then prefixes that cover their subpaths too.
+DISPATCHED_PATHS = {"/api/second-brains", "/api/rem-resources", "/api/organizations"}
+DISPATCHED_PREFIXES = ("/api/social", "/api/swarms")
+
+
+def _dispatched(key: str) -> bool:
+    path = key.split(" ", 1)[1].split("#", 1)[0]
+    return path in DISPATCHED_PATHS or any(
+        path == prefix or path.startswith(prefix + "/") for prefix in DISPATCHED_PREFIXES
+    )
+
+
+def test_route_table_declares_every_moved_route() -> None:
+    assert len(REM_ROUTES) == 53
+    assert len(WORKFLOW_ROUTES) == 33
+    assert len(CHAT_ROUTES) == 26
+    assert len(INLINE_ROUTES) == 11
+    assert len(FINAL_ROUTES) == 51
+    assert table_routes() == (
+        PILOT_ROUTES | REM_ROUTES | WORKFLOW_ROUTES | CHAT_ROUTES | INLINE_ROUTES | FINAL_ROUTES
+    )
+    routes = backend_routes()
+    body_routes = {"POST /api/rem/kanban/ticket", "POST /api/devices"}
+    moved = PILOT_ROUTES | REM_ROUTES | WORKFLOW_ROUTES | CHAT_ROUTES | INLINE_ROUTES | FINAL_ROUTES
+    assert moved - body_routes <= routes
+    # A body-action route reads as one key per action, as it did from the if-chain.
+    assert "POST /api/rem/kanban/ticket#move" in routes
+    assert "POST /api/devices#workspace_exchange" in routes
+
+
+def test_every_manifest_route_outside_the_dispatchers_is_read_from_the_table(
+    manifest,
+) -> None:
+    table = table_routes()
+    keys = [key for key in manifest["routes"] if not _dispatched(key)]
+    assert len(keys) > 200
+    assert sorted(key for key in keys if key.split("#", 1)[0] not in table) == []
+    # Nothing the dispatchers answer is in the table.
+    assert not {key for key in table if _dispatched(key)}
+
+
+def test_server_has_no_method_dispatchers_left() -> None:
+    from tests.helpers.cli_parity import SERVER
+
+    tree = ast.parse(SERVER.read_text())
+    names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    assert not names & {f"_dispatch_{verb}" for verb in ("GET", "POST", "PUT", "DELETE", "OPTIONS")}
+    assert "getattr(self, f'_dispatch_{method}'" not in ast.unparse(tree)
+
+
+def test_every_chat_manifest_key_is_a_route_table_key(manifest) -> None:
+    chat = {key for key in manifest["routes"] if key.split(" ", 1)[1].startswith("/api/chat")}
+    assert chat == CHAT_ROUTES
+    assert chat <= table_routes()
 
 
 def test_reader_finds_a_route_added_to_the_table() -> None:
@@ -354,16 +589,17 @@ def test_reader_refuses_a_route_in_both_the_table_and_an_if_chain() -> None:
 def test_reader_finds_a_route_nested_in_another_routes_body() -> None:
     before = _routes()
     nested = (
-        'if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/logs"):\n'
-        '            if parsed.path.endswith("/brand-new/logs"):\n'
-        "                pass"
+        'if method == "GET" and parsed.path.startswith("/api/workflows/")'
+        ' and parsed.path.endswith("/logs"):\n'
+        '                if parsed.path.endswith("/brand-new/logs"):\n'
+        "                    pass"
     )
     assert _routes(nested) - before == {"GET /api/workflows/*/brand-new/logs"}
     # A nested check that only repeats its route adds nothing.
     same = (
-        'if parsed.path == "/api/health":\n'
-        '            if parsed.path == "/api/health":\n'
-        "                pass"
+        'if method == "GET" and parsed.path == "/api/health":\n'
+        '                if parsed.path == "/api/health":\n'
+        "                    pass"
     )
     assert _routes(same) == before
 
@@ -371,8 +607,8 @@ def test_reader_finds_a_route_nested_in_another_routes_body() -> None:
 def test_reader_refuses_a_nested_check_that_cannot_match() -> None:
     nested = (
         'if parsed.path == "/api/health":\n'
-        '            if parsed.path == "/api/other":\n'
-        "                pass"
+        '                if parsed.path == "/api/other":\n'
+        "                    pass"
     )
     with pytest.raises(UnreadableRoute, match="never match"):
         _routes(nested)
@@ -457,7 +693,7 @@ def test_relabelled_entries_say_what_they_are(manifest) -> None:
 
 def test_reader_refuses_a_path_condition_it_cannot_read() -> None:
     with pytest.raises(UnreadableRoute):
-        _routes('if re.match(r"/api/x/\\d+", parsed.path):\n            pass')
+        _routes('if re.match(r"/api/x/\\d+", parsed.path):\n                pass')
 
 
 def test_org_hold_guard_matches_the_backend() -> None:

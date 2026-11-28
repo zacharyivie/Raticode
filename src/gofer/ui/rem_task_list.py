@@ -6,8 +6,8 @@ made every poll slow. ``TaskList`` keeps the last build and answers from it whil
 
 - the store's ``tasks`` change count (SQLite triggers on tasks, runs and the self-work
   window schedule) is the one it was built at,
-- the board's ticket revision (``RemKanban.ticket_revision``) and the objectives' revision
-  are the ones it was built at, and
+- the board's ticket revision (``RemKanban.ticket_revision``), the objectives' revision and
+  each project's Ask Rem progress are the ones it was built at, and
 - no time-based wait in it has come due since it was built (``next_due``): a waiting
   task's start time, a scheduled occurrence, a run waiting to retry or asleep, or a label
   such as "7:00 PM today" that reads the clock. A wait already past at the build doesn't
@@ -92,6 +92,8 @@ class Built:
     tickets_at: tuple[int, int] = (-1, -1)
     tickets: dict[str, dict[str, Any]] = field(default_factory=dict)
     objectives_at: int = -1
+    # Each project's Ask Rem progress as last built, which changes without a new revision.
+    asking: Any = None
     objectives: dict[str, Any] = field(default_factory=dict)
     version: str = ""
 
@@ -157,9 +159,13 @@ class TaskList:
                 built.tickets_at = tickets_at
                 stale = True
             objectives = self.objectives()
-            if objectives.get("revision") != built.objectives_at:
+            if (
+                objectives.get("revision") != built.objectives_at
+                or objectives.get("asking") != built.asking
+            ):
                 built.objectives = objectives
                 built.objectives_at = int(objectives.get("revision") or 0)
+                built.asking = objectives.get("asking")
                 stale = True
             result = {
                 "tasks": built.tasks,

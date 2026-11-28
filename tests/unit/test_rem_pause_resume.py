@@ -17,7 +17,7 @@ from gofer.ui.rem_home import RemHome, self_work_shortcut
 from gofer.ui.rem_home_models import RemConflict
 from gofer.ui.rem_home_store import RESUME_TEXT, RemHomeStore
 from gofer.ui.rem_kanban import KanbanRefused
-from gofer.ui.rem_self_work import PRIORITY_REASON
+from gofer.ui.rem_self_work import PRIORITY_REASON, user_resumed
 from tests.unit.test_rem_kanban import BASE, add, at, set_options, settle, tick, ticket, wait_for
 from tests.unit.test_rem_kanban import api_server as api_server
 from tests.unit.test_rem_kanban import board as board
@@ -219,6 +219,30 @@ def test_a_follow_up_on_a_paused_run_resumes_it_with_that_message(board):
     until(home, lambda: run_of(home, run["id"])["state"] == "succeeded")
     assert len([r for r in runs(home) if r["task_id"] == run["task_id"]]) == 1
     assert "Also check the docs" in worker_prompts(fake, run["thread_id"])[-1]
+
+
+def test_rems_unblock_follow_up_keeps_a_run_the_user_resumed_as_theirs(board):
+    home, fake, _ = board
+    fake.hold.clear()
+    run = start_task(home, "Mine to keep")
+    until(home, lambda: fake.working() == 1)
+    home.pause_run(run["id"], {"request_id": "p1"})
+    until(home, lambda: run_of(home, run["id"])["state"] == "paused")
+    home.resume_run(run["id"], {"request_id": "r1"})
+    assert user_resumed(run_of(home, run["id"]))
+    until(home, lambda: fake.working() == 1)
+    home.pause_run(run["id"], {"request_id": "p2"})
+    until(home, lambda: run_of(home, run["id"])["state"] == "paused")
+    # Self-work's unblock follow-up restarts it, but the user resumed it, so it stays theirs.
+    home.instruct(
+        run["thread_id"],
+        {"request_id": "unblock", "body": "Try the other approach"},
+        context={"source_message_id": "", "self_work": "unblock"},
+    )
+    current = run_of(home, run["id"])
+    assert current["resumed"]["by"] == "user" and user_resumed(current)
+    fake.hold.set()
+    until(home, lambda: run_of(home, run["id"])["state"] == "succeeded")
 
 
 def test_paused_during_review_resumes_with_a_fresh_review_of_the_saved_work(tmp_path):

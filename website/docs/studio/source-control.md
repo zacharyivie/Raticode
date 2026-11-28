@@ -33,6 +33,16 @@ Staged and deleted-file views are read-only. To correct something, edit the work
 - The commit box commits staged changes only.
 - Ctrl+Enter (Cmd+Enter on macOS) in the message box commits.
 
+A letter before each file says what changed. Hover over it to see the word. A screen reader reads the word when the file has focus.
+
+| Letter | Meaning |
+| --- | --- |
+| **M** | Modified: the file's content changed. |
+| **A** | Added: a new file Git is tracking. A renamed or copied file also shows **A**, with the path it came from. |
+| **D** | Deleted |
+| **U** | Untracked: a new file Git isn't tracking yet. Stage it to add it. |
+| **!** | Conflict: a merge or rebase left the file unresolved. Fix the file, then stage it. |
+
 <AppScreenshot name="source-control" caption="Changes with one staged file. Its diff marks the added line, and the commit message is ready." />
 
 The Rem button drafts a message from the change. It doesn't replace reading the diff.

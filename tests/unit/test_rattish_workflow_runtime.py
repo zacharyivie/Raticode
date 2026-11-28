@@ -31,7 +31,7 @@ def compile_source(source: str, tmp_path: Path):
 
 
 def output(stdout: str = "") -> dict[str, object]:
-    return {"stdout": stdout, "stderr": "", "exit_code": 0}
+    return {"stdout": stdout, "stderr": "", "exit_code": 0, "truncated": False}
 
 
 @pytest.mark.anyio
@@ -206,9 +206,10 @@ Workflow:
         "properties": {
           "stdout": {"type": "string"},
           "stderr": {"type": "string"},
-          "exit_code": {"type": "integer"}
+          "exit_code": {"type": "integer"},
+          "truncated": {"type": "boolean"}
         },
-        "required": ["stdout", "stderr", "exit_code"],
+        "required": ["stdout", "stderr", "exit_code", "truncated"],
         "additionalProperties": false
       }
     text:
@@ -904,3 +905,161 @@ Node on-command:
 
     assert result.outcome == "pass"
     assert seen == {"on-command": "EXIT_3"}
+
+
+UNTYPED_ROUTE_SOURCE = """Rattish: 1
+
+Workflow:
+  name: Untyped route
+  inputs:
+    order:
+      schema: {"type": "object"}
+      required: true
+
+Node check:
+  type: bash-command
+  command: check
+  to:
+    - big when CONDITION
+    - small otherwise
+
+Node big:
+  type: bash-command
+  command: big
+  needs: check
+
+Node small:
+  type: bash-command
+  command: small
+  needs: check
+"""
+
+
+async def run_untyped_route(tmp_path: Path, condition: str, order: dict[str, object]):
+    calls: list[str] = []
+
+    async def fake_handler(node, context, bindings):
+        _ = context, bindings
+        calls.append(node["id"])
+        return HandlerResult(True, output(node["id"]))
+
+    result = await execute_workflow(
+        compile_source(UNTYPED_ROUTE_SOURCE.replace("CONDITION", condition), tmp_path),
+        workflow_inputs={"order": order},
+        handlers=NodeHandlerRegistry({"raticode.bash_command": fake_handler}),
+    )
+    return result, calls
+
+
+@pytest.mark.anyio
+async def test_route_ordering_on_unfitting_runtime_types_fails_the_run(tmp_path: Path) -> None:
+    result, calls = await run_untyped_route(
+        tmp_path, "input.order.count > 5", {"count": "10-secret-value"}
+    )
+
+    assert result.outcome == "failure"
+    assert calls == ["check"]
+    assert result.error is not None
+    assert result.error.code == "RATTISH_RUNTIME_PREDICATE_TYPE_MISMATCH"
+    assert "string" in result.error.message and "integer" in result.error.message
+    assert "'check'" in result.error.message and "'big'" in result.error.message
+    assert result.error.details == {
+        "node_id": "check",
+        "target": "big",
+        "operator": ">",
+        "left_type": "string",
+        "right_type": "integer",
+    }
+    assert "10-secret-value" not in repr(result.error)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("condition", "order", "taken"),
+    [
+        # A Boolean never equals a number, though Python's True == 1.
+        ("input.order.count == 1", {"count": True}, "small"),
+        ("input.order.count != 1", {"count": True}, "big"),
+        ('input.order.count == "10"', {"count": 10}, "small"),
+        ("input.order.count == 10", {"count": 10.0}, "big"),
+        ("input.order.count > 5", {"count": 10}, "big"),
+        ('input.order.name < "m"', {"name": "kim"}, "big"),
+        ('input.order.labels contains "bug"', {"labels": ["bug", "ui"]}, "big"),
+        ("input.order.labels contains 1", {"labels": [True]}, "small"),
+        ('input.order.title contains "bug"', {"title": "a bug"}, "big"),
+        ('input.order.meta contains "bug"', {"meta": {"bug": 1}}, "big"),
+        ('input.order.title matches "^Bug"', {"title": "Bug: x"}, "big"),
+        # Missing and null operands give false.
+        ("input.order.count > 5", {}, "small"),
+        ("input.order.count != 5", {}, "small"),
+        ("input.order.count > 5", {"count": None}, "small"),
+        ('input.order.title matches "^Bug"', {"title": None}, "small"),
+        ('input.order.title contains "bug"', {"title": None}, "small"),
+    ],
+)
+async def test_untyped_route_operands_compare_by_json_type(
+    tmp_path: Path, condition: str, order: dict[str, object], taken: str
+) -> None:
+    result, calls = await run_untyped_route(tmp_path, condition, order)
+
+    assert result.outcome == "pass", result.error
+    assert calls == ["check", taken]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("condition", "order", "types"),
+    [
+        ('input.order.title matches "^4"', {"title": 404}, ("integer", "string")),
+        ('input.order.title contains "bug"', {"title": 7}, ("integer", "string")),
+        ("input.order.title contains 1", {"title": "a1"}, ("string", "integer")),
+        ("input.order.flag < 2", {"flag": False}, ("boolean", "integer")),
+    ],
+)
+async def test_contains_and_matches_on_unfitting_runtime_types_fail_the_run(
+    tmp_path: Path, condition: str, order: dict[str, object], types: tuple[str, str]
+) -> None:
+    result, calls = await run_untyped_route(tmp_path, condition, order)
+
+    assert result.outcome == "failure"
+    assert calls == ["check"]
+    assert result.error is not None
+    assert result.error.code == "RATTISH_RUNTIME_PREDICATE_TYPE_MISMATCH"
+    assert (result.error.details["left_type"], result.error.details["right_type"]) == types
+
+
+@pytest.mark.anyio
+async def test_binding_condition_on_unfitting_runtime_types_fails_its_node(
+    tmp_path: Path,
+) -> None:
+    source = """Rattish: 1
+
+Workflow:
+  name: Binding condition
+  inputs:
+    order:
+      schema: {"type": "object"}
+      required: true
+
+Node check:
+  type: bash-command
+  command: check
+  with:
+    large: input.order.count > 5
+"""
+
+    async def fake_handler(node, context, bindings):
+        _ = node, context, bindings
+        return HandlerResult(True, output("check"))
+
+    result = await execute_workflow(
+        compile_source(source, tmp_path),
+        workflow_inputs={"order": {"count": "ten"}},
+        handlers=NodeHandlerRegistry({"raticode.bash_command": fake_handler}),
+    )
+
+    assert result.outcome == "failure"
+    assert result.error is not None
+    assert result.error.code == "RATTISH_RUNTIME_PREDICATE_TYPE_MISMATCH"
+    assert result.error.details["binding"] == "large"
+    assert "'large'" in result.error.message and "string" in result.error.message

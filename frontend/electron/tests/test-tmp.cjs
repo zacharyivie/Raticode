@@ -10,6 +10,15 @@
 // The folder goes in /var/tmp, which is on disk. Where /var/tmp can't be written, such
 // as inside an agent's sandbox, it goes in the normal temp folder instead and is still
 // removed at the end. Raticode itself clears what a killed run leaves there.
+//
+// Before removing the folder, the run counts what its tests left in it and prints
+// "ℹ temp_left_behind N" with the most common names, so a test that stops cleaning
+// up shows in the output. `npm test` prints the line with its totals, even when it is 0.
+//
+// It also drops the git and app settings tests would inherit from Raticode
+// (test-env.cjs), so a test file that requires this gets a clean environment even
+// when run on its own with `node --test`.
+require("./test-env.cjs").dropInheritedSettings();
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -63,6 +72,45 @@ function runFolder(parent) {
   return fs.mkdtempSync(path.join(base, `${namespace ? `n${namespace}-` : ""}r${process.pid}-`));
 }
 
+// The run folder this process made, and whether its count was printed or it is gone.
+let owned = null;
+
+// "firefox-port-test-a1B2c3" and "firefox-port-test-Z9y8x7" are one kind of leftover.
+function leftBehindLine(names) {
+  const kinds = new Map();
+  for (const name of names) {
+    const kind = name.replace(/([-_.])[A-Za-z0-9]{6}$/, "$1*");
+    kinds.set(kind, (kinds.get(kind) || 0) + 1);
+  }
+  const common = [...kinds].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const shown = common.slice(0, 8).map(([kind, count]) => (count > 1 ? `${kind} ×${count}` : kind));
+  if (common.length > shown.length) shown.push(`${common.length - shown.length} more kinds`);
+  return `ℹ temp_left_behind ${names.length}${shown.length ? ` (${shown.join(", ")})` : ""}\n`;
+}
+
+function leftBehind(dir) {
+  try {
+    return fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+// Prints the count for this process's run folder, once. Returns the count, or null
+// when this process doesn't own a run folder or it was already removed, as after
+// Ctrl+C, when removing it printed the count first.
+function reportLeftBehind(write = (line) => fs.writeSync(2, line)) {
+  if (!owned || owned.removed) return null;
+  const names = leftBehind(owned.dir);
+  owned.reported = true;
+  try {
+    write(leftBehindLine(names));
+  } catch {
+    // Output closed: the count is only a hint.
+  }
+  return names.length;
+}
+
 function installTestTmp(env = process.env) {
   if (process.platform !== "linux") return "";
   // A child of a test that already owns a folder shares it and leaves removal to its parent.
@@ -82,7 +130,14 @@ function installTestTmp(env = process.env) {
     return "";
   }
   Object.assign(env, { [RUN_DIR_ENV]: dir, TMPDIR: dir, TEMP: dir, TMP: dir });
-  const remove = () => fs.rmSync(dir, { recursive: true, force: true });
+  owned = { dir, reported: false, removed: false };
+  const remove = () => {
+    if (owned?.dir === dir) {
+      if (!owned.reported && leftBehind(dir).length) reportLeftBehind();
+      owned.removed = true;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
   process.once("exit", remove);
   if (process.type === "browser") {
     // Electron's main process skips the "exit" event when told to exit immediately.
@@ -107,4 +162,4 @@ function installTestTmp(env = process.env) {
 
 installTestTmp();
 
-module.exports = { installTestTmp };
+module.exports = { installTestTmp, leftBehindLine, reportLeftBehind };

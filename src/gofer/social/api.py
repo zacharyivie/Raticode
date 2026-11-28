@@ -110,6 +110,12 @@ def _route(
             return service.publish_variant(actor, post_id, variant_id, body.get("content_hash"))
         if action == "mark-posted":
             return service.mark_posted(actor, post_id, variant_id, body.get("url"))
+    if method == "POST" and len(parts) == 5 and parts[0] == "posts" and parts[2] == "copies":
+        # A platform copy Raticode couldn't delete: Try again, or I deleted it.
+        post_id, copy_id, action = parts[1], parts[3], parts[4]
+        if action in {"retry", "mark-deleted"}:
+            choice = "retry" if action == "retry" else "deleted"
+            return service.platform_copy(actor, post_id, copy_id, choice)
     if method == "POST" and parts == ["pause"]:
         return service.set_paused(actor, body.get("paused") is True)
     if method == "PUT" and parts == ["settings"]:

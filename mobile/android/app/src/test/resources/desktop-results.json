@@ -96,14 +96,14 @@
   "state": "enabled",
   "revision": 3,
   "schedule": {
-   "kind": "weekly",
+   "kind": "cron",
    "at": "",
-   "local_time": "09:00",
-   "weekdays": [
-    "monday"
-   ],
+   "local_time": "",
+   "weekdays": [],
    "every_minutes": 0,
-   "timezone": ""
+   "timezone": "America/Denver",
+   "cron": "0 9 * * 1-5",
+   "summary": "Weekdays at 9:00"
   },
   "next_occurrence_at": "",
   "project_name": "Notes",
@@ -127,7 +127,23 @@
    "needs_user": false,
    "acknowledged": false,
    "thread_id": "",
-   "verification_thread_id": ""
+   "verification_thread_id": "",
+   "criteria": [
+    {
+     "id": "c1",
+     "description": "Report failures",
+     "result": "pass",
+     "evidence": "The report lists none."
+    }
+   ],
+   "review_notes": [
+    {
+     "severity": "note",
+     "axis": "standards",
+     "file": "scripts/check.sh",
+     "explanation": "The script could print which build it read."
+    }
+   ]
   },
   "prompt": "Look for failed builds",
   "provider": "",

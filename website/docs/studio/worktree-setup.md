@@ -69,13 +69,13 @@ Approvals are kept in Raticode's data folder on this computer, readable only by 
 | Created by | Which worktrees | Where the result shows |
 | --- | --- | --- |
 | [Rem](../rem/home.md) | A task's temporary worktree, when another task is already changing the project | The task's status in its sheet |
-| [Raticode's project check](../rem/home.md#raticode-runs-the-project-s-check-itself) | The fresh worktree each run of the project's decided check and proving test gets (not in a released version yet). Only links and copies: the setup's commands would run files the worker committed outside the sandbox. When setup fails or isn't approved, the check fails without running; when it has commands, the check runs in the task's folder instead. In both cases the proving test isn't run | The check's receipt in the review, with the reason |
+| [Raticode's project check](../rem/home.md#raticode-runs-the-project-s-check-itself) | The fresh worktree each run of the project's decided check and proving test gets (from 0.6.0). Only links and copies: the setup's commands would run files the worker committed outside the sandbox. When setup fails or isn't approved, the check fails without running; when it has commands, the check runs in the task's folder instead. In both cases the proving test isn't run | The check's receipt in the review, with the reason |
 | [Organizations](../advanced/organizations.md) | Each ticket's worktree | The ticket's **Did** section and the organization's activity |
 | [Swarms](../advanced/swarms.md) | Each agent's assignment worktree, the worktree integration checks run in, and the review worktree before the first checks run in it | The attempt under **Assignment attempts and checks**, or **Results and branches** |
 
 Setup runs only when a worktree is made. A worktree that already exists, such as one kept for a paused task, isn't set up again. Worktrees of an organization's shared repository and worktrees you or a worktree skill make yourself don't run it.
 
-When setup fails, the run continues. The result shows each step, with the end of each command's output, and the agent is told what failed.
+When setup fails, the run continues; a workflow run with **Run in a worktree** on fails instead, with `RATTISH_WORKTREE_SETUP_FAILED`, before any step starts. The result shows each step, with the end of each command's output, and the agent is told what failed.
 
 ## From the command line
 

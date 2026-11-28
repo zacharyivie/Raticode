@@ -2,7 +2,7 @@
 // asks for and how each is checked before anything is sent. Logins go to the backend once,
 // which keeps them in the system keychain; nothing here stores them.
 
-export const DISCORD_WEBHOOK = /^https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api(?:\/v\d+)?\/webhooks\/\d+\/[\w-]+$/;
+const DISCORD_WEBHOOK = /^https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api(?:\/v\d+)?\/webhooks\/\d+\/[\w-]+$/;
 
 // Each field: [key, label, kind, required, hint]. kind is "url", "secret" or "text".
 // "options" fields go into the account's settings instead of the keychain.

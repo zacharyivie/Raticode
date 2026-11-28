@@ -24,6 +24,8 @@ from gofer.rattish.triggers import (
     approve_trigger,
     computer_limit_state,
     cost_report_warnings,
+    cron_summary,
+    describe_cron,
     describe_trigger,
     model_notices,
     next_run_at,
@@ -62,6 +64,7 @@ def _trigger_payload(
     return {
         **record.to_payload(),
         "description": describe_trigger(record),
+        "summary": cron_summary(record),
         "nextRunAt": next_run_at(record),
         "webhookUrl": webhook_url(record.id, store.webhook_port())
         if record.kind == "webhook"
@@ -269,8 +272,16 @@ def rotate_trigger_token_payload(base: Path, trigger_id: str) -> dict[str, Any]:
 
 
 def preview_trigger_payload(body: dict[str, Any]) -> dict[str, Any]:
+    """The next few times a cron expression runs, and the expression in words.
+
+    ``summary`` is "" for an unusual expression, which screens show by itself.
+    """
     timezone = str(body.get("timezone") or "") or system_timezone()
-    return {"nextRuns": preview_cron(str(body.get("expression") or ""), timezone)}
+    expression = str(body.get("expression") or "")
+    return {
+        "nextRuns": preview_cron(expression, timezone),
+        "summary": describe_cron(expression),
+    }
 
 
 def trigger_pause_payload(base: Path) -> dict[str, Any]:

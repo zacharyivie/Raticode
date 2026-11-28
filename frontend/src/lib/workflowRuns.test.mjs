@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { workflowRunProblems, mergeWorkflowRunRecords, markWorkflowRunReviewed, restoreWorkflowRunRecords, workflowRunSummary, exactWorkflowRunStopPath, disconnectWorkflowRunRecords, formatRunAge, pruneUnlistedWorkflowRuns, sortWorkflowRunsNewestFirst, usageLimitWaitText, workflowListStatus } from "./workflowRuns.js";
+import { workflowRunProblems, mergeWorkflowRunRecords, markWorkflowRunReviewed, restoreWorkflowRunRecords, workflowRunSummary, exactWorkflowRunStopPath, disconnectWorkflowRunRecords, pruneUnlistedWorkflowRuns, sortWorkflowRunsNewestFirst, usageLimitWaitText, workflowListStatus } from "./workflowRuns.js";
 
 const atlas = { workflowId: "digest", projectPath: "/atlas", workflowName: "Digest" };
 test("run identity separates projects, workflows and concurrent runs", () => {
@@ -169,20 +169,11 @@ test("the workflow list says a run is waiting for approval instead of running", 
   assert.equal(records[0].awaitingApproval, false);
 });
 
-test("run ages stay short and ignore missing timestamps", () => {
-  const now = Date.parse("2026-10-26T12:00:00Z");
-  assert.equal(formatRunAge("2026-10-26T11:59:40Z", now), "just now");
-  assert.equal(formatRunAge("2026-10-26T11:55:00Z", now), "5m ago");
-  assert.equal(formatRunAge("2026-10-26T09:00:00Z", now), "3h ago");
-  assert.equal(formatRunAge("2026-10-24T12:00:00Z", now), "2d ago");
-  assert.equal(formatRunAge(null, now), "");
-});
-
 test("a run waiting for a usage limit says so and when it resumes", () => {
   assert.equal(usageLimitWaitText({ id: "one", status: "error" }), "");
   const resumeAt = "2026-11-09T13:02:00+00:00";
-  const time = new Date(resumeAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+  const time = new Date(resumeAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
   const run = { id: "one", status: "error", usageLimitWait: { label: "Waiting for usage limit", resumeAt } };
-  assert.equal(usageLimitWaitText(run, "en-US"), `Waiting for usage limit · resumes ${time}`);
+  assert.equal(usageLimitWaitText(run), `Waiting for usage limit · resumes ${time}`);
   assert.equal(usageLimitWaitText({ ...run, usageLimitWait: { label: "Waiting for usage limit" } }), "Waiting for usage limit");
 });

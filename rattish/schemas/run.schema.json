@@ -61,6 +61,102 @@
       ],
       "additionalProperties": false
     },
+    "event": {
+      "description": "One entry of events: something that happened during the run, in order.",
+      "type": "object",
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 1},
+        "type": {
+          "enum": ["workflow_started", "node_started", "node_retried", "node_fell_back", "node_output_truncated", "node_stopped", "node_completed", "workflow_completed"]
+        },
+        "at": {"type": "string", "format": "date-time"},
+        "node_id": {"type": "string", "minLength": 1},
+        "run_number": {"type": "integer", "minimum": 1},
+        "attempt": {"type": "integer", "minimum": 1},
+        "activation_lineage_id": {"type": "string", "minLength": 1},
+        "activation_group_id": {"type": "string", "minLength": 1},
+        "message": {"type": "string"},
+        "outcome": {"enum": ["success", "allowed_failure", "failure"]},
+        "reused": {"const": true},
+        "cached": {"const": true},
+        "provider": {"$ref": "#/$defs/provider_choice"},
+        "from_provider": {"$ref": "#/$defs/provider_choice"},
+        "fallback_reason": {"$ref": "#/$defs/fallback_reason"},
+        "limit_bytes": {
+          "description": "On node_output_truncated: the output limit each stream was held to.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "streams": {
+          "description": "On node_output_truncated: the streams that passed the limit.",
+          "type": "array",
+          "items": {"enum": ["stdout", "stderr"]},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "status": {
+          "enum": ["passed", "failed", "preflight_failed", "invalid_inputs", "running", "stopped", "interrupted"]
+        }
+      },
+      "required": ["sequence", "type", "at"],
+      "additionalProperties": false
+    },
+    "node_run": {
+      "description": "One entry of runs: one activation of one node and what it produced.",
+      "type": "object",
+      "properties": {
+        "node_id": {"type": "string", "minLength": 1},
+        "run_number": {"type": "integer", "minimum": 1},
+        "activation_lineage_id": {"type": "string", "minLength": 1},
+        "activation_group_id": {"type": "string", "minLength": 1},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "outcome": {"enum": ["success", "allowed_failure", "failure"]},
+        "output": true,
+        "error": {"$ref": "#/$defs/error"},
+        "reused_from_run_id": {"type": "string", "minLength": 1},
+        "cached_at": {
+          "description": "Present when the output came from the result cache: when that answer was first made. The activation made no provider call.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "usage": {"$ref": "#/$defs/usage_totals"},
+        "provider": {
+          "description": "The provider, profile, model and effort of the node's last attempt: the one that answered when the node succeeded. Absent for nodes that call no model provider and from runs saved before it was recorded.",
+          "$ref": "#/$defs/provider_choice"
+        },
+        "fallbacks": {
+          "description": "Each switch to the next fallback provider, in order, with the availability error that caused it. An entry with skipped true is a fallback entry the step passed over: another account of a provider that hit a usage limit (reason rate_limit) earlier in the step.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {"$ref": "#/$defs/provider_choice"},
+              "to": {"$ref": "#/$defs/provider_choice"},
+              "reason": {"$ref": "#/$defs/fallback_reason"},
+              "message": {"type": "string"},
+              "skipped": {"const": true}
+            },
+            "required": ["from", "to", "reason", "message"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "node_id",
+        "run_number",
+        "activation_lineage_id",
+        "activation_group_id",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "outcome",
+        "output",
+        "error"
+      ],
+      "additionalProperties": false
+    },
     "error": {
       "type": ["object", "null"],
       "properties": {
@@ -130,91 +226,11 @@
     },
     "events": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "sequence": {"type": "integer", "minimum": 1},
-          "type": {
-            "enum": ["workflow_started", "node_started", "node_retried", "node_fell_back", "node_stopped", "node_completed", "workflow_completed"]
-          },
-          "at": {"type": "string", "format": "date-time"},
-          "node_id": {"type": "string", "minLength": 1},
-          "run_number": {"type": "integer", "minimum": 1},
-          "attempt": {"type": "integer", "minimum": 1},
-          "activation_lineage_id": {"type": "string", "minLength": 1},
-          "activation_group_id": {"type": "string", "minLength": 1},
-          "message": {"type": "string"},
-          "outcome": {"enum": ["success", "allowed_failure", "failure"]},
-          "reused": {"const": true},
-          "cached": {"const": true},
-          "provider": {"$ref": "#/$defs/provider_choice"},
-          "from_provider": {"$ref": "#/$defs/provider_choice"},
-          "fallback_reason": {"$ref": "#/$defs/fallback_reason"},
-          "status": {
-            "enum": ["passed", "failed", "preflight_failed", "invalid_inputs", "running", "stopped", "interrupted"]
-          }
-        },
-        "required": ["sequence", "type", "at"],
-        "additionalProperties": false
-      }
+      "items": {"$ref": "#/$defs/event"}
     },
     "runs": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "node_id": {"type": "string", "minLength": 1},
-          "run_number": {"type": "integer", "minimum": 1},
-          "activation_lineage_id": {"type": "string", "minLength": 1},
-          "activation_group_id": {"type": "string", "minLength": 1},
-          "started_at": {"type": "string", "format": "date-time"},
-          "finished_at": {"type": "string", "format": "date-time"},
-          "duration_ms": {"type": "integer", "minimum": 0},
-          "outcome": {"enum": ["success", "allowed_failure", "failure"]},
-          "output": true,
-          "error": {"$ref": "#/$defs/error"},
-          "reused_from_run_id": {"type": "string", "minLength": 1},
-          "cached_at": {
-            "description": "Present when the output came from the result cache: when that answer was first made. The activation made no provider call.",
-            "type": "string",
-            "format": "date-time"
-          },
-          "usage": {"$ref": "#/$defs/usage_totals"},
-          "provider": {
-            "description": "The provider, profile, model and effort of the node's last attempt: the one that answered when the node succeeded. Absent for nodes that call no model provider and from runs saved before it was recorded.",
-            "$ref": "#/$defs/provider_choice"
-          },
-          "fallbacks": {
-            "description": "Each switch to the next fallback provider, in order, with the availability error that caused it. An entry with skipped true is a fallback entry the step passed over: another account of a provider that hit a usage limit (reason rate_limit) earlier in the step.",
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "from": {"$ref": "#/$defs/provider_choice"},
-                "to": {"$ref": "#/$defs/provider_choice"},
-                "reason": {"$ref": "#/$defs/fallback_reason"},
-                "message": {"type": "string"},
-                "skipped": {"const": true}
-              },
-              "required": ["from", "to", "reason", "message"],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": [
-          "node_id",
-          "run_number",
-          "activation_lineage_id",
-          "activation_group_id",
-          "started_at",
-          "finished_at",
-          "duration_ms",
-          "outcome",
-          "output",
-          "error"
-        ],
-        "additionalProperties": false
-      }
+      "items": {"$ref": "#/$defs/node_run"}
     },
     "outputs": {"type": "object"},
     "latest_node_outputs": {"type": "object"},

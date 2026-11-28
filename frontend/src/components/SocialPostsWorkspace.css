@@ -187,6 +187,11 @@ select.sp-input { padding-right: 6px; }
 .sp-links svg { flex: none; margin-top: 3px; }
 .sp-links mark { background: var(--review-soft); color: var(--ink); font-weight: 700; border-radius: 3px; padding: 0 2px; }
 .sp-message { margin: 0; display: flex; gap: 5px; color: var(--blocked); overflow-wrap: anywhere; }
+.sp-copies { display: grid; gap: 6px; }
+.sp-copy { display: grid; gap: 5px; padding: 8px 9px; border-radius: 9px; border: 1px solid var(--line); border-left: 3px solid var(--blocked); background: var(--raised); min-width: 0; }
+.sp-copy-head { margin: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.sp-copy-who { color: var(--muted); overflow-wrap: anywhere; }
+.sp-copy .sp-actions { margin: 0; }
 .sp-rationale { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .sp-sources summary { cursor: pointer; color: var(--muted); }
 .sp-sources ul { margin: 4px 0 0; padding-left: 16px; overflow-wrap: anywhere; }

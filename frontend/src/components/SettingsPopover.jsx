@@ -108,6 +108,8 @@ const CATEGORIES = SETTINGS_SECTIONS.map((section) => ({ ...section, icon: SECTI
 
 export default function SettingsPopover({
   initialCategory = "general",
+  // Changes with each request for initialCategory, even when it names the same one.
+  categoryRequest = 0,
   // A browser whose settings to show, when a tab's menu opened Settings.
   initialBrowserSection = "",
   // Selectors for a setting to scroll to and focus once Settings opens.
@@ -124,6 +126,8 @@ export default function SettingsPopover({
   const searchRef = useRef(null);
   const onCloseRef = useRef(onClose);
   const [category, setCategory] = useState(initialCategory);
+  // Help › Keyboard Shortcuts asks for Keybindings while Settings may already be open.
+  useEffect(() => { setQuery(""); setCategory(initialCategory); }, [initialCategory, categoryRequest]);
   const [query, setQuery] = useState("");
   const providerState = useProviderSettingsCapabilities(open);
   // A setting another category's link asked for, such as a Change link in Settings >

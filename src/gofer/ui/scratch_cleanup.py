@@ -7,6 +7,11 @@ Each owner removes its folder when it finishes, but a process that is killed
 can't. When the backend or the trigger scheduler starts, a folder is removed
 only when nothing shows its turn or run is still going and nothing in it has
 changed for a day, so a folder another live Raticode process uses is kept.
+
+A worker turn's folder keeps its ``evidence`` subfolder: the screenshots, recordings
+and logs a worker links in its reply, which the chat shows as attachments. Evidence
+stays for :data:`EVIDENCE_SECONDS` after its run ends, or until the run and its
+thread are deleted.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from gofer.utils.logging import get_logger
@@ -29,6 +35,9 @@ STALE_SECONDS = 24 * 60 * 60
 TURN_SCRATCH = ("rem-work", "turn-scratch")
 REVIEW_SCRATCH = ("rem-work", "review-scratch")
 REM_STORE_FILE = "rem-home.sqlite3"
+# A worker turn's evidence files, inside its turn scratch folder.
+EVIDENCE_FOLDER = "evidence"
+EVIDENCE_SECONDS = 30 * 24 * 60 * 60
 # rem_project_checks.BOX_PREFIX, kept here so this module needn't import Rem's code.
 PROJECT_CHECK_PREFIX = "check-"
 
@@ -45,6 +54,8 @@ class CleanupResult:
 class _RemActivity:
     runs: frozenset[str]
     turns: frozenset[str]
+    # Runs that aren't going, with when each finished (None when it has no time).
+    ended: dict[str, float | None]
 
 
 def clean_stale_scratch(
@@ -65,12 +76,15 @@ def clean_stale_scratch(
                 # Rem's records can't be read, so no folder can be shown idle.
                 result.kept += 1
                 continue
-            active = (
-                folder.name.rpartition("-")[0] in rem.runs
-                if owner == "turn"
-                else folder.name in rem.turns
-            )
-            _settle(folder, active, clock, max_age, result)
+            if owner == "review":
+                _settle(folder, folder.name in rem.turns, clock, max_age, result)
+                continue
+            run = folder.name.rpartition("-")[0]
+            if run in rem.ended:
+                _settle_turn(folder, rem.ended[run], clock, max_age, result)
+            else:
+                # A run that is going keeps all of its folder; a deleted one's goes.
+                _settle(folder, run in rem.runs, clock, max_age, result)
     run_records: Callable[[str], bool | None] | None = None
     for folder in _folders(data_dir / "run-scratch"):
         if folder.name.startswith(PROJECT_CHECK_PREFIX):
@@ -136,6 +150,75 @@ def _settle(
     result.freed_bytes += size
 
 
+def _settle_turn(
+    folder: Path, ended: float | None, clock: float, max_age: float, result: CleanupResult
+) -> None:
+    """A finished run's turn folder: its evidence stays for 30 days after the run ends."""
+    evidence = folder / EVIDENCE_FOLDER
+    if evidence.is_symlink() or not evidence.is_dir():
+        _settle(folder, False, clock, max_age, result)
+        return
+    if ended is None:
+        # A run that stopped without finishing, such as a paused one, counts from the
+        # last change to its evidence.
+        ended = _tree_stats(evidence)[0]
+    if clock - ended > EVIDENCE_SECONDS:
+        _settle(folder, False, clock, max_age, result)
+        return
+    # The rest of the folder goes as any idle scratch does.
+    result.kept += 1
+    try:
+        with os.scandir(folder) as entries:
+            rest = [Path(entry.path) for entry in entries if entry.name != EVIDENCE_FOLDER]
+    except OSError:
+        return
+    stats = [_tree_stats(path) for path in rest]
+    if not rest or clock - max(newest for newest, _ in stats) <= max_age:
+        return
+    for path, (_, size) in zip(rest, stats, strict=True):
+        _remove(path)
+        if not os.path.lexists(path):
+            result.freed_bytes += size
+
+
+def evidence_folder(data_dir: Path, run_id: str) -> Path:
+    """Where a run's worker saves the evidence files it links."""
+    return data_dir.joinpath(*TURN_SCRATCH, f"{run_id}-execute", EVIDENCE_FOLDER)
+
+
+def clear_turn_scratch(folder: Path) -> None:
+    """Remove a worker turn's scratch folder when the turn ends, keeping its evidence.
+
+    The folder goes as a whole when its evidence folder is empty or isn't a real folder.
+    """
+    evidence = folder / EVIDENCE_FOLDER
+    try:
+        keep = not evidence.is_symlink() and evidence.is_dir() and any(evidence.iterdir())
+    except OSError:
+        keep = False
+    if not keep:
+        shutil.rmtree(folder, ignore_errors=True)
+        return
+    try:
+        with os.scandir(folder) as entries:
+            rest = [Path(entry.path) for entry in entries if entry.name != EVIDENCE_FOLDER]
+    except OSError:
+        return
+    for path in rest:
+        _remove(path)
+
+
+def _remove(path: Path) -> None:
+    """Remove a file, link or folder without following links."""
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        log.warning("Couldn't remove %s from a scratch folder", path)
+
+
 def _tree_stats(folder: Path) -> tuple[float, int]:
     """The newest change time inside a folder and the disk space it uses."""
     newest = 0.0
@@ -177,7 +260,7 @@ def _rem_activity(data_dir: Path) -> _RemActivity | None:
 
     path = data_dir / REM_STORE_FILE
     if not path.exists():
-        return _RemActivity(frozenset(), frozenset())
+        return _RemActivity(frozenset(), frozenset(), {})
     try:
         # Read only: this may run beside a backend that owns the database.
         db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=15)
@@ -185,6 +268,11 @@ def _rem_activity(data_dir: Path) -> _RemActivity | None:
             marks = ",".join("?" * len(ACTIVE))
             rows = db.execute(
                 f"SELECT id, body FROM runs WHERE state IN ({marks})", sorted(ACTIVE)
+            ).fetchall()
+            finished = db.execute(
+                "SELECT id, CASE WHEN json_valid(body) THEN json_extract(body, '$.finished_at') "
+                f"END FROM runs WHERE state NOT IN ({marks})",
+                sorted(ACTIVE),
             ).fetchall()
         finally:
             db.close()
@@ -201,7 +289,18 @@ def _rem_activity(data_dir: Path) -> _RemActivity | None:
             continue
         if turn:
             turns.add(str(turn))
-    return _RemActivity(frozenset(runs), frozenset(turns))
+    ended = {str(identity): _instant(moment) for identity, moment in finished}
+    return _RemActivity(frozenset(runs), frozenset(turns), ended)
+
+
+def _instant(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (moment if moment.tzinfo else moment.replace(tzinfo=UTC)).timestamp()
 
 
 def _workflow_run_activity(data_dir: Path) -> Callable[[str], bool | None]:

@@ -743,7 +743,12 @@ def extract(
             meta["tags"] = list(
                 set(_tags(meta.get("tags")) + re.findall(r"(?<!\w)#([\w/-]+)", text))
             )
-        links += re.findall(r"\[[^\]]*\]\(([^ )]+)", text)
+        # [text](target) and [text](<target with spaces>), which reports save for
+        # paths with spaces.
+        links += [
+            angled or plain
+            for angled, plain in re.findall(r"\[[^\]]*\]\((?:<([^<>\n]+)>|([^ )]+))", text)
+        ]
         if not meta.get("title"):
             title = re.search(r"^#\s+(.+)$", text, re.M)
             meta["title"] = title.group(1) if title else ""

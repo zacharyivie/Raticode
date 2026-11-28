@@ -7,15 +7,17 @@ import json
 import math
 import re
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import SchemaError, ValidationError  # type: ignore[import-untyped]
 
+from gofer.core.json_types import NUMBER_TYPES, json_type
 from gofer.rattish.contracts import (
     LoadedNodeContract,
     NodeContractRegistry,
@@ -29,13 +31,14 @@ from gofer.rattish.diagnostics import (
     SourcePosition,
     SourceSpan,
     did_you_mean,
+    replacement_details,
 )
 from gofer.rattish.ir_validation import (
     InvalidRattishIrError,
     ValidatedRattishIR,
     validate_ir_invariants,
 )
-from gofer.rattish.lexer import DuplicateJsonKeyError, strict_json_loads
+from gofer.rattish.lexer import StrictJsonError, strict_json_loads
 from gofer.rattish.parser import parse_rattish
 from gofer.rattish.project_paths import normalize_project_path, project_path
 from gofer.rattish.prompt_templates import (
@@ -127,6 +130,9 @@ class CompileContext:
     referenced_workflows: Mapping[tuple[str, str], ReferencedWorkflow] = dataclass_field(
         default_factory=dict
     )
+    # The UTF-8 text being compiled. compile() fills it in so a diagnostic can check what
+    # its span covers; callers leave it empty.
+    source_bytes: bytes = b""
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +207,7 @@ class RattishCompiler:
 
     def compile(self, source: str, context: CompileContext) -> CompileResult:
         ast = parse_rattish(source, source_id=context.entrypoint)
+        context = dataclass_replace(context, source_bytes=source.encode("utf-8"))
         try:
             self.ast_validator.validate(ast)
         except ValidationError as exc:
@@ -387,6 +394,7 @@ class RattishCompiler:
             assert type_field is not None
             contract = self.contracts.get(node_type)
             if contract is None:
+                node_types = [item.node_type for item in self.contracts]
                 diagnostics.append(
                     self._diagnostic(
                         "RATTISH_UNKNOWN_NODE_TYPE",
@@ -395,9 +403,8 @@ class RattishCompiler:
                         type_field["value"]["span"],
                         context,
                         details={"node": node_id, "type": node_type},
-                        suggestions=did_you_mean(
-                            node_type, [item.node_type for item in self.contracts]
-                        ),
+                        suggestions=did_you_mean(node_type, node_types),
+                        misspelled=(node_type, node_types),
                     )
                 )
                 continue
@@ -1282,6 +1289,8 @@ class RattishCompiler:
                         context,
                         diagnostics,
                     )
+                    if channel == "output":
+                        self._lowercase_http_header_name(producer, path)
         elif root == "input":
             if not selectors:
                 diagnostics.append(
@@ -1652,6 +1661,7 @@ class RattishCompiler:
                     context,
                     details={"node": node_id, "path": [], "field": source_name},
                     suggestions=suggestions,
+                    misspelled=(source_name, candidates),
                 )
             )
         return True
@@ -1975,10 +1985,11 @@ class RattishCompiler:
                             "RATTISH_UNRESOLVED_NODE",
                             "semantic",
                             f"Requirement {needed!r} does not name a Node.",
-                            draft.declaration["span"],
+                            self._needs_item_span(draft.declaration, needed),
                             context,
                             details={"node": draft.node_id, "target": needed},
                             suggestions=did_you_mean(needed, drafts),
+                            misspelled=(needed, drafts),
                         )
                     )
             seen_routes: set[str] = set()
@@ -1995,6 +2006,7 @@ class RattishCompiler:
                             context,
                             details={"source_node": draft.node_id, "target": target},
                             suggestions=did_you_mean(target, drafts),
+                            misspelled=(target, drafts),
                         )
                     )
                 signature = json.dumps(
@@ -2774,6 +2786,7 @@ class RattishCompiler:
                         value = selector["value"]
                         path.append({"kind": "index", "value": value})
                         schema = self._item_schema(schema)
+                self._lowercase_http_header_name(producer, path)
                 optional = symbol not in consumer.guaranteed_sources or self._draft_allow_fail(
                     producer
                 )
@@ -3227,13 +3240,16 @@ class RattishCompiler:
         if kind != "comparison":
             return
         operator = predicate["operator"]
+        # An empty set means the schema doesn't say (an http-request's json, an object input's
+        # member): that side is checked when the route runs, so only known types are refused here.
         left_types = self._operand_types(predicate["left"])
         right_types = self._operand_types(predicate["right"])
-        numeric = {"integer", "number"}
+        both_known = bool(left_types) and bool(right_types)
+        numeric = NUMBER_TYPES
         compatible = bool(left_types & right_types) or bool(
             left_types & numeric and right_types & numeric
         )
-        if operator in {"==", "!="} and not compatible:
+        if operator in {"==", "!="} and both_known and not compatible:
             self._predicate_error(
                 f"Predicate operator {operator} compares incompatible schemas.",
                 route,
@@ -3241,25 +3257,43 @@ class RattishCompiler:
                 diagnostics,
             )
         elif operator in {"<", "<=", ">", ">="}:
-            ordered = (left_types <= numeric and right_types <= numeric) or (
-                left_types == {"string"} and right_types == {"string"}
-            )
-            if not ordered:
+
+            def orderable(types: set[str]) -> bool:
+                return not types or types <= numeric or types == {"string"}
+
+            mixed = both_known and (left_types <= numeric) != (right_types <= numeric)
+            if not (orderable(left_types) and orderable(right_types)) or mixed:
                 self._predicate_error(
                     f"Predicate operator {operator} requires two Numbers or two Strings.",
                     route,
                     context,
                     diagnostics,
                 )
-        elif operator == "contains" and not left_types & {"string", "array", "object"}:
+        elif (
+            operator == "contains" and left_types and not left_types & {"string", "array", "object"}
+        ):
             self._predicate_error(
                 "Predicate operator contains requires a String, List, or Object on the left.",
                 route,
                 context,
                 diagnostics,
             )
+        elif (
+            operator == "contains"
+            and left_types
+            and "array" not in left_types
+            and right_types
+            and not right_types & {"string", "null"}
+        ):
+            # A String or Object holds text or a key: anything else stops the run.
+            self._predicate_error(
+                "Predicate operator contains on a String or Object requires a String on the right.",
+                route,
+                context,
+                diagnostics,
+            )
         elif operator == "matches":
-            if left_types != {"string"} or right_types != {"string"}:
+            if any(types and types != {"string"} for types in (left_types, right_types)):
                 self._predicate_error(
                     "Predicate operator matches requires String operands.",
                     route,
@@ -3312,24 +3346,8 @@ class RattishCompiler:
         if isinstance(raw, list):
             return {item for item in raw if isinstance(item, str)}
         if "enum" in schema:
-            return {RattishCompiler._json_type(value) for value in schema["enum"]}
+            return {json_type(value) for value in schema["enum"]}
         return set()
-
-    @staticmethod
-    def _json_type(value: Any) -> str:
-        if value is None:
-            return "null"
-        if isinstance(value, bool):
-            return "boolean"
-        if isinstance(value, int):
-            return "integer"
-        if isinstance(value, float):
-            return "number"
-        if isinstance(value, str):
-            return "string"
-        if isinstance(value, list):
-            return "array"
-        return "object"
 
     def _lower_predicate(
         self,
@@ -3383,10 +3401,25 @@ class RattishCompiler:
         return {"kind": "literal", "value": value, "schema": self._infer_schema(value)}
 
     @staticmethod
+    def _lowercase_http_header_name(producer: _NodeDraft, path: list[dict[str, Any]]) -> None:
+        """http-request output header names are lowercase; match output.headers.Content-Type."""
+        if producer.contract.node_type != "http-request" or len(path) < 2:
+            return
+        root, name = path[0], path[1]
+        if root == {"kind": "member", "value": "headers", "case_sensitive": True} and (
+            name["kind"] == "member" and isinstance(name["value"], str)
+        ):
+            name["value"] = name["value"].lower()
+
+    @staticmethod
     def _member_schema(schema: Mapping[str, Any], member: str) -> dict[str, Any]:
         properties = schema.get("properties")
         if isinstance(properties, Mapping) and isinstance(properties.get(member), Mapping):
             return {"$schema": JSON_SCHEMA_ID, **properties[member]}
+        # A map such as http-request's output headers types every value it holds.
+        additional = schema.get("additionalProperties")
+        if isinstance(additional, Mapping):
+            return {"$schema": JSON_SCHEMA_ID, **additional}
         return {"$schema": JSON_SCHEMA_ID}
 
     @staticmethod
@@ -3452,7 +3485,7 @@ class RattishCompiler:
         try:
             raw = schema_path.read_text(encoding="utf-8")
             loaded = strict_json_loads(raw)
-        except (OSError, UnicodeError, json.JSONDecodeError, DuplicateJsonKeyError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError, StrictJsonError) as exc:
             diagnostics.append(
                 self._diagnostic(
                     "RATTISH_SCHEMA_REFERENCE_MISSING",
@@ -3585,10 +3618,11 @@ class RattishCompiler:
                     "RATTISH_PROVIDER_CONTRACT_UNRESOLVED",
                     "semantic",
                     f"No compile-time provider contract is available for {provider_id!r}.",
-                    declaration["span"],
+                    self._field_value_span(declaration, "provider"),
                     context,
                     details={"node": node_id, "provider": provider_id},
                     suggestions=self._provider_suggestions(provider_id, context),
+                    misspelled=(provider_id, self._provider_ids(context)),
                 )
             )
             return None
@@ -3619,8 +3653,29 @@ class RattishCompiler:
         return resolution
 
     @staticmethod
-    def _provider_suggestions(provider_id: str, context: CompileContext) -> tuple[str, ...]:
-        known = sorted({value.provider_id for value in context.provider_contracts.values()})
+    def _needs_item_span(declaration: Mapping[str, Any], needed: str) -> Mapping[str, Any]:
+        """Where ``needs`` names ``needed``, or the whole node if the entry can't be found."""
+        for entry in declaration["entries"]:
+            if entry["kind"] != "needs":
+                continue
+            for item in entry["nodes"]:
+                if item["canonical"] == needed:
+                    return cast(Mapping[str, Any], item["span"])
+        return cast(Mapping[str, Any], declaration["span"])
+
+    @classmethod
+    def _field_value_span(cls, declaration: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+        """The value of field ``name``, or the whole node if it has no such field."""
+        field = cls._find_field(declaration, name)
+        return cast(Mapping[str, Any], (field["value"] if field else declaration)["span"])
+
+    @staticmethod
+    def _provider_ids(context: CompileContext) -> list[str]:
+        return sorted({value.provider_id for value in context.provider_contracts.values()})
+
+    @classmethod
+    def _provider_suggestions(cls, provider_id: str, context: CompileContext) -> tuple[str, ...]:
+        known = cls._provider_ids(context)
         suggestions = did_you_mean(provider_id, known)
         if known:
             suggestions += ("Providers: " + ", ".join(known) + ".",)
@@ -3655,15 +3710,7 @@ class RattishCompiler:
         entries = configuration.get("fallback")
         if not isinstance(entries, list):
             return []
-        field = next(
-            (
-                entry
-                for entry in declaration["entries"]
-                if entry["kind"] == "field" and entry["name"]["canonical"] == "fallback"
-            ),
-            None,
-        )
-        span = field["value"]["span"] if field is not None else declaration["span"]
+        span = self._field_value_span(declaration, "fallback")
         resolved: list[dict[str, Any]] = []
         seen = {(primary["provider_id"], primary["profile"], primary["model"], primary["effort"])}
         unresolved = False
@@ -4096,6 +4143,7 @@ class RattishCompiler:
                     context,
                     details={"field": "workspace"},
                     suggestions=did_you_mean(str(value), list(WORKSPACES)),
+                    misspelled=(str(value), list(WORKSPACES)),
                 )
             )
             return "project"
@@ -4446,15 +4494,21 @@ class RattishCompiler:
         details: dict[str, Any] | None = None,
         severity: Literal["error", "warning"] = "error",
         suggestions: tuple[str, ...] = (),
+        misspelled: tuple[str, Iterable[str]] | None = None,
     ) -> RattishDiagnostic:
+        """``misspelled`` is the unknown name and the names it may be a typo of."""
+        source_span = self._span(span)
+        details = dict(details or {})
+        if misspelled is not None:
+            details.update(replacement_details(context.source_bytes, source_span, *misspelled))
         return RattishDiagnostic(
             code=code,
             severity=severity,
             phase=phase,
             message=message,
             file=context.entrypoint,
-            span=self._span(span),
-            details=details or {},
+            span=source_span,
+            details=details,
             suggestions=suggestions,
         )
 

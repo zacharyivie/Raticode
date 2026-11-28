@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-26",
+  "probe": "benchmarks/rattish_loop_run.py 1000",
+  "baseline": "cf45b6b6 (dev before live saves were coalesced), run from an exported copy of its src/ and rattish/",
+  "machine": "The maintainer's Linux desktop, 16 threads, Python 3.14; each step really starts a shell",
+  "notes": "Wall time of run_rattish_file for a count loop of 1,000 bash-command 'echo hi' steps (1,001 node runs) against a throwaway data folder. Run with RATICODE_AGENT_SLICE unset: inside a sandboxed Rem turn it wraps every step in systemd-run --user, which the sandbox can't reach, so every step fails. Before, every node event re-read and re-validated the whole record and rewrote it, so each step cost more than the last.",
+  "runs": {
+    "before": [{"steps": 1000, "seconds": 282.31, "status": "passed", "nodeRuns": 1001, "recordBytes": 925449}],
+    "after": [
+      {"steps": 1000, "seconds": 3.2, "status": "passed", "nodeRuns": 1001, "recordBytes": 923756},
+      {"steps": 1000, "seconds": 4.04, "status": "passed", "nodeRuns": 1001, "recordBytes": 923756},
+      {"steps": 1000, "seconds": 4.08, "status": "passed", "nodeRuns": 1001, "recordBytes": 923756}
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "date": "2026-11-26",
+  "probe": "benchmarks/rattish_loop_run.py 1000",
+  "baseline": "4dabee39 (dev before the run journal), run from an exported copy of its src/ and rattish/",
+  "machine": "The maintainer's Linux desktop, 16 threads, Python 3.14.8; each step really starts a shell",
+  "notes": "Wall time of run_rattish_file for a count loop of 1,000 bash-command 'echo hi' steps (1,001 node runs) against a throwaway data folder, run with RATICODE_AGENT_SLICE unset. 'after' appends each finished event and node run to RUN_ID.journal as it happens; the whole record is still saved at most once a second. The journal costs no measurable time.",
+  "runs": {
+    "before": [
+      {"steps": 1000, "seconds": 3.37, "status": "passed", "nodeRuns": 1001, "recordBytes": 941817},
+      {"steps": 1000, "seconds": 3.62, "status": "passed", "nodeRuns": 1001, "recordBytes": 941817}
+    ],
+    "after": [
+      {"steps": 1000, "seconds": 3.59, "status": "passed", "nodeRuns": 1001, "recordBytes": 941817},
+      {"steps": 1000, "seconds": 3.5, "status": "passed", "nodeRuns": 1001, "recordBytes": 941818},
+      {"steps": 1000, "seconds": 3.34, "status": "passed", "nodeRuns": 1001, "recordBytes": 941817}
+    ]
+  },
+  "crashResume": {
+    "probe": "The same 1,000-step loop with 'echo step >> lines.txt', the runner SIGKILLed once lines.txt has 600 lines, then resumed with resume_rattish_run. Each step's line shows how many steps ran in total.",
+    "before": [
+      {"saveSeconds": 3600, "linesAtKill": 601, "linesAfterResume": 1601},
+      {"saveSeconds": 1.0, "linesAtKill": 600, "linesAfterResume": 1269}
+    ],
+    "after": [
+      {"saveSeconds": 3600, "linesAtKill": 601, "linesAfterResume": 1000},
+      {"saveSeconds": 1.0, "linesAtKill": 601, "linesAfterResume": 1001}
+    ]
+  }
+}

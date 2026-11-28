@@ -14,6 +14,7 @@ A headless backend's secrets folder is hidden from both the same way.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import stat
@@ -30,6 +31,8 @@ from gofer.core.agent_credentials import (
 )
 from gofer.core.agent_credentials import secrets_folders as _secrets_folders
 from gofer.utils.process import run_repository_git
+
+log = logging.getLogger(__name__)
 
 # Credential stores a shell started by an unattended agent has no reason to read.
 SECRET_PATHS = HOME_SECRET_PATHS
@@ -85,17 +88,120 @@ def git_common_dir(root: Path) -> Path | None:
     return None if common.is_relative_to(root.resolve()) else common
 
 
+def git_control_paths(root: Path, common: Path | None) -> list[Path]:
+    """Parts of a worktree's shared ``.git`` folder a turn granted that folder can't change.
+
+    Git runs hooks, and config can name more programs (``core.hooksPath``,
+    ``core.fsmonitor``, filters), the next time anyone runs git in the repository,
+    outside any sandbox. Claude Code protects these only under its own working folder,
+    which for a worktree is the checkout, not the shared folder. The worktree's own
+    ``commondir``, ``gitdir`` and ``config.worktree`` say which repository it belongs to,
+    and other worktrees' admin folders hold their checkouts' state and config. Commits
+    still write objects, refs, logs and the worktree's own index and HEAD.
+    """
+    if common is None:
+        return []
+    from gofer.rattish.agent_sandbox import ADMIN_PROTECTED_FILES, _worktree_admin_dir
+
+    own = _worktree_admin_dir(common, root)
+    paths = [common / "hooks", common / "config", common / "info"]
+    if own is not None:
+        paths += [own / name for name in ADMIN_PROTECTED_FILES]
+    try:
+        admins = sorted((common / "worktrees").iterdir())
+    except OSError:
+        admins = []
+    paths += [path for path in admins if path.is_dir() and path.resolve() != own]
+    try:
+        modules = sorted((common / "modules").iterdir())
+    except OSError:
+        modules = []
+    # Submodules keep their own hooks and config here.
+    paths += [module / name for module in modules for name in ("hooks", "config")]
+    return paths
+
+
+def git_control_deny_rules(paths: Iterable[Path]) -> list[str]:
+    """Edit rules for ``git_control_paths``: the sandbox covers only the shell."""
+    return [f"Edit({spec})" for path in paths for spec in _rule_paths(str(path))]
+
+
 def repository_git_dir(root: Path) -> Path | None:
-    """The shared ``.git`` folder of the repository ``root`` is in, or None outside one."""
+    """The shared ``.git`` folder of the repository ``root`` is in, when that repository
+    lists ``root``'s checkout back. None outside a repository and in every other case.
+
+    Git finds the shared folder by following the checkout's own ``.git`` file and any
+    ``commondir`` file in the folder it names. An earlier turn can write both, so they
+    alone could hand this turn another repository's ``.git``. The answer is used only
+    when the checkout's ``.git`` is a real folder that is both git's folder and the
+    shared one, or when git's folder is ``<shared>/worktrees/<id>`` and its ``gitdir``
+    file, which git writes in the repository and a turn can't write in another one,
+    names the checkout's ``.git`` file. Otherwise the reason is logged once and the
+    turn gets no shared folder, so its commits fail with git's own error.
+    """
     try:
         completed = run_repository_git(
-            root, "rev-parse", "--path-format=absolute", "--git-common-dir", timeout=10
+            root,
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if completed.returncode != 0 or not completed.stdout.strip():
+    lines = completed.stdout.splitlines()
+    if completed.returncode != 0 or len(lines) != 3 or not all(lines):
         return None
-    return Path(completed.stdout.strip()).resolve()
+    top, git_dir, common = (Path(line).resolve() for line in lines)
+    reason = _unlisted_checkout(root.resolve(), top, git_dir, common)
+    if reason is not None:
+        _log_refused_git_dir(root, common, reason)
+        return None
+    return common
+
+
+def _unlisted_checkout(root: Path, top: Path, git_dir: Path, common: Path) -> str | None:
+    """Why ``common`` isn't the repository of the checkout at ``top``, or None when it is.
+
+    ``top`` is the checkout folder holding ``root`` (``root`` itself unless the turn
+    works in a subfolder), so the ``.git`` checked is the one git found for ``root``.
+    """
+    if not root.is_relative_to(top):
+        return f"git names {top} as the checkout, which doesn't hold the folder"
+    dot_git = top / ".git"
+    if dot_git.is_symlink():
+        return f"{dot_git} is a link"
+    if dot_git.is_dir():
+        if git_dir == common == dot_git:
+            return None
+        return f"{dot_git} is a folder, but git reads {git_dir}"
+    if not dot_git.is_file():
+        return f"{dot_git} is missing"
+    if git_dir.parent != common / "worktrees":
+        return f"{git_dir} isn't one of {common}'s worktree folders"
+    try:
+        named = (git_dir / "gitdir").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return f"{git_dir / 'gitdir'} can't be read"
+    # Git writes an absolute path; with worktree.useRelativePaths it is relative to git_dir.
+    if not named or (git_dir / named).resolve() != dot_git:
+        return f"{common} doesn't list {top} as one of its worktrees"
+    return None
+
+
+_refusals_logged: set[tuple[str, str]] = set()
+_refusals_lock = threading.Lock()
+
+
+def _log_refused_git_dir(root: Path, common: Path, reason: str) -> None:
+    key = (str(root), reason)
+    with _refusals_lock:
+        if key in _refusals_logged:
+            return
+        _refusals_logged.add(key)
+    log.warning("A sandboxed turn in %s gets no write access to %s: %s.", root, common, reason)
 
 
 def _rule_paths(path: str) -> list[str]:
@@ -180,9 +286,9 @@ def sandbox_settings(
     paths inside Raticode's data folder the shell still needs to read, such as
     the command-slot wrappers. ``protected`` are
     extra folders the turn may read but not change (Claude Code makes every
-    ``--add-dir`` writable to the shell otherwise). ``hidden`` are folders inside
-    the turn's projects that neither the shell nor any file tool may read or change,
-    such as a Second Brain that keeps cloud processing off.
+    ``--add-dir`` writable to the shell otherwise). ``hidden`` are folders, inside
+    the turn's projects or anywhere else, that neither the shell nor any file tool may
+    read or change, such as a Second Brain that keeps cloud processing off.
     """
     root = root.resolve()
     data_dir = data_dir.resolve()

@@ -1,7 +1,8 @@
 import SecondBrainProvider, { useResearchSelection } from "./SecondBrainProvider.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowUpRight, CircleCheck, ExternalLink, FolderOpen, Plus, RefreshCw, ScrollText, ShieldCheck, TriangleAlert, Library, ChevronDown, ChevronRight, Layers } from "lucide-react";
-import { CITATION_STATES, SUPPORT_LABELS, estimateTokens, formatTime, reportSeriesRows, reportSummary } from "../lib/secondBrain.js";
+import { CITATION_STATES, SUPPORT_LABELS, estimateTokens, reportSeriesRows, reportSummary } from "../lib/secondBrain.js";
+import { dateTime } from "../lib/timeText.js";
 import { useSecondBrain, viewFor, navigate, openDialog, openDocument, documentById, blockById, updateClaim, updateReport, updateReportCitation, startTask } from "../lib/secondBrainStore.js";
 import { CitationState, Empty, Modal, Pill, ProgressBar, Segmented, TypeIcon } from "./SecondBrainParts.jsx";
 import { OriginalDocument } from "./SecondBrainReader.jsx";
@@ -39,7 +40,7 @@ function ReportProvenance({ report }) {
   if (!Object.keys(provenance).length) return <p className="sb-hint">No record of the task or thread that saved it. Brain settings › Find report history can look it up.</p>;
   const facts = [["Saved by", provenance.savedVia === "rem_task" ? "A Rem task" : provenance.savedVia === "conversation" ? "A Rem thread (found in the conversation archive)" : "A Rem thread"],
     ["Task", provenance.taskTitle], ["Thread", provenance.threadTitle], ["Project folder", provenance.projectRoot], ["Provider", provenance.provider], ["Requested model", provenance.model],
-    ["Saved", provenance.at ? formatTime(provenance.at) : ""], ["File since saved", provenance.hashMatches === false ? "Changed after saving" : provenance.hashMatches ? "Unchanged when recorded" : ""]].filter(([, value]) => value);
+    ["Saved", provenance.at ? dateTime(provenance.at) : ""], ["File since saved", provenance.hashMatches === false ? "Changed after saving" : provenance.hashMatches ? "Unchanged when recorded" : ""]].filter(([, value]) => value);
   return <dl className="sb-facts">{facts.map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl>;
 }
 
@@ -49,7 +50,7 @@ function ReportRowButton({ report, store, series }) {
   const summary = reportSummary(report, store.documents);
   return <button type="button" onClick={() => navigate("reports", { reportId: report.id })}>
     {series ? <Layers size={18} aria-hidden="true" /> : <ScrollText size={18} aria-hidden="true" />}
-    <span><strong>{report.title}</strong><small>{formatTime(report.generatedAt)} · {report.provider}{report.provenance?.taskTitle || report.provenance?.threadTitle ? ` · ${report.provenance.taskTitle || report.provenance.threadTitle}` : ""} · {report.citations.length} citations{collection ? ` · from “${collection.name}”` : ""}</small>{summary ? <span className="sb-report-summary">{summary}</span> : null}</span>
+    <span><strong>{report.title}</strong><small>{dateTime(report.generatedAt)} · {report.provider}{report.provenance?.taskTitle || report.provenance?.threadTitle ? ` · ${report.provenance.taskTitle || report.provenance.threadTitle}` : ""} · {report.citations.length} citations{collection ? ` · from “${collection.name}”` : ""}</small>{summary ? <span className="sb-report-summary">{summary}</span> : null}</span>
     <span className="sb-report-status">{series ? <Pill tone="brand">Newest of {series.editions} editions</Pill> : null}{health.changed.length ? <Pill tone="warning">{health.changed.length} citation{health.changed.length === 1 ? "" : "s"} to review</Pill> : null}{report.draft ? <Pill tone="brand">Draft</Pill> : null}{health.unreviewed.length ? <Pill>{health.unreviewed.length} claims unreviewed</Pill> : null}</span>
   </button>;
 }
@@ -83,7 +84,7 @@ function ReportDetail({ report, store, brain }) {
   return <div className="sb-page sb-report-page">
     <button type="button" className="sb-back" onClick={() => navigate("reports", { reportId: "" })}><ArrowLeft size={14} />All reports</button>
     <div className="sb-page-head">
-      <div><h3>{report.title}</h3><p>Generated {formatTime(report.generatedAt)} · {report.provider} · {report.modelReported} · {report.format.toUpperCase()}{collection ? <> · <span className="sb-nowrap">from <button type="button" className="sb-link" onClick={() => navigate("collections", { collectionId: collection.id, collectionTab: "evidence" })}>{collection.name}</button></span></> : null}</p></div>
+      <div><h3>{report.title}</h3><p>Generated {dateTime(report.generatedAt)} · {report.provider} · {report.modelReported} · {report.format.toUpperCase()}{collection ? <> · <span className="sb-nowrap">from <button type="button" className="sb-link" onClick={() => navigate("collections", { collectionId: collection.id, collectionTab: "evidence" })}>{collection.name}</button></span></> : null}</p></div>
       <div className="sb-actions">
         {report.draft ? <button type="button" className="sb-button sb-primary" disabled={health.unreviewed.length > 0 || health.changed.length > 0 || report.citations.some(citation => citation.state !== "found")} onClick={() => updateReport(report.id, { draft: false })}><CircleCheck size={14} />Publish reviewed report</button> : null}
         <button type="button" className="sb-button" onClick={() => artifact ? openDocument(artifact.id, { preview: false }) : window.goferDesktop?.workspace?.openPath?.(`${brain.root}/${report.artifactPath}`)}><ExternalLink size={14} />Open artifact</button>
@@ -128,7 +129,7 @@ function ReportDetail({ report, store, brain }) {
           : <dl className="sb-provenance">
             {[["Question", report.question], ["Collection", collection?.name || "None"], ["Source selection", report.sourceSelection?.mode === "auto" ? `Local search selected ${report.sourceSelection.selectedCount} of ${report.sourceSelection.candidateCount} eligible documents` : "Manual"], ["Source scope", report.scope === "selected" ? "Chosen sources only" : "Chosen sources and web research"], ["Filters", <code key="f" className="sb-mono">{report.filters || "None"}</code>],
               ...(report.sourceSelection?.mode === "auto" && report.sourceSelection.minimumRelevance !== undefined ? [["Minimum topic match", `${report.sourceSelection.minimumRelevance}%`], ["Top matches limit", report.sourceSelection.limit ?? "None"]] : []),
-              ["Provider", report.provider], ["Model requested", report.model], ["Model reported", report.modelReported], ["Generated", formatTime(report.generatedAt)], ["Template", report.template], ["Format and theme", `${report.format.toUpperCase()} · ${report.theme}`],
+              ["Provider", report.provider], ["Model requested", report.model], ["Model reported", report.modelReported], ["Generated", dateTime(report.generatedAt) || "Unknown"], ["Template", report.template], ["Format and theme", `${report.format.toUpperCase()} · ${report.theme}`],
               ["Retrieval generation", `#${report.retrievalGeneration}`], ["Output hash", <code key="h" className="sb-mono">{report.outputHash}</code>], ["Artifact", <code key="a" className="sb-mono">{report.artifactPath}</code>]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}
             <div><dt>Source versions</dt><dd><ul className="sb-version-list">{report.sourceVersions.map(source => { const doc = documentById(store, source.docId); return <li key={source.docId}><span>{doc?.title || source.docId}</span><code className="sb-mono">{source.version}</code>{doc?.version !== source.version ? <Pill tone="warning">Changed</Pill> : <Pill tone="success">Current</Pill>}</li>; })}</ul></dd></div>
             <p className="sb-hint">Rerunning with the same inputs can word the report differently. Provenance makes the inputs traceable, not the prose identical.</p>

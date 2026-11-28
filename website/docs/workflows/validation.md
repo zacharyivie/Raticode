@@ -64,6 +64,8 @@ workflow.rattish:7:3: error RATTISH_UNKNOWN_FIELD: Node 'greet' has no field 'co
 
 Codes don't change, so scripts that read them keep working.
 
+When the span is exactly the misspelled name, JSON output also lists the other spellings in `details.replacements`, closest first, for example `"replacements": ["summary"]`. The Studio uses it for a [one-click fix](../studio/editors.md#fix-a-misspelled-name-in-one-click) (from 0.6.2).
+
 ## Preflight diagnostics
 
 Preflight checks the current machine every time it runs. Typical failures:

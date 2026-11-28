@@ -627,6 +627,7 @@ def test_the_background_check_writes_a_waiting_record_at_most_once_a_minute(
     monkeypatch.setattr(rem_home_module.time, "monotonic", lambda: clock[0])
     written: list[str] = []
 
+    # Not the shared file writer: records which project a stand-in wrote for.
     def write(project: str) -> list[dict[str, Any]]:
         written.append(project)
         return []

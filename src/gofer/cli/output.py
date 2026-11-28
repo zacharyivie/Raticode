@@ -39,6 +39,13 @@ def wants_json(
     return json_flag or value == "json"
 
 
+def require_format(output_format: str) -> None:
+    """Exit 2 unless ``--format`` is exactly ``text`` or ``json``."""
+    if output_format not in OUTPUT_FORMATS:
+        typer.echo("Unsupported format. Use 'text' or 'json'.", err=True)
+        raise typer.Exit(2)
+
+
 def emit_json(payload: Any) -> None:
     """Write one JSON document to stdout without Rich markup or color codes."""
     sys.stdout.write(json.dumps(payload, default=str))

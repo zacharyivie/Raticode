@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Clock3, Download, Eye, FolderKanban, FolderOpen, FolderPlus, HardDrive, MoreHorizontal, Network, PackageOpen, Plus, Quote, ScrollText, Search, Settings2, TriangleAlert, Trash2, Upload, Library } from "lucide-react";
-import { searchLibrary, formatDay } from "../lib/secondBrain.js";
+import { searchLibrary, libraryDay } from "../lib/secondBrain.js";
+import { clockTime } from "../lib/timeText.js";
 import { useSecondBrain, setActiveBrain, applySavedSearch, navigate, openDialog, openDocument, updateSearch, libraryFor, viewFor, ensureLibrary, graphKey, useBrainData } from "../lib/secondBrainStore.js";
 import { BrainMark, Menu, TypeIcon, ProgressBar, useDismiss } from "./SecondBrainParts.jsx";
 import "./SecondBrainSidebar.css";
@@ -38,7 +39,7 @@ function BrainSwitcher({ brains, active, onOpen }) {
           <button type="button" className="sb-switcher-option" onClick={() => choose(brain.id)}>
             <BrainMark brain={brain} size="sm" />
             <span className="sb-switcher-text"><strong>{brain.name}</strong><small className="sb-mono">{brain.root.replace(/^\/home\/[^/]+/, "~")}</small>
-              <small>{brain.state === "unavailable" ? <span className="sb-unavailable"><HardDrive size={11} aria-hidden="true" />Unavailable · last opened {formatDay(brain.lastOpened, { relative: true })}</span> : <>Opened {formatDay(brain.lastOpened, { relative: true }).toLowerCase()} · {brain.index.documents.toLocaleString()} documents</>}</small></span>
+              <small>{brain.state === "unavailable" ? <span className="sb-unavailable"><HardDrive size={11} aria-hidden="true" />Unavailable · last opened {libraryDay(brain.lastOpened, { relative: true })}</span> : <>Opened {libraryDay(brain.lastOpened, { relative: true }).toLowerCase()} · {brain.index.documents.toLocaleString()} documents</>}</small></span>
             {brain.id === active?.id ? <Check size={14} aria-label="Current brain" /> : null}
           </button>
           <Menu label={`${brain.name} actions`} triggerClassName="sb-side-icon" trigger={<MoreHorizontal size={14} />} items={[
@@ -115,7 +116,7 @@ export default function SecondBrainSidebar({ active, open, onOpen }) {
       </div>
       {brain ? <button type="button" className="sb-side-status" onClick={() => go("settings")} aria-label={`Index status: ${brain.index.state === "updating" ? `updating, ${brain.index.progress}% complete` : "up to date"}. Open brain settings`}>
         <span>{brain.index.state === "updating" ? `Index updating · ${brain.index.progress}%` : "Index up to date"}</span>
-        <small>{brain.index.documents.toLocaleString()} documents · as of {new Date(brain.index.asOf).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
+        <small>{brain.index.documents.toLocaleString()} documents · as of {clockTime(brain.index.asOf)}</small>
         {brain.index.state === "updating" ? <ProgressBar value={brain.index.progress} label="Index progress" /> : null}
       </button> : null}
     </>}

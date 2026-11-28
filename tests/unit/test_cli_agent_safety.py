@@ -268,6 +268,9 @@ REFUSED_WRITES = [
     ("PATCH", "/api/organizations"),
     ("POST", "/api/organizations/x"),
     ("POST", "/api/workflows/a/b/validate"),
+    # No route answers these, so nothing is allowed there in advance.
+    ("POST", "/api/workflows/w/validate"),
+    ("POST", "/api/workflows/import/preview"),
 ]
 
 ALLOWED = [
@@ -276,9 +279,7 @@ ALLOWED = [
     ("GET", "/api/rattish/triggers"),
     ("GET", "/api/rattish/triggers/pause"),
     ("POST", "/api/rem/kanban/timeline"),
-    ("POST", "/api/workflows/w/validate"),
     ("POST", "/api/workflows/w/document/analyze"),
-    ("POST", "/api/workflows/import/preview"),
     ("POST", "/api/rattish/workflows/import/preview"),
     ("POST", "/api/rattish/triggers/preview"),
     ("POST", "/api/organizations"),
@@ -294,6 +295,48 @@ def test_agent_tokens_cant_write_outside_the_allow_list(method: str, path: str) 
 @pytest.mark.parametrize(("method", "path"), ALLOWED)
 def test_agent_tokens_can_read_and_make_listed_writes(method: str, path: str) -> None:
     assert agent_request_refusal(method, path) is None
+
+
+# Allow-listed writes no route-table entry answers. _dispatch_request hands each whole
+# path to the dispatcher named here, which reads the body's action or the rest of the path.
+DISPATCHED_WRITES = {
+    "/api/organizations": "_dispatch_organization_request",
+    "/api/second-brains": "_dispatch_second_brain_request",
+    "/api/social/posts": "_dispatch_social_request",
+    "/api/social/posts/x/edit": "_dispatch_social_request",
+}
+
+
+class _RecordingSocial:
+    """Stands in for the social service: answers with the name of the method called."""
+
+    def __getattr__(self, name: str) -> Any:
+        return lambda *args, **kwargs: {"called": name}
+
+
+def test_every_agent_token_write_allowance_reaches_a_handler() -> None:
+    """A stale entry would open a route added later at that path to agent tokens unreviewed."""
+    import inspect
+
+    from gofer.social.api import handle as social_handle
+    from gofer.ui.server import ROUTES, GoferUiRequestHandler
+
+    dispatch = inspect.getsource(GoferUiRequestHandler._dispatch_request)
+    for method, pattern in headless._AGENT_ALLOWED_WRITES:
+        path = pattern.pattern.replace(headless._SEGMENT, "x")
+        assert pattern.fullmatch(path), pattern.pattern
+        found = ROUTES.match(method, path)
+        if found is not None and found.route is not None:
+            continue
+        handler = DISPATCHED_WRITES.get(path)
+        assert handler is not None, f"{method} {pattern.pattern} matches no route"
+        # No Mount's miss answer stands in front of the dispatcher.
+        assert found is None, path
+        assert f"self.{handler}(" in dispatch, handler
+        if path.startswith("/api/social/"):
+            parts = path.removeprefix("/api/social/").split("/")
+            answer = social_handle(_RecordingSocial(), method, parts, "rem", {})  # type: ignore[arg-type]
+            assert answer.get("called"), path
 
 
 @pytest.mark.parametrize(
@@ -336,10 +379,7 @@ def test_every_known_write_route_is_classified_for_agent_tokens() -> None:
         if method in {"GET", "HEAD", "OPTIONS"}:
             continue
         refusal = agent_request_refusal(method, path)
-        if path in allowed_paths or path in {
-            "/api/workflows/x/validate",
-            "/api/workflows/x/document/analyze",
-        }:
+        if path in allowed_paths or path == "/api/workflows/x/document/analyze":
             continue
         # Webhook ingress has its own per-trigger token and never reaches this check.
         if "/webhooks/" in path or path.startswith("/api/organization-webhooks/"):

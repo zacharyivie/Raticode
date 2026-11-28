@@ -266,16 +266,7 @@ object Workflows {
      * an unknown op and close the session before it reports what it supports.
      */
     fun dropQueuedReads(state: JSONObject): Boolean {
-        val outbox = state.optJSONArray("outbox") ?: return false
-        val kept = JSONArray()
-        for (i in 0 until outbox.length()) {
-            val event = JSONObject(outbox.getString(i))
-            val op = event.optJSONObject("payload")?.optString("op").orEmpty()
-            if (event.optString("type") != "desktop.read" || !isWorkflowOp(op)) kept.put(outbox.getString(i))
-        }
-        if (kept.length() == outbox.length()) return false
-        state.put("outbox", kept)
-        return true
+        return Outbox.drop(state) { it.optString("type") == "desktop.read" && isWorkflowOp(it.optJSONObject("payload")?.optString("op").orEmpty()) }
     }
 
     private fun summary(json: JSONObject) = WorkflowSummary(json.optString("workflow_id"), json.optString("name"), json.optString("description"),
@@ -289,14 +280,16 @@ object Workflows {
             it.texts("accept"), it.optLong("max_size")) }.filter { it.name.isNotBlank() }.distinctBy { it.name } else null)
 
     private fun run(json: JSONObject) = WorkflowRun(json.optString("run_id"), json.optString("status"), json.optString("started_at"),
-        json.optString("finished_at"), json.optString("trigger"), json.optString("summary"))
+        json.optString("finished_at"), json.optString("trigger"), json.optString("summary"), json.optString("error"))
 
     private fun JSONObject?.texts(key: String): List<String> =
         this?.optJSONArray(key)?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } }.orEmpty()
     private fun JSONObject.objects(key: String): List<JSONObject> = optJSONArray(key)?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) } }.orEmpty()
 }
 
-data class WorkflowRun(val id: String, val status: String, val startedAt: String, val finishedAt: String, val trigger: String, val summary: String) {
+/** [error] says why a failed, interrupted or stopped run ended; blank for other runs and from a desktop with Raticode 0.6.1 or older. */
+data class WorkflowRun(val id: String, val status: String, val startedAt: String, val finishedAt: String, val trigger: String, val summary: String,
+                       val error: String = "") {
     val active get() = Workflows.active(status)
 }
 data class WorkflowSummary(val id: String, val name: String, val description: String, val project: String, val status: String,

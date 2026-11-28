@@ -9,23 +9,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from gofer.ui import brain_library
 from gofer.ui.brain_library import BrainLibrary, appeared_at, recency_lift
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
 
 BODY = (
     "## Bin\n\nCompost compost.\n\n"
     "## Wednesday\n\nTurned the compost pile and mixed in the dry autumn leaves today.\n"
 )
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def age(path: Path, days: float) -> None:

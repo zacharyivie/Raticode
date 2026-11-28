@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import socket
 import stat
+import sys
 import threading
 import time
 import urllib.error
@@ -24,12 +26,14 @@ from gofer.rattish.trigger_service import (
     SELF_TRIGGER_LIMIT,
     TriggerEngine,
     TriggerRun,
+    _ChangeHandler,
     run_in_process,
     scheduler_status,
 )
 from gofer.rattish.triggers import (
     TriggerError,
     TriggerStore,
+    describe_cron,
     occurrences_between,
     parse_cron,
     preview_cron,
@@ -61,6 +65,10 @@ Node hello:
 """
 
 
+_REWATCHED = (
+    "The watched folder was replaced, so changes made just before it was watched again "
+    "weren't seen."
+)
 _EVERY_SEVEN_MINUTES = {"expression": "*/7 * * * *", "timezone": "UTC"}
 
 
@@ -160,6 +168,46 @@ def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+@pytest.mark.parametrize(
+    ("expression", "words"),
+    [
+        ("0 9 * * 1-5", "Weekdays at 9:00"),
+        ("0 9 * * mon-fri", "Weekdays at 9:00"),
+        ("*/15 * * * *", "Every 15 minutes"),
+        ("* * * * *", "Every minute"),
+        ("5 * * * *", "Every hour at :05"),
+        ("30 17 * * *", "Every day at 17:30"),
+        ("0 9 * * 0-6", "Every day at 9:00"),
+        ("0 10 * * 6,0", "Weekends at 10:00"),
+        ("0 10 * * sat,sun", "Weekends at 10:00"),
+        ("0 9 * * 1", "Every Monday at 9:00"),
+        ("0 9 * * 7", "Every Sunday at 9:00"),
+        ("0 12 * * mon,wed,fri", "Every Mon, Wed and Fri at 12:00"),
+        ("15 8 1 * *", "Day 1 of every month at 8:15"),
+    ],
+)
+def test_common_cron_schedules_read_in_words(expression: str, words: str) -> None:
+    assert describe_cron(expression) == words
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "*/7 * * * *",  # restarts at :00, so not every 7 minutes
+        "0 */2 * * *",
+        "0 9-17 * * 1-5",
+        "0,30 9 * * *",
+        "0 9 * 1 *",
+        "0 9 31 * *",  # skips short months
+        "0 9 1 * 1",
+        "nope",
+        "",
+    ],
+)
+def test_unusual_or_invalid_cron_has_no_words(expression: str) -> None:
+    assert describe_cron(expression) == ""
 
 
 def test_crontab_weekdays_mean_what_cron_means() -> None:
@@ -475,6 +523,83 @@ def test_a_queued_file_run_sees_every_file_changed_while_it_waited(
     assert queued == {"a.txt": "modified", "b.txt": "created", "c.txt": "created"}
 
 
+@pytest.mark.parametrize("overlap", ["queue", "skip"])
+def test_a_batch_past_256_files_starts_the_next_run_with_the_rest(
+    data_dir: Path, source: Path, tmp_path: Path, overlap: str
+) -> None:
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    runs = FakeRuns(hold=True)
+    engine, _, clock = _engine(data_dir, runs=runs)
+    record, _ = engine.store.create(
+        kind="file",
+        source_path=source,
+        config={"path": str(watched), "debounceSeconds": 1},
+        overlap=overlap,
+        now=START,
+    )
+    engine.become_owner()
+    names = [f"file-{index:03}.txt" for index in range(300)]
+    for name in names:
+        engine.note_file_change(record.id, "created", watched / name)
+    clock.advance(2)
+    engine.tick()
+    _wait_for(lambda: len(runs.started) == 1)
+    assert [item["name"] for item in runs.started[0].events] == names[:256]
+
+    # The rest waits for that run, whatever the overlap policy, and skips no debounce.
+    clock.advance(1)
+    engine.tick()
+    assert len(runs.started) == 1
+    runs.release.set()
+    _wait_for(lambda: runs.finished == 1 and not engine._active)
+    engine.tick()
+    _settled(engine, runs, 2)
+
+    assert [len(run.events) for run in runs.started] == [256, 44]
+    seen = [item["path"] for run in runs.started for item in run.events]
+    assert sorted(seen) == sorted(str(watched / name) for name in names)
+    assert [item["name"] for item in runs.started[1].events] == names[256:]
+    first, second = sorted(engine.store.events(trigger_id=record.id), key=lambda item: item.id)
+    assert first.status == second.status == "passed"
+    assert "256 of 300" in first.message
+    assert "The other 44 start the next run." in first.message
+    assert engine._self_triggered.get(record.id, 0) == 0
+
+
+def test_changed_files_past_the_scanned_path_limit_are_counted_as_dropped(
+    data_dir: Path, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gofer.rattish import trigger_service
+
+    monkeypatch.setattr(trigger_service, "MAX_FILE_CHANGES_PER_RUN", 2)
+    monkeypatch.setattr(trigger_service, "MAX_PENDING_FILE_CHANGES", 3)
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    engine, runs, clock = _engine(data_dir)
+    record, _ = engine.store.create(
+        kind="file",
+        source_path=source,
+        config={"path": str(watched), "debounceSeconds": 1},
+        now=START,
+    )
+    engine.become_owner()
+    for name in ["a", "b", "c", "d", "e", "a"]:
+        engine.note_file_change(record.id, "modified", watched / name)
+    clock.advance(2)
+    engine.tick()
+    _settled(engine, runs, 1)
+    engine.tick()
+    _settled(engine, runs, 2)
+
+    assert [[item["name"] for item in run.events] for run in runs.started] == [["a", "b"], ["c"]]
+    first = min(engine.store.events(trigger_id=record.id), key=lambda item: item.id)
+    assert first.message == (
+        "Started with 2 of 3 changed files. The other changed file starts the next run. "
+        "2 more changed files weren't kept: at most 3 wait to run."
+    )
+
+
 def test_constant_changes_still_start_a_run_eventually(
     data_dir: Path, source: Path, tmp_path: Path
 ) -> None:
@@ -494,6 +619,58 @@ def test_constant_changes_still_start_a_run_eventually(
         engine.tick()
     _settled(engine, runs, 1)
     assert len(runs.started) == 1
+
+
+@pytest.mark.parametrize(
+    ("glob", "relative", "expected"),
+    [
+        ("**/*.md", "a.md", True),
+        ("**/*.md", "x/y/a.md", True),
+        ("**/*.md", "x/a.txt", False),
+        ("docs/**/*.md", "docs/a.md", True),
+        ("docs/**/*.md", "docs/x/a.md", True),
+        ("docs/**/*.md", "other/a.md", False),
+        ("*.csv", "a.csv", True),
+        ("*.csv", "sub/a.csv", True),
+        ("*.csv", "sub/a.txt", False),
+        ("docs/*.md", "docs/a.md", True),
+        ("docs/*.md", "docs/x/a.md", False),
+    ],
+)
+def test_file_trigger_glob_reads_double_star_like_a_loop(
+    tmp_path: Path, glob: str, relative: str, expected: bool
+) -> None:
+    trigger = SimpleNamespace(id="trg_glob", config={"path": str(tmp_path), "glob": glob})
+    handler = _ChangeHandler(cast(Any, None), cast(Any, trigger))
+    assert handler._matches(tmp_path / relative) is expected
+
+
+def test_a_deeply_nested_file_never_stops_the_file_triggers(tmp_path: Path) -> None:
+    """Nightly audit, 27 November: matching recursed once per folder, so a file about
+    1,200 folders deep raised RecursionError in watchdog's thread, which ended it and
+    stopped every file trigger on the computer without a word."""
+    from watchdog.events import FileCreatedEvent
+
+    trigger = SimpleNamespace(id="trg_deep", config={"path": str(tmp_path), "glob": "**/*.md"})
+    handler = _ChangeHandler(cast(Any, None), cast(Any, trigger))
+    deep = tmp_path.joinpath(*(["a"] * 1500), "x.md")
+    assert handler._matches(deep) is True
+    assert handler._matches(tmp_path.joinpath(*(["a"] * 1500), "x.txt")) is False
+    # Many ** segments stay fast too.
+    many = SimpleNamespace(
+        id="trg_many", config={"path": str(tmp_path), "glob": "/".join(["**"] * 25 + ["#"])}
+    )
+    started = time.monotonic()
+    assert (
+        _ChangeHandler(cast(Any, None), cast(Any, many))._matches(tmp_path.joinpath(*(["a"] * 30)))
+        is False
+    )
+    assert time.monotonic() - started < 1
+    # An event the handler can't process is logged and skipped, never raised into the
+    # watcher's thread.
+    failing = SimpleNamespace(note_file_change=lambda *_: (_ for _ in ()).throw(RuntimeError("x")))
+    broken = _ChangeHandler(cast(Any, failing), cast(Any, trigger))
+    broken.on_any_event(FileCreatedEvent(str(tmp_path / "y.md")))
 
 
 def test_real_file_events_start_the_workflow(data_dir: Path, source: Path, tmp_path: Path) -> None:
@@ -547,6 +724,201 @@ def test_two_triggers_can_watch_one_folder(data_dir: Path, source: Path, tmp_pat
         _wait_for(lambda: len(runs.started) == 1, timeout=10)
     finally:
         engine.stop()
+
+
+def _run_after_quiet(engine: TriggerEngine, runs: FakeRuns, clock: Clock) -> TriggerRun:
+    """Tick past the debounce until the changed files start their run."""
+
+    def started() -> bool:
+        clock.advance(2)
+        engine.tick()
+        return bool(runs.started)
+
+    _wait_for(started, timeout=10)
+    _settled(engine, runs, 1)
+    return runs.started[0]
+
+
+def test_a_file_trigger_watches_its_folder_again_after_it_is_deleted_and_recreated(
+    data_dir: Path, source: Path, tmp_path: Path
+) -> None:
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    engine, runs, clock = _engine(data_dir, enable_watchers=True)
+    record, _ = engine.store.create(
+        kind="file", source_path=source, config={"path": str(watched), "debounceSeconds": 1}
+    )
+    engine.become_owner()
+    try:
+        old_handler = engine._watches[record.id][2]
+        shutil.rmtree(watched)
+        # Let the watch see the delete: the folder made next may reuse its inode number.
+        _wait_for(lambda: getattr(old_handler, "replaced", True))
+        watched.mkdir()
+
+        clock.advance(16)
+        engine.tick()
+        (watched / "after.txt").write_text("new", encoding="utf-8")
+        _wait_for(lambda: record.id in engine._changes)
+        run = _run_after_quiet(engine, runs, clock)
+
+        assert [item["path"] for item in run.events] == [str(watched / "after.txt")]
+        messages = [item.message for item in engine.store.events(trigger_id=record.id)]
+        assert _REWATCHED in messages
+    finally:
+        engine.stop()
+
+
+def test_a_file_trigger_stops_reporting_a_folder_moved_away_and_watches_the_new_one(
+    data_dir: Path, source: Path, tmp_path: Path
+) -> None:
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    moved = tmp_path / "moved"
+    engine, runs, clock = _engine(data_dir, enable_watchers=True)
+    record, _ = engine.store.create(
+        kind="file", source_path=source, config={"path": str(watched), "debounceSeconds": 1}
+    )
+    engine.become_owner()
+    try:
+        old_handler = engine._watches[record.id][2]
+        watched.rename(moved)
+        (moved / "left-behind.txt").write_text("old", encoding="utf-8")
+        _wait_for(lambda: getattr(old_handler, "replaced", True))
+        time.sleep(0.2)  # Any later event of that write arrives too.
+        engine.tick()
+        assert record.id not in engine._changes
+        assert engine._watch_errors[record.id] == f"Nothing to watch at {watched}."
+
+        watched.mkdir()
+        clock.advance(16)
+        engine.tick()
+        assert record.id not in engine._watch_errors
+        (moved / "still-left-behind.txt").write_text("old", encoding="utf-8")
+        (watched / "new.txt").write_text("new", encoding="utf-8")
+        _wait_for(lambda: record.id in engine._changes)
+        time.sleep(0.2)
+        run = _run_after_quiet(engine, runs, clock)
+
+        assert [item["path"] for item in run.events] == [str(watched / "new.txt")]
+        messages = [item.message for item in engine.store.events(trigger_id=record.id)]
+        assert _REWATCHED in messages
+    finally:
+        engine.stop()
+
+
+def _held_paths(engine: TriggerEngine, runs: FakeRuns, trigger_id: str) -> set[str]:
+    """Changed files a file trigger holds: waiting for quiet, or in runs it started."""
+    with engine._lock:
+        pending = engine._changes.get(trigger_id)
+        held = set(pending.paths) if pending is not None else set()
+    for run in list(runs.started):
+        held.update(str(item["path"]) for item in run.events)
+    return held
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="inotify's event queue is Linux only")
+def test_a_burst_that_overflows_the_event_queue_still_reaches_every_changed_file(
+    data_dir: Path, source: Path, tmp_path: Path
+) -> None:
+    """27 November: past fs.inotify.max_queued_events (16,384) the kernel drops events and
+    watchdog only logged it, so files in a burst never reached their trigger."""
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    engine, runs, clock = _engine(data_dir, enable_watchers=True)
+    record, _ = engine.store.create(
+        kind="file",
+        source_path=source,
+        config={"path": str(watched), "debounceSeconds": 1, "glob": "*.csv"},
+    )
+    engine.become_owner()
+    try:
+        observer = engine._observer
+        assert observer is not None
+        reader = cast(Any, observer)._inotify_fd
+        wanted: set[str] = set()
+        # Hold the inotify reader still, as a busy computer would, so the burst's
+        # 90,000 events overflow the kernel's queue whatever its speed.
+        with reader._lock:
+            for number in range(1, 30_001):
+                if number % 400:
+                    path = watched / f"data-{number:05}.txt"
+                else:
+                    path = watched / f"report-{number // 400:03}.csv"
+                    wanted.add(str(path))
+                path.write_bytes(b"x")
+        assert len(wanted) == 75
+
+        def all_held() -> bool:
+            clock.advance(0.2)
+            engine.tick()
+            return wanted <= _held_paths(engine, runs, record.id)
+
+        _wait_for(all_held, timeout=60)
+        messages = [item.message for item in engine.store.events(trigger_id=record.id)]
+        assert any("looked through the folder again" in message for message in messages)
+    finally:
+        engine.stop()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="inotify's event queue is Linux only")
+def test_an_event_queue_overflow_looks_through_the_folder_once_and_says_so(
+    data_dir: Path, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from watchdog.observers.inotify_c import InotifyConstants, InotifyEvent
+
+    from gofer.rattish import trigger_service
+
+    monkeypatch.setattr(trigger_service, "OVERFLOW_LOOK_BACK_SECONDS", 0.1)
+    watched = tmp_path / "watched"
+    (watched / "sub").mkdir(parents=True)
+    (watched / ".git").mkdir()
+    (watched / "old.csv").write_text("before the watch", encoding="utf-8")
+    time.sleep(0.3)
+    engine, runs, clock = _engine(data_dir, enable_watchers=True)
+    record, _ = engine.store.create(
+        kind="file",
+        source_path=source,
+        config={"path": str(watched), "debounceSeconds": 1, "glob": "*.csv"},
+    )
+    engine.become_owner()
+    try:
+        for name in ["a.csv", "b.csv", "sub/c.csv", "notes.txt", ".git/d.csv"]:
+            (watched / name).write_text("x", encoding="utf-8")
+        observer = engine._observer
+        assert observer is not None
+        cast(Any, observer)._inotify_fd.handle_event(
+            InotifyEvent(-1, InotifyConstants.IN_Q_OVERFLOW, 0, b"")
+        )
+        engine.tick()
+        engine.tick()
+
+        entries = engine.store.events(trigger_id=record.id)
+        assert [item.message for item in entries] == [
+            "Files changed faster than this computer could report them, so Raticode looked "
+            "through the folder again and found 3 changed files. Files deleted during that "
+            "burst weren't seen."
+        ]
+        assert entries[0].status == "missed"
+        run = _run_after_quiet(engine, runs, clock)
+        assert sorted(item["name"] for item in run.events) == ["a.csv", "b.csv", "c.csv"]
+    finally:
+        engine.stop()
+
+
+def test_overflow_history_counts_what_the_second_look_found() -> None:
+    from gofer.rattish import trigger_service
+
+    message = trigger_service.overflow_message
+    assert message(1) == (
+        "Files changed faster than this computer could report them, so Raticode looked "
+        "through the folder again and found 1 changed file. Files deleted during that burst "
+        "weren't seen."
+    )
+    assert "found no changed files." in message(0)
+    assert "found 41 changed files." in message(41)
+    assert "found at least 5,000 changed files." in message(5000)
+    assert "looked at the file again and found it changed." in message(1, single_file=True)
 
 
 def test_a_workflow_that_keeps_starting_itself_gets_turned_off(
@@ -740,6 +1112,123 @@ def test_a_busy_webhook_port_is_reported(data_dir: Path, source: Path) -> None:
             assert f"127.0.0.1:{port}" in status["webhookError"]
         finally:
             engine._resign(wait_seconds=0)
+
+
+def _failed_messages(store: TriggerStore, trigger_id: str) -> list[str]:
+    return [item.message for item in store.events(trigger_id=trigger_id) if item.status == "failed"]
+
+
+def test_a_busy_webhook_port_leaves_one_failed_entry_on_each_webhook_trigger_that_is_on(
+    data_dir: Path, source: Path
+) -> None:
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen()
+        port = blocker.getsockname()[1]
+        engine, _, clock = _engine(data_dir, enable_webhooks=True)
+        engine.store.set_webhook_port(port)
+        first, _ = engine.store.create(kind="webhook", source_path=source)
+        second, _ = engine.store.create(kind="webhook", source_path=source)
+        off, _ = engine.store.create(kind="webhook", source_path=source)
+        engine.store.update(off.id, enabled=False)
+        engine.become_owner()
+        try:
+            for _ in range(2):
+                clock.advance(16)
+                engine.tick()
+            for record in (first, second):
+                failed = _failed_messages(engine.store, record.id)
+                assert len(failed) == 1
+                assert failed[0].startswith(f"Can't start: Couldn't listen on 127.0.0.1:{port}: ")
+            assert _failed_messages(engine.store, off.id) == []
+        finally:
+            engine._resign(wait_seconds=0)
+
+
+def test_a_file_trigger_on_a_missing_folder_says_so_once_in_its_history(
+    data_dir: Path, source: Path, tmp_path: Path
+) -> None:
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    engine, _, clock = _engine(data_dir, enable_watchers=True)
+    record, _ = engine.store.create(kind="file", source_path=source, config={"path": str(watched)})
+    watched.rmdir()
+    engine.become_owner()
+    try:
+        for _ in range(2):
+            clock.advance(16)
+            engine.tick()
+        assert _failed_messages(engine.store, record.id) == [
+            f"Can't start: Nothing to watch at {watched}."
+        ]
+        # The latest entry is reused after a restart too.
+        engine.stop()
+        engine, _, _ = _engine(data_dir, clock=clock, enable_watchers=True)
+        engine.become_owner()
+        assert len(_failed_messages(engine.store, record.id)) == 1
+        assert engine.store.latest_event(record.id).count == 2
+
+        # Once it is watched again, losing the folder again is a new entry after the
+        # rewatch entry.
+        watched.mkdir()
+        clock.advance(16)
+        engine.tick()
+        assert record.id in engine._watches
+        watched.rmdir()
+        _wait_for(lambda: engine._a_watched_folder_went_away())
+        clock.advance(1)
+        engine.tick()
+        watched.mkdir()
+        clock.advance(16)
+        engine.tick()
+        watched.rmdir()
+        _wait_for(lambda: engine._a_watched_folder_went_away())
+        clock.advance(1)
+        engine.tick()
+        statuses = [item.status for item in engine.store.events(trigger_id=record.id)]
+        assert statuses[:3] == ["failed", "missed", "failed"]
+    finally:
+        engine.stop()
+
+
+def test_an_unreadable_schedule_says_so_once_in_its_history(data_dir: Path, source: Path) -> None:
+    engine, _, clock = _engine(data_dir)
+    trigger_id = _cron(engine.store, source)
+    broken = json.dumps({"expression": "not a schedule", "timezone": "UTC"})
+    with engine.store._transaction() as db:
+        db.execute("UPDATE triggers SET config = ? WHERE id = ?", (broken, trigger_id))
+    engine.become_owner()
+    for _ in range(2):
+        clock.advance(16)
+        engine.tick()
+    failed = _failed_messages(engine.store, trigger_id)
+    assert failed == [f"Can't start: {engine._watch_errors[trigger_id]}"]
+    engine._resign(wait_seconds=0)
+
+
+def test_no_cant_start_entry_is_written_while_triggers_are_paused(
+    data_dir: Path, source: Path, tmp_path: Path
+) -> None:
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    engine, _, clock = _engine(data_dir, enable_watchers=True)
+    record, _ = engine.store.create(kind="file", source_path=source, config={"path": str(watched)})
+    watched.rmdir()
+    engine.store.set_paused(True, now=clock())
+    engine.become_owner()
+    try:
+        clock.advance(16)
+        engine.tick()
+        assert _failed_messages(engine.store, record.id) == []
+
+        engine.store.set_paused(False, now=clock())
+        clock.advance(16)
+        engine.tick()
+        assert _failed_messages(engine.store, record.id) == [
+            f"Can't start: Nothing to watch at {watched}."
+        ]
+    finally:
+        engine.stop()
 
 
 def test_only_one_scheduler_owns_triggers_and_a_standby_takes_over(
@@ -955,6 +1444,9 @@ def test_cli_manages_triggers(
 
     listed = _json_cli("list", str(source), *base)
     assert [item["kind"] for item in listed["triggers"]] == ["cron", "file", "webhook"]
+    assert [item["summary"] for item in listed["triggers"]] == ["Weekdays at 9:00", "", ""]
+    text = runner.invoke(app, ["rattish", "triggers", "list", str(source), *base]).output
+    assert 'Weekdays at 9:00 (UTC)  cron="0 9 * * 1-5"' in text
 
     assert (
         _json_cli("update", trigger["id"], "--cron", "0 10 * * *", *base)["trigger"]["config"][

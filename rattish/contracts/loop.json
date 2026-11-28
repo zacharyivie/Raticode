@@ -1,16 +1,16 @@
 {
   "$schema": "../schemas/node-contract.schema.json", "contract_version": 1, "node_type": "loop", "runtime_handler": "raticode.loop",
   "catalog": {"category": "flow", "summary": "Run the next steps once for each item", "docs_path": "/docs/nodes/loop"},
-  "configuration_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {"source": {"type": "object", "x-rattish-variant-discriminator": "type", "x-rattish-variant-defaults": {
+  "configuration_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {"source": {"description": "Iteration source; its nested fields depend on type.", "type": "object", "x-rattish-variant-discriminator": "type", "x-rattish-variant-defaults": {
     "count": {"count": 1, "max_concurrency": 1, "fail_fast": false},
     "tabular": {"max_concurrency": 1, "fail_fast": false},
     "directory": {"glob": "*", "include_content": false, "max_concurrency": 1, "fail_fast": false},
     "trigger-events": {"include_content": false, "max_concurrency": 1, "fail_fast": false},
     "infinite": {"max_concurrency": 1, "fail_fast": false}
   }, "properties": {
-    "type": {"enum": ["count", "tabular", "directory", "trigger-events", "infinite"], "x-rattish-case-insensitive": true}, "count": {"type": "integer", "minimum": 0},
-    "path": {"type": "string", "x-rattish-type": "Path"}, "glob": {"type": "string"}, "include_content": {"type": "boolean"},
-    "max_concurrency": {"type": "integer", "minimum": 1}, "fail_fast": {"type": "boolean"}
+    "type": {"description": "Where the iterations come from.", "enum": ["count", "tabular", "directory", "trigger-events", "infinite"], "x-rattish-case-insensitive": true}, "count": {"description": "Number of iterations for a count source.", "type": "integer", "minimum": 0},
+    "path": {"description": "File or folder a tabular or directory source reads.", "type": "string", "x-rattish-type": "Path"}, "glob": {"description": "File pattern for a directory source.", "type": "string"}, "include_content": {"description": "Include each file's text in its iteration.", "type": "boolean"},
+    "max_concurrency": {"description": "Iterations that may run at once.", "type": "integer", "minimum": 1}, "fail_fast": {"description": "Stop at the first failed iteration instead of finishing the others.", "type": "boolean"}
   }, "required": ["type"], "additionalProperties": false}}, "required": ["source"], "additionalProperties": false},
   "defaults": {}, "computed_defaults": {}, "input_ports": {"mode": "closed", "ports": {}},
   "success_output": {"kind": "fixed", "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}},

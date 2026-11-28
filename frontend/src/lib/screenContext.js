@@ -6,7 +6,7 @@ import { useSyncExternalStore } from "react";
 
 export const SCREEN_COMMAND_ID = "voice.askAboutScreen";
 // Rem's chat takes one picture of up to 5 MB; the desktop app keeps under it.
-export const SCREEN_MAX_BYTES = 5 * 1024 * 1024;
+const SCREEN_MAX_BYTES = 5 * 1024 * 1024;
 
 export function screenBridge() {
   return typeof window === "undefined" ? null : window.goferDesktop?.screenContext ?? null;

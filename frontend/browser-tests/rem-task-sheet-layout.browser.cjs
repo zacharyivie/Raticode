@@ -72,7 +72,7 @@ const MEASURE = `(() => {
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(__dirname, ".."), logLevel: "error", cacheDir: testViteCacheDir("task-sheet-layout"),
+  vite = await createServer({ configLoader: "runner", root: path.join(__dirname, ".."), logLevel: "error", cacheDir: testViteCacheDir("task-sheet-layout"),
     server: { host: "127.0.0.1", port: 0 }, plugins: [{
       name: "task-sheet-layout-test",
       resolveId(id) { if (id === "/task-sheet-entry.jsx") return id; },

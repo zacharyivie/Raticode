@@ -109,6 +109,9 @@ class RemStore:
     def thread_ids(self) -> list[str]:
         return ["thread1"]
 
+    def thread_runs(self, identifier: str) -> list[str]:
+        return ["run1"] if identifier == "thread1" else []
+
     def thread(self, identifier: str) -> dict[str, Any]:
         if identifier != "thread1":
             raise KeyError(identifier)
@@ -1678,6 +1681,60 @@ def test_rem_task_lists_each_check_of_the_newest_run_with_its_reason(phone):
     assert len(task["last_run"]["criteria"]) == 40
 
 
+def test_rem_task_sends_custom_schedules_in_words_and_the_reviews_notes(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    rem = app.desktop.rem
+    notes = [
+        {"severity": "note", "axis": "standards", "file": "src/a.py", "explanation": "Rename x."},
+        {"severity": "should_fix", "axis": "spec", "file": "f" * 900, "explanation": "y" * 5000},
+        {"severity": "note", "axis": "spec", "file": "", "explanation": "  "},
+        "not a note",
+    ]
+    last = {"id": "run1", "state": "succeeded", "criteria": [], "review_notes": notes}
+    rem.store.task.update(
+        schedule={"kind": "cron", "cron": "0 9 * * 1-5", "timezone": "America/Denver"},
+        active_run=None,
+        last_run=last,
+        recent_runs=[last],
+    )
+
+    task = send("desktop.read", "rem.task", {"task_id": rem.store.task["id"]})["value"]
+    assert task["schedule"]["cron"] == "0 9 * * 1-5"
+    assert task["schedule"]["summary"] == "Weekdays at 9:00"
+    assert task["schedule"]["timezone"] == "America/Denver"
+    # The polled list carries the words too: the task row shows them.
+    home = send("desktop.read", "rem.home")["value"]
+    assert home["tasks"][0]["schedule"]["summary"] == "Weekdays at 9:00"
+    kept = task["last_run"]["review_notes"]
+    assert kept[0] == {
+        "severity": "note",
+        "axis": "standards",
+        "file": "src/a.py",
+        "explanation": "Rename x.",
+    }
+    # Bounded like checks; a note without an explanation is left out.
+    assert len(kept) == 2
+    assert len(kept[1]["explanation"]) == 1500 and len(kept[1]["file"]) == 500
+    # Older runs and the task list keep their counts only.
+    assert all("review_notes" not in run for run in task["runs"])
+    assert "review_notes" not in home["tasks"][0]["last_run"]
+
+    many = [{"severity": "note", "axis": "spec", "explanation": f"n{i}"} for i in range(60)]
+    rem.store.task.update(
+        schedule={"kind": "cron", "cron": "7 3 1-9/2 * *", "timezone": ""},
+        last_run={**last, "review_notes": many},
+    )
+    task = send("desktop.read", "rem.task", {"task_id": rem.store.task["id"]})["value"]
+    assert len(task["last_run"]["review_notes"]) == 40
+    # An unusual expression has no words, so the phone shows the expression itself.
+    assert task["schedule"] == {**task["schedule"], "cron": "7 3 1-9/2 * *", "summary": ""}
+
+    rem.store.task.update(schedule={"kind": "daily", "local_time": "09:00"})
+    task = send("desktop.read", "rem.task", {"task_id": rem.store.task["id"]})["value"]
+    assert task["schedule"]["cron"] == "" and task["schedule"]["summary"] == ""
+
+
 def test_source_previews_are_fetched_by_the_desktop(phone, monkeypatch):
     app, peer, _, send = phone
     png = b"\x89PNG\r\n\x1a\n" + b"0" * 100
@@ -2507,6 +2564,32 @@ def test_phone_presses_ok_on_a_change_the_user_asked_rem_for(phone, home, tmp_pa
         {"action": "confirm_edit", "id": entry["id"], "expected_revision": 0},
     )
     assert again["ok"] is False and "already made" in again["detail"]
+
+
+def test_alert_paths_with_spaces_become_their_last_names(tmp_path, monkeypatch):
+    def alert(text: str) -> str:
+        return module._alert_text(text, 500)
+
+    # The Mac data folder and a Windows user folder, which aren't on this disk.
+    mac = "/Users/ana/Library/Application Support/gofer/radish/runs/wf/20261125.json"
+    assert alert(f"Run artifact: {mac}") == "Run artifact: 20261125.json"
+    windows = "C:\\Users\\Ana Lopez\\Projects\\site\\package.json"
+    assert alert(windows) == "package.json"
+    assert alert(f"Saved {windows} for you.") == "Saved package.json for you."
+    assert alert("/home/me/My Videos/clip.mp4 is ready") == "clip.mp4 is ready"
+    # A spaced project folder with a word that has no separator: the disk says where each
+    # path ends, for a file whose name has a space and for a deleted file.
+    project = tmp_path / "Client A Site"
+    (project / "docs").mkdir(parents=True)
+    (project / "docs" / "plan final.md").write_text("plan")
+    monkeypatch.setattr(module, "_base_roots", lambda: (str(project),))
+    said = f"Read {project}/docs/plan final.md and {project}/gone.md first."
+    assert alert(said) == "Read plan final.md and gone.md first."
+    assert str(tmp_path) not in alert(f"Wrote [the plan]({project}/docs/plan final.md).")
+    # Text that names no folder stays as written.
+    assert alert("See /tmp, ~/notes.md and https://example.com/a/b") == (
+        "See /tmp, ~/notes.md and https://example.com/a/b"
+    )
 
 
 def test_task_update_cards_carry_the_decision_and_its_status_now(phone, home, tmp_path):

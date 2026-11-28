@@ -276,7 +276,7 @@ export function markdownUrlTransform(url, key) {
   return defaultUrlTransform(url);
 }
 
-export function isExternalUrl(value) {
+function isExternalUrl(value) {
   return /^(?:https?:|mailto:)/i.test(value) || String(value ?? "").startsWith("//");
 }
 

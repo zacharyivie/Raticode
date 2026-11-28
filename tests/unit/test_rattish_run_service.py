@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import threading
 from collections import Counter
 from pathlib import Path
 
@@ -10,6 +12,8 @@ import anyio
 import pytest
 
 from gofer.core.approvals import ApprovalStore
+from gofer.rattish import run_service, run_worktrees
+from gofer.rattish.run_journal import journal_path
 from gofer.rattish.run_service import RattishRunArtifactError, _write_json_atomic, run_rattish_file
 from gofer.rattish.runtime import HandlerResult, NodeHandlerRegistry, RuntimeErrorInfo
 from gofer.rattish.workspaces import create_registered_workflow
@@ -132,7 +136,7 @@ Node execute:
 
 
 def _output(stdout: str = "") -> dict[str, object]:
-    return {"stdout": stdout, "stderr": "", "exit_code": 0}
+    return {"stdout": stdout, "stderr": "", "exit_code": 0, "truncated": False}
 
 
 @pytest.mark.anyio
@@ -632,6 +636,143 @@ async def test_unsaveable_node_output_fails_the_run_with_a_reason(tmp_path: Path
 
 
 @pytest.mark.anyio
+async def test_unsaveable_final_record_saves_a_failed_record_instead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(_bash_source(), encoding="utf-8")
+    real_write = run_service._write_json_atomic
+    refused: list[str] = []
+
+    def write_once_refusing_final(path: Path, document: dict[str, object]) -> None:
+        # Live saves say running; the first finished record is refused once.
+        if document["status"] != "running" and not refused:
+            refused.append(str(document["status"]))
+            raise RattishRunArtifactError("simulated unsaveable value")
+        real_write(path, document)
+
+    monkeypatch.setattr(run_service, "_write_json_atomic", write_once_refusing_final)
+
+    result = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+
+    assert refused == ["passed"]
+    assert result.status == "failed"
+    assert result.document["error"]["code"] == "RATTISH_RUN_RECORD_INVALID"
+    assert "could not be saved as produced" in result.document["error"]["message"]
+    assert "simulated unsaveable value" in result.document["error"]["message"]
+    assert result.document["events"][-1]["type"] == "workflow_completed"
+    assert result.document["events"][-1]["status"] == "failed"
+    saved = json.loads(result.path.read_text(encoding="utf-8"))
+    assert saved == result.document
+    assert not journal_path(result.path).exists()
+
+
+@pytest.mark.anyio
+async def test_unpublishable_event_fails_the_run_and_keeps_the_earlier_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(_bash_source(), encoding="utf-8")
+    real_add = run_service._LiveRecord.add
+    before: list[tuple[int, int]] = []
+
+    def add_refusing_first_node_run(
+        self: run_service._LiveRecord,
+        event: dict[str, object],
+        node_run: dict[str, object] | None,
+    ) -> None:
+        if node_run is not None and not before:
+            before.append((len(self.document["events"]), len(self.document["runs"])))
+            raise RattishRunArtifactError("simulated unpublishable event")
+        real_add(self, event, node_run)
+
+    monkeypatch.setattr(run_service._LiveRecord, "add", add_refusing_first_node_run)
+
+    result = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+
+    assert before == [(2, 0)]
+    assert result.status == "failed"
+    assert result.document["error"]["code"] == "RATTISH_RUN_RECORD_INVALID"
+    message = result.document["error"]["message"]
+    assert "Node 'execute' produced output that cannot be saved to the run record" in message
+    assert "simulated unpublishable event" in message
+    saved = json.loads(result.path.read_text(encoding="utf-8"))
+    assert saved == result.document
+    # Only the run's own final event follows the ones saved before the refused one.
+    events, runs = before[0]
+    assert [event["type"] for event in saved["events"]] == [
+        "workflow_started",
+        "node_started",
+        "workflow_completed",
+    ]
+    assert len(saved["events"]) == events + 1
+    assert saved["events"][-1]["status"] == "failed"
+    assert len(saved["runs"]) == runs
+    assert "execute" not in saved["latest_node_outputs"]
+
+
+@pytest.mark.anyio
+async def test_stop_during_worktree_setup_stops_the_run_before_any_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key, value in {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@x",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@x",
+    }.items():
+        monkeypatch.setenv(key, value)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "README").write_text("base\n", encoding="utf-8")
+    for args in (
+        ("init", "-q", "-b", "main"),
+        ("config", "commit.gpgsign", "false"),
+        ("add", "-A"),
+        ("commit", "-qm", "base"),
+    ):
+        subprocess.run(["git", "-C", str(project), *args], check=True, capture_output=True)
+    source = project / "workflow.rattish"
+    source.write_text(
+        _bash_source().replace(
+            "  name: Persisted run\n", "  name: Persisted run\n  workspace: worktree\n"
+        ),
+        encoding="utf-8",
+    )
+    setup_started = threading.Event()
+    setup_cancelled: list[bool] = []
+
+    def blocking_setup(
+        data_dir: Path, worktree: object, cancel: threading.Event | None = None
+    ) -> None:
+        assert cancel is not None
+        setup_started.set()
+        setup_cancelled.append(cancel.wait(10))
+
+    monkeypatch.setattr(run_worktrees, "prepare_setup", blocking_setup)
+    stop = threading.Event()
+
+    async def press_stop_once_setup_runs() -> None:
+        await anyio.to_thread.run_sync(setup_started.wait, 10)
+        stop.set()
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(press_stop_once_setup_runs)
+        result = await run_rattish_file(source, data_dir=tmp_path / "app-data", cancel_event=stop)
+
+    assert setup_cancelled == [True]
+    assert result.status == "stopped"
+    saved = json.loads(result.path.read_text(encoding="utf-8"))
+    assert saved["status"] == "stopped"
+    assert "node_started" not in [event["type"] for event in saved["events"]]
+    assert saved["runs"] == []
+    # The worktree made before the stop is removed.
+    assert saved["worktree"]["state"] == "no_changes"
+    assert not Path(saved["worktree"]["checkout"]).exists()
+    assert run_worktrees.unlanded_run_ids(tmp_path / "app-data", saved["workflow"]["id"]) == []
+
+
+@pytest.mark.anyio
 async def test_run_service_persists_runtime_failure_and_invalid_inputs(
     tmp_path: Path,
 ) -> None:
@@ -650,7 +791,7 @@ async def test_run_service_persists_runtime_failure_and_invalid_inputs(
     assert {key: value for key, value in failed_output.items() if key != "output"} == {
         "success": False,
         "outcome": "failure",
-        "data": {"stdout": "", "stderr": "not a cat", "exit_code": 7},
+        "data": {"stdout": "", "stderr": "not a cat", "exit_code": 7, "truncated": False},
         "exitCode": 7,
         "error": "not a cat",
     }

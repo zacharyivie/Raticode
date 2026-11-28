@@ -31,6 +31,7 @@ from gofer.ui.rem_decisions import (
 from gofer.ui.rem_objectives import ObjectivesRequest
 from gofer.ui.rem_plans import PlanRequest
 from gofer.ui.rem_projects import ProjectOpen
+from gofer.utils.cron_times import next_cron_time
 
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 ACTIVE = {"queued", "executing", "verifying", "repairing", "cancelling"}
@@ -101,9 +102,7 @@ class Schedule(BaseModel):
             return (after + timedelta(minutes=self.every_minutes)).isoformat()
         zone = ZoneInfo(self.timezone)
         if self.kind == "cron":
-            value = parse_cron(self.cron, self.timezone, saved=True).get_next_fire_time(
-                None, after + timedelta(seconds=1)
-            )
+            value = next_cron_time(parse_cron(self.cron, self.timezone, saved=True), after)
             return value.astimezone(UTC).isoformat() if value else None
         hour, minute = map(int, self.local_time.split(":"))
         local = after.astimezone(zone)
@@ -431,6 +430,14 @@ def _max_length(field: Any) -> int | None:
         (m.max_length for m in field.metadata if isinstance(getattr(m, "max_length", None), int)),
         None,
     )
+
+
+def max_length(model: type[BaseModel], name: str) -> int:
+    """The most characters [model]'s [name] field takes; fields here all have a limit."""
+    limit = _max_length(model.model_fields[name])
+    if limit is None:
+        raise ValueError(f"{model.__name__}.{name} has no length limit")
+    return limit
 
 
 def fit_lengths(
@@ -783,13 +790,20 @@ class OrganizationApproval(BaseModel):
         return self
 
 
+# One chat reply can start or change this many tasks: every task in a request like
+# "resume all the blocked ones", rather than five now and the rest after "continue"
+# (2026-11-27). Rem's admission starts them as workers free up.
+MAX_REPLY_TASKS = 20
+MAX_REPLY_CONTROLS = 50
+
+
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reply: str = Field(min_length=1, max_length=4000)
-    tasks: list[Recipe] = Field(default_factory=list, max_length=5)
+    tasks: list[Recipe] = Field(default_factory=list, max_length=MAX_REPLY_TASKS)
     memories: list[str | NewMemory] = Field(default_factory=list, max_length=10)
     memory_changes: list[MemoryChange] = Field(default_factory=list, max_length=10)
-    controls: list[TaskControl] = Field(default_factory=list, max_length=5)
+    controls: list[TaskControl] = Field(default_factory=list, max_length=MAX_REPLY_CONTROLS)
     # Absolute paths of existing files the user asked Rem to send.
     files: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(
         default_factory=list, max_length=8

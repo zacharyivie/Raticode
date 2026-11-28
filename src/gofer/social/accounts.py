@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import threading
 from collections.abc import Mapping
@@ -24,6 +23,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from gofer.social.models import PLATFORMS
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.instants import stored_instant
 
 KEYCHAIN_SERVICE = "Raticode social accounts"
@@ -158,14 +158,8 @@ class AccountStore:
         return [item for item in items or [] if isinstance(item, dict) and item.get("id")]
 
     def _save(self, accounts: list[dict[str, Any]]) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
-        try:
-            temporary.write_text(json.dumps({"accounts": accounts}, indent=2) + "\n", "utf-8")
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, self.path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        text = json.dumps({"accounts": accounts}, indent=2) + "\n"
+        replace_file(self.path, text.encode("utf-8"))
 
     def list(self) -> list[dict[str, Any]]:
         with _lock:

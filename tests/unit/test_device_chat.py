@@ -622,3 +622,136 @@ def test_organization_job_from_another_desktop_runs_under_unattended_limits(tmp_
     bridge.close()
     jobs.close()
     steering.close()
+
+
+def test_work_a_paired_desktop_sends_runs_under_handed_over_limits_with_or_without_organization(
+    tmp_path,
+):
+    """Limits come from who sent the work, its kind and the grant, not a sender's field.
+
+    A job.submit with no organization mark (sent by the other desktop's fleet tools) and
+    a chat.submit on a project grant both run unattended. A phone turn and a thread the
+    desktop runs here through Run threads from this desktop keep their grant.
+    """
+    from gofer.devices.application import host_template
+
+    captured: dict[str, dict[str, Any]] = {}
+
+    async def source(**kwargs):
+        captured[kwargs["messages"][-1]["body"]] = kwargs
+        yield {"type": "final", "message": {"body": "done"}}
+
+    project = tmp_path / "project"
+    project.mkdir()
+    brain = {"enabled": True, "root": str(tmp_path / "brain")}
+    resources = {"shell": True, "web": True, "agents": True, "browser": True, "mcpServers": []}
+    grant = {
+        "provider": "claude_code",
+        "model": "cli-default",
+        "project_path": str(project),
+        "workflow": {"remSecondBrain": brain, "remResources": resources},
+    }
+    registry = DeviceRegistry(tmp_path / "devices", Secrets(), initialize=True)
+    app = DeviceApplication(registry)
+    desktop, phone = paired(registry, "desktop"), paired(registry, "controller")
+    jobs, steering = ChatJobs(tmp_path / "jobs"), ChatSteering(tmp_path / "jobs")
+    bridge = DeviceChatBridge(app, jobs, steering, tmp_path, source=source)
+    sequence = iter(range(1000))
+
+    def event(thread: str, kind: str, text: str, project_id: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {"text": text, "attachment_ids": []}
+        if kind == "job.submit":
+            payload = {
+                "job_id": "",
+                "target_device_id": app.registry.identity.device_id,
+                "project_id": project_id,
+                "resource_ids": [],
+                "intent": text,
+                "expected_policy_revision": 1,
+            }
+        request_id = str(uuid4())
+        if kind == "job.submit":
+            payload["job_id"] = request_id
+        return {
+            "version": 2,
+            "id": str(uuid4()),
+            "thread_id": thread,
+            "request_id": request_id,
+            "sequence": next(sequence),
+            "type": kind,
+            "payload": payload,
+        }
+
+    def run(peer: str, thread: str, kind: str, text: str, project_id: str) -> dict[str, Any]:
+        sent = event(thread, kind, text, project_id)
+        app.handle(peer, sent)
+        claimed = app.claim()
+        assert claimed is not None and claimed["event"]["request_id"] == sent["request_id"]
+        bridge.dispatch(claimed)
+        # The turn's job ends before the next one starts on the same thread.
+        list(jobs.events(thread, claimed["turn_id"]))
+        assert work_state(app, sent) == "completed"
+        return captured[text]
+
+    def limited(turn: dict[str, Any]) -> None:
+        workflow = turn["workflow"]
+        assert workflow["remBlockGitPush"] is True
+        assert workflow["remUnattended"] is True
+        assert workflow["remManagedTask"]["limitDataFolder"] is True
+        assert workflow["remManagedTask"]["claudeSandbox"] is True
+        assert "remSecondBrain" not in workflow
+        assert workflow["remResources"]["agents"] is False
+        assert "organizationRun" not in workflow
+        assert "Rem on a paired desktop sent this work" in turn["agent_instructions"]
+        assert "Nobody is watching this run" in turn["agent_instructions"]
+
+    def kept(turn: dict[str, Any]) -> None:
+        workflow = turn["workflow"]
+        assert workflow["remSecondBrain"] == brain
+        assert workflow["remResources"] == resources
+        assert "remManagedTask" not in workflow
+        assert "remBlockGitPush" not in workflow
+        assert "remUnattended" not in workflow
+        assert "agent_instructions" not in turn
+
+    try:
+        # A project grant to the other desktop: its fleet job and its chat are limited.
+        granted, project_id = str(uuid4()), str(uuid4())
+        app.authorize(desktop, granted, {**grant, "project_id": project_id})
+        limited(run(desktop, granted, "job.submit", "Fleet job", project_id))
+        limited(run(desktop, granted, "chat.submit", "Desktop chat", project_id))
+
+        # The same grant to a phone keeps its tools and Second Brain.
+        phone_thread = str(uuid4())
+        app.authorize(phone, phone_thread, {**grant, "project_id": project_id})
+        kept(run(phone, phone_thread, "chat.submit", "Phone chat", project_id))
+
+        # A thread the desktop runs here through Run threads from this desktop keeps them.
+        app.enable_hosting(desktop, True)
+        app.host_template(desktop, {**grant, "project_id": project_id})
+        created = app.handle(
+            desktop,
+            {
+                "version": 2,
+                "id": str(uuid4()),
+                "thread_id": None,
+                "request_id": str(uuid4()),
+                "sequence": next(sequence),
+                "type": "thread.create",
+                "payload": {
+                    "title": "Remote thread",
+                    "project_id": project_id,
+                    "resource_ids": [],
+                    "provider": "claude_code",
+                    "model": "cli-default",
+                    "template_thread_id": host_template(desktop),
+                },
+            },
+        )
+        hosted = next(e["thread_id"] for e in created if e["type"] == "thread.snapshot")
+        kept(run(desktop, hosted, "chat.submit", "Hosted chat", project_id))
+    finally:
+        bridge.close()
+        jobs.close()
+        steering.close()
+        registry.close()

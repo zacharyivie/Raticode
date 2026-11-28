@@ -49,7 +49,7 @@ function readRows(text) {
 
 // One list or name/value field: rows by default, JSON when switched or when the saved
 // value has a shape the rows can't show.
-export function RattishRowsField({ field, label, onChange, schema, value }) {
+export function RattishRowsField({ description, field, label, onChange, schema, value }) {
   const kind = rattishFieldEditorKind(schema);
   const types = Array.isArray(schema?.type) ? schema.type : [schema?.type];
   const itemType = kind === "list" ? schema.items.type : "string";
@@ -60,10 +60,16 @@ export function RattishRowsField({ field, label, onChange, schema, value }) {
   const [mode, setMode] = useState({ scope, json: false });
   const asJson = !fits || (mode.scope === scope && mode.json);
   const switchId = useId();
+  const helpId = useId();
+  const help = typeof description === "string" ? description.trim() : "";
 
   const noun = rattishRowNoun(field);
   return (
-    <fieldset className="min-w-0 space-y-1.5" data-rattish-rows={kind}>
+    <fieldset
+      aria-describedby={help ? helpId : undefined}
+      className="min-w-0 space-y-1.5"
+      data-rattish-rows={kind}
+    >
       <legend className="sr-only">{label}</legend>
       <div className="flex items-center justify-between gap-2">
         <span aria-hidden="true" className="text-xs font-medium text-muted">{label}</span>
@@ -95,6 +101,11 @@ export function RattishRowsField({ field, label, onChange, schema, value }) {
           </button>
         </span>
       </div>
+      {help ? (
+        <p className="-mt-1 text-[11px] leading-4 text-muted" id={helpId}>
+          {help}
+        </p>
+      ) : null}
       {asJson ? (
         <>
           <JsonBodyField

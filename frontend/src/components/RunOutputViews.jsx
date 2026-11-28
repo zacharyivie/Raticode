@@ -25,7 +25,7 @@ function isCommandOutput(value) {
 }
 
 // One activation's text: what it printed or returned, and why it failed.
-export function attemptTextFields(attempt) {
+function attemptTextFields(attempt) {
   return [
     attempt.inputs && Object.keys(attempt.inputs).length
       ? { id: "inputs", label: "Inputs", text: JSON.stringify(attempt.inputs, null, 2) }

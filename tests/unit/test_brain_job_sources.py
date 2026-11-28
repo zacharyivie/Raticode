@@ -10,15 +10,9 @@ import pytest
 
 from gofer.ui.brain_job_sources import matches_source_rules, source_rules
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_task
 from tests.unit.test_brain_library import cited_output, opened
-
-
-@pytest.fixture
-def library(tmp_path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def job_for(brain: dict[str, Any], **rule_patch: Any) -> dict[str, Any]:

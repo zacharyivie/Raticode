@@ -261,6 +261,12 @@ exist during portable source compilation.
 
 `{{{{` and `}}}}` emit literal `{{` and `}}` delimiters.
 
+Delimiter checks apply to the authored template only. An unmatched `{{` or `}}` in the
+template is an error, checked before any value is substituted. Rendering substitutes every
+placeholder in one pass and inserts each value as it is: a value that contains `{{` or `}}`
+is not an error, and an inserted value is never rendered again, so a value such as
+`{{other}}` stays text and does not resolve another local.
+
 Supplying both `prompt` and `prompt-path` is an error. Supplying neither lowers to an empty
 prompt and produces a warning.
 
@@ -301,6 +307,25 @@ Predicate operands must have compatible types. Ordering operators accept Number 
 or compatible String operands. `contains` accepts a String, List, or Object on its left.
 `matches` accepts String operands and a compile-time valid regular expression on its right.
 Boolean references may stand alone as predicates.
+
+An operand whose schema names no type, such as an `http-request` output's `json` or a
+member of an input declared only as an object, has no known type. The compiler checks only
+the operands whose types it knows and leaves the rest to run time: a known side must still
+suit the operator, and two known sides must still fit each other. At run time the operands'
+JSON types decide:
+
+- `==` and `!=` never match across JSON types. A Boolean never equals a Number; an integer
+  equals a number of the same value. Lists and Objects compare member by member by the
+  same rule.
+- Ordering operators need two Numbers or two Strings. `contains` needs a String on its
+  right when its left is a String or an Object (an Object is searched by key); a List on
+  the left is searched by `==`. `matches` needs two Strings.
+- A missing operand makes every comparison false. A null operand makes ordering,
+  `contains` and `matches` false.
+- Any other mix fails the run with `RATTISH_RUNTIME_PREDICATE_TYPE_MISMATCH`, which names the
+  source node, the route target, the operator and both JSON types, never the values. In a
+  Boolean binding expression the error fails that node and names the binding instead of a
+  route target.
 
 Failure-detail predicates read the common error contract. Each node contract declares the
 stable error `kind` values it may produce.

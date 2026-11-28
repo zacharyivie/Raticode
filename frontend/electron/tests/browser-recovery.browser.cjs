@@ -14,6 +14,8 @@ const path = require("node:path");
 const { BrowserWindow, Menu, WebContentsView, app, clipboard, dialog, ipcMain, nativeImage, session, shell, webContents } = require("electron");
 const { createBrowserSessions } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 20_000, interval: 100 };
 
 const frontend = path.join(__dirname, "..", "..");
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-browser-recovery-test-"));
@@ -29,15 +31,6 @@ const PAGES = {
 };
 const ERROR_TEXT = /isn.t responding|stopped responding|stopped working|crashed|keeps stopping/i;
 
-async function waitFor(check, message, timeout = 20000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The studio says whether the tab is in front; the test sets it with window.setActive.
@@ -135,22 +128,22 @@ async function run() {
   const loaded = (contents, pathName) => !contents.isCrashed() && contents.getURL() === `${base}${pathName}` && !contents.isLoading();
 
   // A tab with history: first, then second.
-  await waitFor(() => guest() && loaded(guest(), "/first"), "the tab didn't open");
+  await waitFor(() => guest() && loaded(guest(), "/first"), "the tab didn't open", WAIT);
   const tab = guest();
   await tab.loadURL(`${base}/second`);
-  await waitFor(() => loaded(tab, "/second"), "the second page didn't open");
+  await waitFor(() => loaded(tab, "/second"), "the second page didn't open", WAIT);
   assert.equal(tab.navigationHistory.canGoBack(), true);
 
   // 1. The page process ends while the tab is hidden: nothing shows and nothing reloads until the tab is back.
   await page("window.setActive(false)");
   const firstProcess = tab.getOSProcessId();
   tab.forcefullyCrashRenderer();
-  await waitFor(() => tab.isCrashed(), "the page process didn't end");
+  await waitFor(() => tab.isCrashed(), "the page process didn't end", WAIT);
   await sleep(1500);
   assert.equal(tab.isCrashed(), true, "a hidden tab doesn't reload");
   await noMessage("while the ended tab is hidden");
   await page("window.setActive(true)");
-  await waitFor(() => loaded(tab, "/second"), "the ended tab didn't reload on return");
+  await waitFor(() => loaded(tab, "/second"), "the ended tab didn't reload on return", WAIT);
   assert.notEqual(tab.getOSProcessId(), firstProcess);
   assert.equal(tab.navigationHistory.canGoBack(), true, "back still goes to the first page");
   assert.equal(tab.navigationHistory.length(), 2);
@@ -169,7 +162,7 @@ async function run() {
   // In front again: a moment's grace, then the stuck page process ends and the page reloads in place.
   await page("window.setActive(true)");
   await noMessage("during the grace period");
-  await waitFor(() => tab.getOSProcessId() !== stuckProcess && loaded(tab, "/second"), "the stuck tab didn't reload", 30000)
+  await waitFor(() => tab.getOSProcessId() !== stuckProcess && loaded(tab, "/second"), "the stuck tab didn't reload", { ...WAIT, timeout: 30000 })
     .catch((error) => { throw new Error(`${error.message}: ${JSON.stringify({ process: tab.getOSProcessId(), stuckProcess, crashed: tab.isCrashed(), url: tab.getURL(), loading: tab.isLoading() })}`); });
   assert.equal(tab.navigationHistory.canGoBack(), true);
   await noMessage("after the stuck tab came back");
@@ -183,7 +176,7 @@ async function run() {
     const outcome = await waitFor(async () => {
       if (/keeps stopping/i.test(await shownText())) return "button";
       return tab.getOSProcessId() !== process && loaded(tab, "/second") ? "reloaded" : "";
-    }, `nothing happened after the page stopped (automatic reloads so far: ${automatic})`, 30000);
+    }, `nothing happened after the page stopped (automatic reloads so far: ${automatic})`, { ...WAIT, timeout: 30000 });
     if (outcome === "button") break;
     automatic += 1;
     await noMessage(`after automatic reload ${automatic}`);
@@ -194,8 +187,8 @@ async function run() {
   await sleep(3000);
   assert.equal(tab.isCrashed(), true, "no more automatic reloads");
   await page("[...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Reload').click()");
-  await waitFor(() => loaded(tab, "/second"), "Reload didn't bring the page back");
-  await waitFor(async () => !ERROR_TEXT.test(await shownText()), "the panel stayed after Reload");
+  await waitFor(() => loaded(tab, "/second"), "Reload didn't bring the page back", WAIT);
+  await waitFor(async () => !ERROR_TEXT.test(await shownText()), "the panel stayed after Reload", WAIT);
 
   server.close();
   console.log("Browser recovery checks passed.");

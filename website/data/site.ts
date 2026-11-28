@@ -15,7 +15,8 @@ export const supportEmail = 'support@raticode.dev'
 export const supportMailto = `mailto:${supportEmail}`
 
 // The one place to chip in for Raticode's development. The support banner (home page and
-// the foot of every docs page), the top nav and the footer link here, and
+// the foot of every docs page), the landing hero's Support Raticode button, the top nav and
+// the footer link here, and
 // `npm run check:links` fails if the banner is missing or a page links another donation page.
 export const supportProjectUrl = 'https://buymeacoffee.com/Raticode'
 

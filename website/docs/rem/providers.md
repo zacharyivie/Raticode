@@ -92,7 +92,7 @@ An app's **Default model** and **Default effort** in **Settings > Providers** ap
 
 With Claude Code as the chat provider, Rem's home chat reply appears as it's written. Other providers show what Rem is doing, such as "Reading earlier messages", then the finished reply. Hover a reply (or open its ⋯ menu on the phone) to see which model wrote it and how long it took.
 
-Opening Settings reuses what Raticode learned about each provider in the last 5 minutes, so it doesn't start every CLI again. Older or missing information is checked in the background, and a small spinner shows next to each provider's status while it updates. The line next to **Coding apps** in **Settings > Providers** says when the providers were last checked, for example "Checked 3 min ago".
+Opening Settings reuses what Raticode learned about each provider in the last 5 minutes, so it doesn't start every CLI again. Older or missing information is checked in the background, and a small spinner shows next to each provider's status while it updates. The line next to **Coding apps** in **Settings > Providers** says when the providers were last checked, for example "Checked 3 min ago" or "Checked yesterday". After a week it shows the date instead.
 
 After signing in, changing a binary or getting access to a new model, choose **Refresh providers** on that line. It checks every provider again straight away. Refreshing doesn't sign the CLI in. Use **Sign in** on the app's row, or sign in with the CLI itself. **Sign in** runs the app's own browser sign-in for Claude Code, Codex, Cursor, GitHub Copilot and, from 0.6.0, Grok (`grok login`).
 
@@ -241,7 +241,7 @@ The status line and **Settings > Rem > Self-work** name the account, such as "To
 | --- | --- |
 | **Rem's setting** | Whatever **Settings > Rem > Accounts** says for the provider. The menu shows it, such as **Choose by usage**. This is where every thread starts |
 | **Default sign-in** | The provider's usual sign-in, even when Rem's setting names an account |
-| An account | That account. The menu shows whether it's signed in and its last weekly and 5-hour reading, such as "Week 42% · 5h 10% used, 2h ago" |
+| An account | That account. The menu shows whether it's signed in and its last weekly and 5-hour reading, such as "Week 42% · 5h 10% used, 2 h ago" |
 
 - The choice is saved on the thread, once per provider, and sent with every turn, including turns you send from the phone. It wins over Rem's setting. Switching to another provider and back keeps it.
 - Accounts that need sign-in are listed but can't be picked. On the desktop, **Sign in** next to one starts that account's sign-in, as in **Settings > Providers**. On the phone, **Sign in** for a Codex or Grok account [signs it in from the phone](#sign-an-account-in-from-the-phone) with a link and a one-time code; for a Claude Code account it says to sign in on the computer: Settings › Usage › **Sign in** on the account's card.

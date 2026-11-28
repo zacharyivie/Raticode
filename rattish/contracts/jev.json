@@ -8,30 +8,33 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "question": {"type": "string", "minLength": 1},
+      "question": {"description": "The question Jev answers about the state.", "type": "string", "minLength": 1},
       "question_type": {
+        "description": "A yes/no question or a pick among options.",
         "type": "string",
         "enum": ["yes-no", "choice"],
         "x-rattish-case-insensitive": true
       },
       "criteria": {
+        "description": "What counts as yes and as no. Yes/no only.",
         "type": "object",
         "properties": {
-          "yes": {"type": "string", "minLength": 1},
-          "no": {"type": "string", "minLength": 1}
+          "yes": {"description": "What counts as yes.", "type": "string", "minLength": 1},
+          "no": {"description": "What counts as no.", "type": "string", "minLength": 1}
         },
         "additionalProperties": false
       },
       "options": {
+        "description": "2 to 255 option names, each mapped to a description. Choice only.",
         "type": "object",
         "additionalProperties": {"type": "string"}
       },
-      "threshold": {"type": "number", "minimum": 0, "maximum": 1},
-      "state": {"type": "string"},
-      "model": {"type": "string", "minLength": 1},
-      "long_context": {"type": "boolean"},
-      "request_timeout": {"type": "string", "pattern": "^[1-9][0-9]*(?:ms|s|m)$"},
-      "cache": {"type": ["string", "null"], "pattern": "^[1-9][0-9]*(s|m|h|d|w)$"}
+      "threshold": {"description": "Lowest score that counts as yes. Yes/no only.", "type": "number", "minimum": 0, "maximum": 1},
+      "state": {"description": "The text the question is about.", "type": "string"},
+      "model": {"description": "Jev model version.", "type": "string", "minLength": 1},
+      "long_context": {"description": "Allow up to 262k tokens instead of 64k. Slower and less accurate, per TypeSafe.", "type": "boolean"},
+      "request_timeout": {"description": "Limit for one call to Jev, at most 60s. The shared timeout limits the whole node.", "type": "string", "pattern": "^[1-9][0-9]*(?:ms|s|m)$"},
+      "cache": {"description": "Reuse a saved answer for this long, such as 12h or 7d, at most 365d.", "type": ["string", "null"], "pattern": "^[1-9][0-9]*(s|m|h|d|w)$"}
     },
     "required": ["question"],
     "additionalProperties": false

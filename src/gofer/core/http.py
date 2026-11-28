@@ -6,7 +6,10 @@ import ssl
 import threading
 import time
 import urllib.parse
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Protocol
 
 import anyio
@@ -14,6 +17,10 @@ import anyio
 from gofer.core.network_policy import parse_http_request_url, resolve_http_request_target
 
 HTTP_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
+# Statuses whose Retry-After header says when the server can take the next request.
+RETRY_AFTER_STATUSES = frozenset({429, 503})
+# The longest Retry-After wait Raticode honors; a longer one fails instead of waiting.
+RETRY_AFTER_MAX_SECONDS = 300.0
 
 
 class _RequestControl:
@@ -136,7 +143,7 @@ class UrllibHttpClient:
                 raise ValueError("Invalid HTTP request method, headers or encoding") from None
             control.transport = getattr(conn, "sock", None)
             response = conn.getresponse()
-            response_headers = dict(response.headers.items())
+            response_headers = response_header_fields(response.headers.items())
             # The parser accounts for HEAD, bodyless statuses and chunked framing.
             # Content-Length alone may describe a representation we will not read.
             remaining = response.length
@@ -230,6 +237,23 @@ def read_response_bytes(response: http.client.HTTPResponse, max_bytes: int) -> b
     return data
 
 
+def response_header_fields(fields: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """Response header fields keyed by lowercase name, with repeated fields kept.
+
+    Repeats join with ", " as HTTP allows, except Set-Cookie, whose dates contain commas,
+    so its cookies join with a line break.
+    """
+    headers: dict[str, str] = {}
+    for name, value in fields:
+        key = str(name).lower()
+        if key in headers:
+            separator = "\n" if key == "set-cookie" else ", "
+            headers[key] = f"{headers[key]}{separator}{value}"
+        else:
+            headers[key] = str(value)
+    return headers
+
+
 def append_query_params(url: str, params: dict[str, str]) -> str:
     if not params:
         return url
@@ -237,3 +261,22 @@ def append_query_params(url: str, params: dict[str, str]) -> str:
     query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     query_pairs.extend((key, value) for key, value in params.items())
     return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query_pairs)))
+
+
+def retry_after_seconds(headers: Mapping[str, str], *, now: datetime | None = None) -> float | None:
+    """Seconds from a Retry-After header, given as seconds or an HTTP date."""
+    value = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
+    if value is None:
+        return None
+    value = value.strip()
+    # ASCII digits only: headers are read as Latin-1, and "³" counts as a digit for
+    # str.isdigit() but not for float().
+    if value.isascii() and value.isdigit():
+        return float(value)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - (now or datetime.now(UTC))).total_seconds())

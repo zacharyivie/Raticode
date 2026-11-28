@@ -267,6 +267,32 @@ def test_meter_forwards_child_workflow_calls_to_the_calling_node() -> None:
     assert parent.limit_reached()["code"] == "RATTISH_TOKEN_LIMIT_EXCEEDED"  # type: ignore[index]
 
 
+@pytest.mark.parametrize(
+    ("tokens", "partial", "estimated", "bucket", "total"),
+    [
+        ({"total_tokens": 9}, False, False, "reported_calls", 9),
+        ({"input_tokens": 4, "output_tokens": 5}, False, False, "reported_calls", 9),
+        ({"input_tokens": 4}, False, False, "partial_calls", 4),
+        ({"input_tokens": 4, "output_tokens": 5}, True, False, "partial_calls", 9),
+        ({}, False, False, "unknown_calls", None),
+        ({"total_tokens": 9}, False, True, "unknown_calls", None),
+    ],
+)
+def test_run_and_ticket_totals_count_a_call_the_same_way(
+    tokens: dict[str, int], partial: bool, estimated: bool, bucket: str, total: int | None
+) -> None:
+    from gofer.core import usage_ledger
+    from gofer.rattish.run_usage import add_call
+
+    run = empty_usage()
+    add_call(run, ProviderCall("codex", None, tokens, None, partial, estimated))
+    ticket = usage_ledger.empty_usage()
+    usage_ledger.count_tokens(ticket, {} if estimated else tokens, partial)
+    assert ticket == {field: run[field] for field in ticket}
+    assert run[bucket] == 1
+    assert run["total_tokens"] == total
+
+
 def test_labels_never_turn_unknown_into_zero() -> None:
     usage = empty_usage()
     assert usage_line(usage) == "No model calls"

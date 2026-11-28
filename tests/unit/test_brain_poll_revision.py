@@ -16,17 +16,11 @@ from typing import Any
 
 import pytest
 
-from gofer.ui import brain_library
+from gofer.ui import brain_health, brain_library
 from gofer.ui.brain_library import HEALTH_RECHECK_SECONDS, BrainLibrary, LinkTargets
 from gofer.ui.server import GoferUiServer
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def opened(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, Any], Path]:
@@ -167,6 +161,25 @@ def test_poll_with_the_current_revision_skips_entities_and_health(library, tmp_p
     }
 
 
+def test_a_poll_after_a_write_runs_the_patched_health(library, tmp_path, monkeypatch):
+    # The partner of the unchanged-poll check above, which also passes when health is
+    # never reached: a patched library.health must be the one a changed poll runs.
+    brain, _ = opened(library, tmp_path)
+    token = library.poll("")["revision"]
+    calls: list[int] = []
+    original = library.health
+
+    def counted(payload: Any) -> Any:
+        calls.append(1)
+        return original(payload)
+
+    monkeypatch.setattr(library, "health", counted)
+    library.request("update_brain", {"id": brain["id"], "patch": {"name": "Ideas"}})
+    result = library.poll(token)
+    assert "unchanged" not in result
+    assert len(calls) >= 1
+
+
 def test_poll_returns_the_library_after_a_write(library, tmp_path):
     brain, _ = opened(library, tmp_path)
     token = library.poll("")["revision"]
@@ -293,7 +306,9 @@ def test_health_builds_each_brains_document_list_once(library, tmp_path, monkeyp
         )
         return original(doc, link, targets)
 
+    # The scan calls it from brain_library and health from brain_health.
     monkeypatch.setattr(brain_library, "linked_document", recording)
+    monkeypatch.setattr(brain_health, "linked_document", recording)
     library.recheck_health()
     issues = link_issues(library.snapshot())
     assert len(lists) >= 3

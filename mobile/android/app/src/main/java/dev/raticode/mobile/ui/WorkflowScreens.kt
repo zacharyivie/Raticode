@@ -126,6 +126,17 @@ internal fun runSummary(run: WorkflowRun): String = run.summary.trim().takeUnles
     it.equals(Workflows.label(run.status), ignoreCase = true) || it.equals(run.status, ignoreCase = true) || Regex("(?i)took [0-9].*").matches(it)
 }.orEmpty()
 
+/** The first line of why a run stopped, or blank when the desktop didn't say. */
+internal fun runErrorLine(run: WorkflowRun): String = run.error.lineSequence().map { it.trim() }.firstOrNull { it.isNotBlank() }.orEmpty()
+
+/** Why a failed run stopped, under its status in a runs list; nothing when the desktop didn't say. */
+@Composable
+private fun RunErrorReason(run: WorkflowRun) {
+    val line = runErrorLine(run)
+    if (line.isNotBlank()) Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+        maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.testTag("runError:${run.id}"))
+}
+
 /** One line about a run: when it started and how long it took or has been going. */
 internal fun runLine(run: WorkflowRun): String = listOf(
     run.startedAt.takeIf { it.isNotBlank() }?.let { "Started ${whenText(it, past = true)}" }.orEmpty(),
@@ -582,6 +593,7 @@ internal fun AllRunsList(runs: AllWorkflowRuns, state: WorkflowScreenState, sinc
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(row.workflowName.ifBlank { row.workflowId }, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         WorkflowStatus(row.run.status)
+                        RunErrorReason(row.run)
                         Text(allRunLine(row), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
@@ -1221,6 +1233,7 @@ private fun WorkflowRuns(workflow: Workflow, shown: String?, onSelect: (String?)
                         WorkflowStatus(run.status, Modifier.weight(1f))
                         if (run.id == latest) Text("Latest", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    RunErrorReason(run)
                     runLine(run).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     runSummary(run).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                 }

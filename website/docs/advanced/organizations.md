@@ -1,6 +1,6 @@
 ---
 title: Organizations
-description: Configure persistent agent organizations, supervised task queues, budgets, routines, and review.
+description: Configure persistent agent organizations, supervised ticket queues, budgets, routines, and review.
 pageClass: docs-layout
 ---
 
@@ -9,7 +9,7 @@ pageClass: docs-layout
 An organization runs long-term work with workers, projects, goals and an explicit review process.
 
 ::: warning Experimental
-Organizations is off by default. Turn it on in **Settings > Developer > Feature Preview**; Raticode restarts its backend to apply it. Turning it off hides the feature and keeps its data. A backend started without the desktop app reads `RATICODE_EXPERIMENTAL_ORGANIZATIONS=1` instead. Try supervised tasks before relying on unattended work.
+Organizations is off by default. Turn it on in **Settings > Developer > Feature Preview**; Raticode restarts its backend to apply it. Turning it off hides the feature and keeps its data. A backend started without the desktop app reads `RATICODE_EXPERIMENTAL_ORGANIZATIONS=1` instead. Try supervised tickets before relying on unattended work.
 :::
 
 ## Find your way around
@@ -42,7 +42,7 @@ Click **+** next to **Organizations** in the sidebar. Creating one needs only a 
 - **Purpose** says what it's for.
 - **Assign the current project** gives it the open project's folder. A project folder can belong to only one organization.
 - **First worker** (optional) adds one worker by name and title. It uses the provider and model you chose for Rem in Settings, and isn't held: the organization itself starts paused. It gets the organization's project folders, so it can [work on its own](#workers-run-like-small-rems) once you start.
-- **More settings** holds the package slug, company instructions, goals, monthly and per-run limits, where workers make changes, the git push block, Backlog pulls and Second Brain. The defaults suit a first organization; change them later from the gear.
+- **More settings** holds the package slug, company instructions, goals, monthly and per-run limits (**Maximum runs per ticket**, **Tickets one run can create**), where workers make changes (**Own git worktree per ticket**, the default, or directly in the project folder), the git push block, Backlog pulls and Second Brain. **Run time limit** takes a number and a unit (minutes, hours or days); it's 30 minutes unless you change it. The defaults suit a first organization; change them later from the gear.
 
 An organization created in the Organizations tab keeps running after Raticode restarts once you start it, until you pause it. One created by Rem or from the command line starts with this off. Turn that off with **Keep running after Raticode restarts** in the working hours editor. Organizations made before this change keep their setting.
 
@@ -62,7 +62,7 @@ Give each worker a narrow role and review these settings before starting work.
 | Worker setting | What it does |
 | --- | --- |
 | **Limit ticket actions by project** | Per project, whether the worker may create, edit, move or cancel tickets |
-| **Check-ins** | How often an idle worker checks in (hourly by default) |
+| **Check-ins** | How often an idle worker checks in (hourly by default). The full worker editor's **Check-in interval** takes a number and a unit (minutes, hours or days), at least 15 minutes; 0 is automatic |
 | **Hold this worker** | Stops one worker without pausing the organization. A run under way stops like a pause: it isn't charged, and its ticket goes back to To do, first in line for when you lift the hold. Changing the worker's permissions at the same time stops the ticket for review instead |
 
 ### Worker accounts
@@ -231,13 +231,13 @@ A check command that isn't one of the project's checks was written by the worker
 
 ## Where workers make changes
 
-By default each task runs in its own Git worktree on an `org/<task>` branch, made from the project's current commit.
+By default each ticket runs in its own Git worktree on an `org/<ticket>` branch, made from the project's current commit.
 
 - Workers never edit your project folder, so several can work at once and your uncommitted changes are safe.
-- The task shows its branch and worktree.
+- The ticket shows its branch and worktree.
 - A project with a [setup file](../studio/worktree-setup.md) you approved gets it run in each new worktree before the worker starts. The ticket shows the result.
 - The ticket's **Did** section shows the branch's full patch. **Accept** lands the branch in the branch its worktree came from after a clean-merge check, and a conflict offers asking the worker to rebase. See [Review and land](../rem/board.md#review-and-land).
-- When the task is done or cancelled, Raticode commits anything left in the worktree, removes it, and keeps the branch. A branch you didn't land stays for you to land from the ticket or merge in [Source control](../studio/source-control.md).
+- When the ticket is done or cancelled, Raticode commits anything left in the worktree, removes it, and keeps the branch. A branch you didn't land stays for you to land from the ticket or merge in [Source control](../studio/source-control.md).
 - Folders that aren't Git repositories run in place.
 
 **Settings > Where workers make changes > Directly in the project folder** turns worktrees off. Workers then take turns in the folder, and a run starts only when it has no uncommitted changes.
@@ -250,33 +250,34 @@ From 0.6.0, each worker start is placed on a computer by the organization's plac
 
 - Workers run only on this computer for now. Each ticket checks every paired desktop for itself, and skips it with the first check it fails: pairing, status, the projects and providers that desktop shares, a project there that is the same repository, and a fleet execution target the owner made there for the ticket's worker, for example *No execution target on Desktop B is granted to Worker 0*. See [Whether a start could run on a paired desktop](../rem/home.md#whether-a-start-could-run-on-a-paired-desktop). While this computer is full, a ticket that a paired desktop has room for shows *Desktop B has room: Run there* in its details. **Run there** only points it at a fleet execution target you already made there for its worker; without one, the suggestion says what to grant. See [Run waiting work on a paired desktop](../rem/home.md#run-waiting-work-on-a-paired-desktop).
 - When no computer has room, the organization starts no ticket and its page shows why in a banner, for example *Waiting for a free worker: Workstation is full (4 of 4 running: 2 organization workers, 1 Rem task, 1 swarm turn)*. The phone shows the same line on the organization's page, and `Raticode org show` prints it as `Waiting:`.
-- A ticket delegated to a paired desktop through a `fleet` execution target is the exception: that desktop runs its worker and counts it under its own worker limit, so the ticket needs no room here, takes no worker here and can start while other tickets wait for one. It still counts toward **Workers at once**. Nobody watches it on that desktop, so it runs there under the same unattended limits as a task handed over to another desktop: Claude Code's sandbox, no push, and no browser, subagents, MCP servers or Second Brain from that desktop. See [Organization work another desktop sends](./fleet.md#organization-work-another-desktop-sends).
+- A ticket delegated to a paired desktop through a `fleet` execution target is the exception: that desktop runs its worker and counts it under its own worker limit, so the ticket needs no room here, takes no worker here and can start while other tickets wait for one. It still counts toward **Workers at once**. Nobody watches it on that desktop, so it runs there under the same unattended limits as a task handed over to another desktop: Claude Code's sandbox, no push, and no browser, subagents, MCP servers or Second Brain from that desktop. See [Work another desktop sends](./fleet.md#work-another-desktop-sends).
 - Your own Rem tasks go first, then self-work and organizations. While a Rem task you started waits for a worker on a computer, the organization starts no new worker there and claims no ticket, even below **Workers at once**. Its banner, its page on the phone and `Raticode org show` say *Waiting so your own Rem task can start first: “…”*, naming the task. Workers already running aren't stopped, and the next free worker goes to your task.
 - Each run records the computer, strategy and reason it was placed with, except a run delegated to a paired desktop, which isn't placed here.
 
-## Tasks and independent review
+## Tickets and independent review
 
-**Operations** holds the work queue, task filters, activity, routines, run destinations and recovery controls. A task has an assignee, priority, dependencies, plan, evidence and review state.
+In **Settings, history and operations**, **Work** holds the work queue and its filters, **Operations** holds routines, run destinations and recovery controls, and **Activity** lists what happened. A ticket has an assignee, priority, dependencies, plan, evidence and review state. **New ticket** in Work opens the ticket editor, and **Save ticket** saves it; a saved ticket opens to its conversation, with its **Ticket ID** and **Edit ticket**.
 
 - Approving a plan and accepting a result are separate decisions. Accepting a ticket with a branch lands it, and only you can do that; **Accept without landing** marks it done and leaves the branch.
 - An independent reviewer can accept, reject or request revision. A worker reviewer, or Rem in [Auto mode](#auto-mode), can send one result back (revise or reject) at most three times in a row. The next result then waits for your own review, and the ticket says why. Accepting it, or your own review or reopen, starts the count again.
 - A finished dependency can wake waiting work.
-- A cancelled task stays cancelled until someone reopens it.
-- The queue says why a task is waiting: worker holds, unmet dependencies, review, workspace contention or budget limits. Blocked tasks say why and what to do next.
+- In the ticket editor, **Waits for these tickets to finish** lists the organization's other tickets with a checkbox, title and status each. **Due date and time** is a date and time picker in this computer's time zone, and **Clear** removes the date. A **Recurring ticket**'s **Repeat interval** takes a number and a unit (minutes, hours or days); with 0 it doesn't repeat on its own.
+- A cancelled ticket stays cancelled until someone reopens it with **Reopen ticket**.
+- The queue says why a ticket is waiting: worker holds, unmet dependencies, review, workspace contention or budget limits. Blocked tickets say why and what to do next. When there are more than 50, **Previous tickets** and **Next tickets** page through them.
 
 ### Start and Pause
 
 **Start** (in the header; **Start work** in settings) first shows what will run, and nothing starts until you confirm:
 
-- tasks that can start, and backlog tasks that won't
+- tickets that can start, and backlog tickets that won't
 - plans still waiting for approval
 - workers and their permission modes
 - the monthly limits
 - when no ticket could start yet, why: no workers, every worker held, no project folder, no open tickets, and the most common reasons the waiting tickets give, such as **Assign a worker** or **Worker is held**. You can still start it.
 
-Approve a plan from the task itself, where its description is visible. Start never runs **Backlog** tickets directly, but once the organization runs, free workers [pull accepted ones into To do](#pull-from-backlog) unless you turn that off. Start keeps individual worker holds; **Resume all workers** is a separate action.
+Approve a plan from the ticket itself, where its description is visible. Start never runs **Backlog** tickets directly, but once the organization runs, free workers [pull accepted ones into To do](#pull-from-backlog) unless you turn that off. Start keeps individual worker holds; **Resume all workers** is a separate action.
 
-**Pause** stops running tasks and moves them to **Blocked**, waiting for the next Start, which puts them back in To do. The interrupted run doesn't count against the task's run limit. Delegated work (swarms, paired desktops, remote HTTPS services) stays blocked for review instead.
+**Pause** stops running tickets and moves them to **Blocked**, waiting for the next Start, which puts them back in To do. The interrupted run doesn't count against the ticket's run limit. Delegated work (swarms, paired desktops, remote HTTPS services) stays blocked for review instead.
 
 ### When a run fails
 
@@ -291,7 +292,7 @@ Other failures stop the ticket in **Blocked** for a look right away: a signed-ou
 
 ### See what a run did
 
-Under **Runs and artifacts** on a task, open a run to read what the worker did, or choose **Show input** to see exactly what it was given: instructions, task and conversation, tools and working folder.
+Under **Runs and artifacts** on a ticket, open a run to read what the worker did, or choose **Show input** to see exactly what it was given: instructions, ticket and conversation, tools and working folder.
 
 - Inputs are stored compressed, readable only by you, and checked against the run's fingerprint.
 - Each run records the provider, model, effort, account and permission mode, whether it ran in its own worktree, and a fingerprint of everything it was given.
@@ -304,20 +305,21 @@ Each status change of a ticket (to Blocked, back to work, to Review, to Done, or
 - When the reason is already a comment just above, such as the worker's report or your review, the entry only names the move instead of repeating that text. The ticket's **Conversation** shows these moves as one-line entries, on the computer and on your phone, and its count is the number of entries it shows.
 - The same comment written twice by the same person within two minutes, such as a retried request, shows once. Tickets from before this change show the same way, and nothing stored is edited or removed.
 
-- Activity is append-only. Entries and task conversations can't be edited or deleted.
+- Activity is append-only. Entries and ticket conversations can't be edited or deleted.
 - Each entry is linked to the one before it by a hash.
 - Every 30 seconds, and after each successful check, Raticode appends the latest link to `organization-audit-anchors.jsonl` in its data folder, outside the database. This catches entries removed from the end of the log, or a rebuilt database, unless the anchor file was changed too.
 - **Configuration history > Verify audit trail** checks the configuration history, the activity chain and the anchors, and reports the first entry that doesn't match.
 - Entries written before an upgrade added linking are counted but can't be checked.
-- Every change to work is recorded, including the scheduler's own, such as blocking a task that reached its run limit.
+- Every change to work is recorded, including the scheduler's own, such as blocking a ticket that reached its run limit.
 - Retry keys for repeated requests are kept for 30 days.
 
 ## Routines and evidence
 
-**Routines** run on cron with a time zone, on an interval, or from authenticated triggers. Cron weekdays follow crontab (0 and 7 are Sunday, so `0 9 * * 1-5` runs Monday to Friday) and are saved as day names, such as `0 9 * * mon-fri`.
+**Routines** run on cron with a time zone, on an interval, or from authenticated triggers. Cron weekdays follow crontab (0 and 7 are Sunday, so `0 9 * * 1-5` runs Monday to Friday) and are saved as day names, such as `0 9 * * mon-fri`. While you type a cron schedule in **Add a routine**, the form shows it in words, such as **Weekdays at 9:00**, with its next three times, or why it isn't valid.
 
 - Overlap: skip or queue. Missed occurrences: skip or coalesce.
 - A routine can queue work while the organization is paused; it still needs Start to run.
+- On the day clocks go back, a cron time that happens twice runs once, at the first. A routine with `*` or `*/N` in its minute or hour, such as `*/30 * * * *`, runs in both real hours.
 
 **Source-linked memory** records a file hash, author, verification time and optional expiry. Changed or expired evidence becomes stale, drops out of the verified-memory context and queues a recheck, so an old conclusion never passes as verified against new source.
 
@@ -332,16 +334,16 @@ Monthly limits can be set for the organization, each worker and each initiative:
 | Runs per month | 200 for new organizations; 0 means unlimited |
 | Tokens per month | None |
 | Dollars per month | None |
-| **Tasks one run can create** | 5 |
-| **Delegation depth** | 3 levels of nested tasks |
+| **Tickets one run can create** | 5 |
+| **Delegation depth** | 3 levels of nested tickets |
 
-- Each task also has its own run limit.
+- Each ticket also has its own run limit, **Maximum runs per ticket** (20 unless you change it). A ticket that reaches it moves to **Blocked** with *Run limit for this ticket reached. Reopen it to allow more runs.*, and only your reopen gives it more runs.
 - Codex and several other providers don't report dollar cost, so a dollar budget pauses their work after the first run. Use a token or run limit for them.
 - A run already in progress can go past what's left.
-- Operations shows how many workers can actually run at once, and why, for example *Up to 3 at once: each worker runs one task at a time; 3 workers are available. Each start also needs a free worker under its computer's Worker limit (Settings › Computers).* The number is the smallest of **Workers at once**, the workers that aren't held and, when tasks share a project folder instead of having their own worktrees, the number of project folders. Rehearsal uses the same cap.
+- Operations shows how many workers can actually run at once, and why, for example *Up to 3 at once: each worker runs one ticket at a time; 3 workers are available. Each start also needs a free worker under its computer's Worker limit (Settings › Computers).* The number is the smallest of **Workers at once**, the workers that aren't held and, when tickets share a project folder instead of having their own worktrees, the number of project folders. Rehearsal uses the same cap.
 - Native provider sub-agents and unrestricted shell processes aren't covered by the organization's accounting.
 
-**Managed destinations** can be local workflows, swarms, paired desktops, or a remote HTTPS service you explicitly trust. Workflow validation previews inputs, resources, source and IR hashes, and completion checks. Launch authorization binds that reviewed contract. Editing a task plan clears its authorization; previewing doesn't run it.
+**Managed destinations** can be local workflows, swarms, paired desktops, or a remote HTTPS service you explicitly trust. Workflow validation previews inputs, resources, source and IR hashes, and completion checks. Launch authorization binds that reviewed contract. Editing a ticket's plan clears its authorization; previewing doesn't run it.
 
 ## Recovery and history
 
@@ -349,7 +351,7 @@ Monthly limits can be set for the organization, each worker and each initiative:
 - Quitting Raticode while a worker runs stops the run the same way **Pause** does: the ticket waits in **Blocked** ("Waiting for the organization to start again"), the stopped run doesn't count against its run limit, and it goes back to **To do** and runs first when the organization runs again.
 - Work that was mid-run when Raticode crashed or was killed may have done things nobody recorded, so it stays **Blocked** ("Interrupted when Raticode restarted") until you or Rem reopen it. A check-in cut off this way closes instead, and the next check-in takes its place.
 - Interrupted or uncertain outside work keeps its receipt and reservation; it's never silently replayed. Use **Check stopped runs**, or **Confirm stopped after inspection** with evidence when automatic confirmation isn't possible.
-- **Configuration history** previews a restore against the current revision. Restoring configuration doesn't undo file changes, spending or task history.
+- **Configuration history** previews a restore against the current revision. Restoring configuration doesn't undo file changes, spending or ticket history.
 - Permission changes revoke affected claims. Changing owned workspaces pauses the organization.
 - **Archive organization** (in Settings, while paused) hides it and frees its project folders for other organizations. History and work records stay; **Restore organization** reclaims the folders.
 - **Export template** creates a reusable company definition, not a backup.
@@ -357,17 +359,17 @@ Monthly limits can be set for the organization, each worker and each initiative:
 
 ## Use Rem
 
-When Organizations is on, Rem's organization tools work in global and project threads. Ask Rem to inspect an organization before changing it, and say which configuration or task to change. Read-only and plan sessions can't change organizations, and running a workflow still needs your authorization.
+When Organizations is on, Rem's organization tools work in global and project threads. Ask Rem to inspect an organization before changing it, and say which configuration or ticket to change. Read-only and plan sessions can't change organizations, and running a workflow still needs your authorization.
 
 Rem can't start an organization by itself. When Rem asks for any of these, the Organizations tab shows a request and nothing changes until you approve it:
 
 - start the organization, resume all workers, or archive it
-- approve a plan, remove a task's approval or review step, accept a result that needs independent review, authorize a workflow, or confirm that interrupted outside work has stopped
+- approve a plan, remove a ticket's approval or review step, accept a result that needs independent review, authorize a workflow, or confirm that interrupted outside work has stopped
 - turn on a routine or webhook, or make an enabled routine run more often
 - re-enable or repoint a revoked credential
 - add or resume workers, give a permission mode that can write, or give workers more tools, skills, folders or credentials; add project folders (the request names each one) or run destinations
 - let a worker do more with tickets, or change who a worker reports to
-- raise or remove a run, token or dollar limit, raise an operating limit, make heartbeats more frequent, or widen working hours
+- raise or remove a run, token or dollar limit, raise an operating limit, make check-ins more frequent, or widen working hours
 - allow `git push`, or let workers edit the project folder directly
 - turn on the shared repository, keep the organization running after restarts, or write organization knowledge into the Second Brain folder
 - turn on the Second Brain for workers or point it at another folder. Its tool reads and writes notes in that folder outside the workers' sandbox, so the request names the folder, and so does a request to start the organization
@@ -477,8 +479,8 @@ Rem, workers and agent tokens can't turn it on or off, and restoring an older re
 
 Other rules:
 
-- New or changed heartbeats must be at least 15 minutes apart. A shorter heartbeat saved before this rule keeps working until edited.
-- Workers can lift only blocks a worker set. Work that Raticode, you or Rem blocked for review, and work you cancelled, stays stopped until you or Rem reopen it. Only your reopen gives a task that hit its run limit a fresh allowance.
+- New or changed check-in intervals must be at least 15 minutes. A shorter interval saved before this rule keeps working until edited.
+- Workers can lift only blocks a worker set. Work that Raticode, you or Rem blocked for review, and work you cancelled, stays stopped until you or Rem reopen it. Only your reopen gives a ticket that hit its run limit a fresh allowance.
 - Rem can't store credential values; enter them under **Operations > Protected credentials**.
 - A paired phone can't start an organization whose active workers run without a sandbox.
 

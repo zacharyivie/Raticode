@@ -22,7 +22,7 @@ const SOURCE_NAMES = {
 };
 
 // The renderer keeps at most this many entries of this session in memory.
-export const MAX_LIVE_ENTRIES = 5000;
+const MAX_LIVE_ENTRIES = 5000;
 
 export function levelName(level) {
   return LEVEL_NAMES[level] || "Info";
@@ -104,7 +104,7 @@ export function withHistoryKeys(entries = []) {
   return entries.map((entry, index) => ({ ...entry, key: `h${index}` }));
 }
 
-export function sameMessage(a, b) {
+function sameMessage(a, b) {
   return a.level === b.level && a.source === b.source && (a.component || "") === (b.component || "") && a.message === b.message;
 }
 
@@ -147,7 +147,7 @@ export function selectionAsText(entries) {
 }
 
 // Large selections keep the newest entries so the attachment stays a useful size.
-export const MAX_REM_LOG_CHARS = 200_000;
+const MAX_REM_LOG_CHARS = 200_000;
 
 // The attachment Rem receives. Entries are already redacted when they are logged.
 export function logSelectionForRem(entries, { version = "", platform = "", logFile = "" } = {}, limit = MAX_REM_LOG_CHARS) {

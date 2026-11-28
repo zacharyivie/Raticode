@@ -18,20 +18,11 @@ const { ChromiumContents } = require("../chromium-contents.cjs");
 const { createFirefoxEngine, findFirefox } = require("../firefox-engine.cjs");
 const { FirefoxContents } = require("../firefox-contents.cjs");
 const { soundExpression } = require("../stream-sound.cjs");
+const { chromiumForTesting, waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 12_000, interval: 100 };
 
-function chromeForTesting() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    for (const entry of fs.readdirSync(root).filter((name) => /^chromium-\d+$/.test(name)).sort().reverse()) {
-      const candidate = path.join(root, entry, "chrome-linux64", "chrome");
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  } catch { /* No Playwright downloads. */ }
-  return "";
-}
-
-const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromeForTesting() : ""));
-const EDGE_PATH = process.env.RATICODE_SKIP_EDGE_TESTS === "1" ? "" : (findBrowser(EDGE) || (process.platform === "linux" ? chromeForTesting() : ""));
+const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromiumForTesting() : ""));
+const EDGE_PATH = process.env.RATICODE_SKIP_EDGE_TESTS === "1" ? "" : (findBrowser(EDGE) || (process.platform === "linux" ? chromiumForTesting() : ""));
 const FIREFOX_PATH = process.env.RATICODE_SKIP_FIREFOX_TESTS === "1" ? "" : findFirefox();
 
 const ENGINES = {
@@ -80,16 +71,6 @@ async function startSite() {
 
 const fakeImage = { createFromBuffer: (buffer) => ({ isEmpty: () => !buffer.length, getSize: () => ({ width: 1280, height: 800 }), resize() { return this; }, toPNG: () => buffer }) };
 
-async function waitFor(check, message, timeout = 12000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
-
 const click = (contents, x, y) => contents.handleInput([{ t: "down", x, y, button: 0 }, { t: "up", x, y, button: 0 }]);
 
 test("a playing element with its volume up counts, and a tab's own mute doesn't hide it", () => {
@@ -115,24 +96,24 @@ for (const [name, spec] of Object.entries(ENGINES)) {
 
       // The user's click starts the sound; the tab says so within a few seconds.
       click(contents, 60, 40);
-      await waitFor(() => contents.isCurrentlyAudible(), "the playing page was never reported as playing");
+      await waitFor(() => contents.isCurrentlyAudible(), "the playing page was never reported as playing", WAIT);
       assert.deepEqual(changes, [true]);
 
       // Muting the tab mutes the page, and the tab still counts as playing (muted).
       contents.setAudioMuted(true);
-      await waitFor(async () => (await contents.evaluateIn("test", "document.querySelector('audio').muted")) === true, "the tab's mute didn't reach the page");
+      await waitFor(async () => (await contents.evaluateIn("test", "document.querySelector('audio').muted")) === true, "the tab's mute didn't reach the page", WAIT);
       await new Promise((resolve) => setTimeout(resolve, 3000));
       assert.equal(contents.isCurrentlyAudible(), true, "a muted tab that is playing still counts");
       contents.setAudioMuted(false);
 
       // Pausing ends it.
       click(contents, 60, 130);
-      await waitFor(() => !contents.isCurrentlyAudible(), "the paused page was still reported as playing");
+      await waitFor(() => !contents.isCurrentlyAudible(), "the paused page was still reported as playing", WAIT);
 
       // A tab in the background, not on screen, still says it plays: this keeps it from being unloaded.
       contents.setView({ width: 800, height: 600, scale: 1 }, false);
       await contents.evaluateIn("test", "document.querySelector('audio').play().then(() => true)", { userGesture: true });
-      await waitFor(() => contents.isCurrentlyAudible(), "a hidden tab playing sound was not reported as playing");
+      await waitFor(() => contents.isCurrentlyAudible(), "a hidden tab playing sound was not reported as playing", WAIT);
       assert.deepEqual(changes, [true, false, true]);
     } finally {
       contents.close();

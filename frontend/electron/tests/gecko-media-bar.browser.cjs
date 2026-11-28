@@ -12,6 +12,8 @@ const path = require("node:path");
 const { BrowserWindow, app, ipcMain } = require("electron");
 const { findFirefox } = require("../firefox-engine.cjs");
 const { createGeckoWindow } = require("../gecko-window.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 25_000, interval: 100 };
 
 const frontend = path.join(__dirname, "..", "..");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-gecko-bar-test-"));
@@ -43,16 +45,6 @@ const PAGES = {
   "/muted": `<!doctype html><title>Muted page</title><body><script>${WAV} audio.muted = true; audio.play(); setTimeout(() => { location.href = "/last"; }, 7000);</script>`,
   "/last": `<!doctype html><title>Last page</title><body><script>${WAV} audio.play();</script>`,
 };
-
-async function waitFor(check, message, timeout = 25000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
 
 async function compileBar(esbuild) {
   const { default: tailwind } = await import("@tailwindcss/postcss");
@@ -146,37 +138,37 @@ async function run() {
   assert.equal(await hasBar(), false, "the bar showed before Gecko started");
   await page(`window.goferBrowser.gecko("place", { x: 0, y: 40, width: 900, height: 440, visible: true })`);
   await page(`window.goferBrowser.gecko("open", { url: ${JSON.stringify(`${base}/player`)} })`);
-  await waitFor(async () => /First song/.test(await barText()) && /The Band/.test(await barText()), "Gecko's playback never reached the bar");
-  await waitFor(() => page(`${bar}.querySelector('img')?.naturalWidth > 0`), "the thumbnail did not load");
+  await waitFor(async () => /First song/.test(await barText()) && /The Band/.test(await barText()), "Gecko's playback never reached the bar", WAIT);
+  await waitFor(() => page(`${bar}.querySelector('img')?.naturalWidth > 0`), "the thumbnail did not load", WAIT);
   assert.deepEqual(await disabledControls(), [false, false, false]);
   const height = await page(`${bar}.getBoundingClientRect().height`);
   assert.ok(height > 0 && height <= 30, `the bar is ${height}px tall`);
   if (process.env.RATICODE_MEDIA_BAR_SHOT) fs.writeFileSync(process.env.RATICODE_MEDIA_BAR_SHOT, (await window.webContents.capturePage()).toPNG());
 
   await click("Next");
-  await waitFor(async () => /Song 1/.test(await barText()), "Next did not reach Gecko's page");
+  await waitFor(async () => /Song 1/.test(await barText()), "Next did not reach Gecko's page", WAIT);
   await click("Previous");
-  await waitFor(async () => /Back again/.test(await barText()), "Previous did not reach Gecko's page");
+  await waitFor(async () => /Back again/.test(await barText()), "Previous did not reach Gecko's page", WAIT);
   await click("Pause");
-  await waitFor(() => page(`Boolean(${button("Play")})`), "Pause did not reach Gecko");
+  await waitFor(() => page(`Boolean(${button("Play")})`), "Pause did not reach Gecko", WAIT);
   assert.equal(await hasBar(), true, "pausing closed the bar");
   await click("Play");
-  await waitFor(() => page(`Boolean(${button("Pause")})`), "Play did not reach Gecko");
+  await waitFor(() => page(`Boolean(${button("Pause")})`), "Play did not reach Gecko", WAIT);
 
   // A new page: its own title, and no previous or next it doesn't offer.
   await click("Next");
-  await waitFor(async () => /Plain page/.test(await barText()), "navigation did not reach the bar");
-  await waitFor(async () => JSON.stringify(await disabledControls()) === "[true,false,true]", "the plain page's controls were wrong");
+  await waitFor(async () => /Plain page/.test(await barText()), "navigation did not reach the bar", WAIT);
+  await waitFor(async () => JSON.stringify(await disabledControls()) === "[true,false,true]", "the plain page's controls were wrong", WAIT);
 
   // A muted page isn't playing media; the page after it is.
-  await waitFor(async () => !(await hasBar()), "the bar stayed open for a muted page");
+  await waitFor(async () => !(await hasBar()), "the bar stayed open for a muted page", WAIT);
   await new Promise((resolve) => setTimeout(resolve, 2500));
   assert.equal(await hasBar(), false, "a muted page reopened the bar");
-  await waitFor(async () => /Last page/.test(await barText()), "the last page did not open the bar");
+  await waitFor(async () => /Last page/.test(await barText()), "the last page did not open the bar", WAIT);
 
   // Closing Gecko closes the bar.
   await page(`window.goferBrowser.gecko("stop")`);
-  await waitFor(async () => !(await hasBar()), "the bar outlived Firefox");
+  await waitFor(async () => !(await hasBar()), "the bar outlived Firefox", WAIT);
   assert.equal(await page(`window.goferBrowser.gecko("status").then((status) => status.media)`), null);
 
   gecko.close();

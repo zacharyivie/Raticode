@@ -9,12 +9,37 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const vm = require("node:vm");
+const { parse } = require("@babel/parser");
 const { createBrowserSessions, remOwnerForThread, sameProfile, sanitizePromptResponse } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
 const { browserContentZoomFactor } = require("../browser-utils.cjs");
 const { PARTITIONS } = require("../browser-policy.cjs");
+const { stopBeforeRemoving, tempFolder } = require("./temp-folder.cjs");
 
 let nextId = 100;
+
+// Attaches the handler main.js gives mainWindow.webContents for `name`, run from
+// main.js's own source, so the test checks the guard the app installs.
+function installMainWindowHandler(mainWindow, name) {
+  const source = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+  const handlers = [];
+  (function visit(node) {
+    if (!node || typeof node.type !== "string") return;
+    const callee = node.type === "CallExpression" ? node.callee : null;
+    if (callee?.type === "MemberExpression" && callee.property.name === "on"
+      && source.slice(callee.object.start, callee.object.end) === "mainWindow.webContents"
+      && node.arguments[0]?.value === name) handlers.push(node.arguments[1]);
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "loc") continue;
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === "object") visit(value);
+    }
+  })(parse(source, { sourceType: "module" }).program);
+  assert.equal(handlers.length, 1, `main.js sets one ${name} handler on the main window`);
+  const handler = vm.runInNewContext(`(${source.slice(handlers[0].start, handlers[0].end)})`, {});
+  mainWindow.webContents.on(name, handler);
+}
 
 class FakeProfile extends EventEmitter {
   constructor(name) {
@@ -168,11 +193,22 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
   const views = [];
   const viewHooks = {};
   const contentsById = new Map();
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-sessions-"));
+  // Removed when the test that called harness() ends.
+  const directory = tempFolder("browser-sessions-");
   const downloads = path.join(directory, "Downloads");
   fs.mkdirSync(downloads);
   const store = createBrowserStore(path.join(directory, "profile"), { writeDelayMs: 1 });
+  // A save still waiting on its timer would make the folder again after it is removed.
+  // Closing the last private tab also forgets its downloads privateCleanupDelayMs (1 ms)
+  // later, so the save waits for that first.
+  stopBeforeRemoving(directory, {
+    async stop() {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      store.flush();
+    },
+  });
   const opened = [];
+  const shown = [];
   const messages = [];
   const menus = [];
   const app = {
@@ -191,7 +227,7 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
       showSaveDialog: async () => (dialogOverrides.savePath ? { canceled: false, filePath: dialogOverrides.savePath } : { canceled: true }),
       showOpenDialog: async () => (dialogOverrides.openPaths ? { canceled: false, filePaths: dialogOverrides.openPaths } : { canceled: true }),
     },
-    shell: { openExternal: async (url) => opened.push(url), openPath: async (target) => opened.push(target), showItemInFolder() {} },
+    shell: { openExternal: async (url) => opened.push(url), openPath: async (target) => opened.push(target), showItemInFolder: (target) => { shown.push(target); } },
     session: { fromPartition: (name) => profiles[name] },
     webContents: { fromId: (id) => contentsById.get(id) },
     getMainWindow: () => mainWindow,
@@ -239,7 +275,7 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
     return { session, contents, view, id: session.id };
   }
   const sent = (channel) => owner.sent.filter(([name]) => name === channel).map(([, payload]) => payload);
-  return { app, browsers, profiles, owner, event, open, openRem, sent, store, directory, downloads, opened, contentsById, messages, menus, views, mainWindow, popout, setPopoutOpen: (value) => { popoutOpen = value; } };
+  return { app, browsers, profiles, owner, event, open, openRem, sent, store, directory, downloads, opened, shown, contentsById, messages, menus, views, mainWindow, popout, setPopoutOpen: (value) => { popoutOpen = value; } };
 }
 
 test("tabs present a consistent Chromium identity and Electron's own to Google sign-in", async () => {
@@ -302,7 +338,7 @@ test("a reloaded or crashed studio closes the tabs it had instead of leaving the
 });
 
 test("tabs, previews and Rem use separate profiles", () => {
-  const { browsers, open, openRem, profiles, directory, owner, event, contentsById } = harness();
+  const { browsers, open, openRem, profiles, directory, owner, mainWindow, event, contentsById } = harness();
   const web = open({ url: "example.com" });
   assert.equal(web.state.partition, PARTITIONS.user);
   assert.equal(web.contents.getURL(), "https://example.com/");
@@ -321,7 +357,13 @@ test("tabs, previews and Rem use separate profiles", () => {
     Object.fromEntries(["sandbox", "contextIsolation", "nodeIntegration", "nodeIntegrationInSubFrames", "webSecurity", "allowRunningInsecureContent", "webviewTag", "preload"].map((key) => [key, web.view.webPreferences[key]])),
     { sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, preload: "/app/browser-preload.cjs" },
   );
-  assert.equal(browsers.isPendingAttach(owner.id, { src: "about:blank", partition: PARTITIONS.user }), false);
+  // main.js's guard on the main window refuses every <webview>, whatever it asks for.
+  installMainWindowHandler(mainWindow, "will-attach-webview");
+  for (const params of [{ src: "about:blank", partition: PARTITIONS.user }, { src: "https://example.com/", partition: PARTITIONS.rem }, {}]) {
+    const attach = { prevented: false, preventDefault() { this.prevented = true; } };
+    owner.emit("will-attach-webview", attach, { nodeIntegration: false }, params);
+    assert.equal(attach.prevented, true, JSON.stringify(params));
+  }
   // A tab can't adopt a page it didn't make.
   const wrong = new FakeContents({ host: owner, profile: profiles[PARTITIONS.user] });
   contentsById.set(wrong.id, wrong);
@@ -654,6 +696,170 @@ test("downloads: finished files list system apps and open only with one of them"
   assert.equal(launched.length, 1);
 });
 
+// Starts a download in a user (or private) tab. With body set, the file is
+// written and the download finishes; without it, the download keeps running.
+function startDownload(profiles, tab, filename, { body, partition = PARTITIONS.user } = {}) {
+  const item = fakeDownload(filename);
+  profiles[partition].emit("will-download", { preventDefault() {} }, item, tab.contents);
+  if (body !== undefined) {
+    fs.mkdirSync(path.dirname(item.savePath), { recursive: true });
+    fs.writeFileSync(item.savePath, body);
+    item.emit("done", {}, "completed");
+  }
+  return item;
+}
+
+const listedDownload = (store, filename) => store.listDownloads().find((item) => item.filename === filename);
+const downloadCommand = (browsers, command, id) => browsers.browserLibrary(null, { action: "download", command, id });
+
+test("downloads: open hands a finished file to the system opener, and a running one is refused", async () => {
+  const { open, profiles, browsers, store, opened, downloads } = harness();
+  const web = open({ url: "https://example.com/" });
+  startDownload(profiles, web, "report.pdf", { body: "pdf" });
+  const finished = listedDownload(store, "report.pdf");
+  assert.equal(finished.state, "completed");
+  const result = await downloadCommand(browsers, "open", finished.id);
+  assert.deepEqual(opened, [path.join(downloads, "report.pdf")]);
+  assert.ok(result.downloads.some((item) => item.id === finished.id));
+
+  startDownload(profiles, web, "big.zip");
+  await assert.rejects(downloadCommand(browsers, "open", listedDownload(store, "big.zip").id), /Only finished/);
+  assert.equal(opened.length, 1);
+  await assert.rejects(downloadCommand(browsers, "open", "no-such-id"), /no longer listed/);
+});
+
+test("downloads: show points the file manager at the file, and fails once the file is gone", async () => {
+  const { open, profiles, browsers, store, shown, downloads } = harness();
+  const web = open({ url: "https://example.com/" });
+  const item = startDownload(profiles, web, "notes.txt", { body: "hello" });
+  const entry = listedDownload(store, "notes.txt");
+  await downloadCommand(browsers, "show", entry.id);
+  assert.deepEqual(shown, [path.join(downloads, "notes.txt")]);
+  fs.rmSync(item.savePath);
+  await assert.rejects(downloadCommand(browsers, "show", entry.id), /moved or deleted/);
+  assert.equal(shown.length, 1);
+});
+
+test("downloads: retry starts the URL again in a user tab with the same private state", async () => {
+  const { open, profiles, browsers, store, event } = harness();
+  const web = open({ url: "https://example.com/" });
+  const secret = open({ url: "https://secret.example/", private: true });
+  startDownload(profiles, web, "report.pdf", { body: "pdf" });
+  startDownload(profiles, secret, "private.pdf", { body: "pdf", partition: PARTITIONS.private });
+
+  // A private download goes back to a private tab, and the old entry is dropped.
+  const privateEntry = listedDownload(store, "private.pdf");
+  assert.equal(privateEntry.private, true);
+  await downloadCommand(browsers, "retry", privateEntry.id);
+  assert.deepEqual(secret.contents.downloads, ["https://files.test/private.pdf"]);
+  assert.deepEqual(web.contents.downloads, []);
+  assert.equal(listedDownload(store, "private.pdf"), undefined);
+
+  // With only a private tab open, a normal download has nowhere to start and stays listed.
+  const normalEntry = listedDownload(store, "report.pdf");
+  browsers.browserAction(event, { id: web.id, action: "close" });
+  await assert.rejects(downloadCommand(browsers, "retry", normalEntry.id), /Open a browser tab to retry/);
+  assert.deepEqual(secret.contents.downloads, ["https://files.test/private.pdf"]);
+  assert.ok(listedDownload(store, "report.pdf"));
+
+  const again = open({ url: "https://example.com/again" });
+  await downloadCommand(browsers, "retry", normalEntry.id);
+  assert.deepEqual(again.contents.downloads, ["https://files.test/report.pdf"]);
+  assert.equal(listedDownload(store, "report.pdf"), undefined);
+
+  // Only web addresses are retried.
+  const blob = Object.assign(fakeDownload("chat.html"), { getURL: () => "blob:https://chat.example.com/5c7baa75" });
+  profiles[PARTITIONS.user].emit("will-download", { preventDefault() {} }, blob, again.contents);
+  await assert.rejects(downloadCommand(browsers, "retry", listedDownload(store, "chat.html").id), /cannot be retried/);
+  assert.deepEqual(again.contents.downloads, ["https://files.test/report.pdf"]);
+});
+
+test("downloads: remove drops one entry from the store and the list, cancelling it if it still runs", async () => {
+  const { open, profiles, browsers, store, sent } = harness();
+  const web = open({ url: "https://example.com/" });
+  const kept = startDownload(profiles, web, "kept.pdf", { body: "pdf" });
+  const gone = startDownload(profiles, web, "gone.pdf", { body: "pdf" });
+  const running = startDownload(profiles, web, "running.zip");
+
+  const result = await downloadCommand(browsers, "remove", listedDownload(store, "gone.pdf").id);
+  assert.deepEqual(result.downloads.map((item) => item.filename).sort(), ["kept.pdf", "running.zip"]);
+  assert.deepEqual(store.listDownloads().map((item) => item.filename).sort(), ["kept.pdf", "running.zip"]);
+  assert.deepEqual(sent("gofer:browser-downloads").at(-1).downloads.map((item) => item.filename).sort(), ["kept.pdf", "running.zip"]);
+  // Removing the entry leaves the file where it was saved.
+  assert.equal(fs.existsSync(gone.savePath), true);
+
+  await downloadCommand(browsers, "remove", listedDownload(store, "running.zip").id);
+  assert.equal(running.cancelled, true);
+  assert.equal(kept.cancelled, undefined);
+  assert.deepEqual(store.listDownloads().map((item) => item.filename), ["kept.pdf"]);
+  await assert.rejects(downloadCommand(browsers, "remove", "no-such-id"), /no longer listed/);
+});
+
+test("downloads: clear drops every finished entry and keeps running and quarantined ones", async () => {
+  const { open, profiles, browsers, store, sent } = harness();
+  const web = open({ url: "https://example.com/" });
+  startDownload(profiles, web, "done.pdf", { body: "pdf" });
+  const stopped = startDownload(profiles, web, "stopped.zip");
+  stopped.emit("done", {}, "cancelled");
+  const running = startDownload(profiles, web, "running.zip");
+  startDownload(profiles, web, "setup.exe", { body: "MZ" });
+  assert.equal(listedDownload(store, "setup.exe").state, "quarantined");
+
+  // Clear needs no id.
+  const result = await browsers.browserLibrary(null, { action: "download", command: "clear" });
+  assert.deepEqual(result.downloads.map((item) => item.filename).sort(), ["running.zip", "setup.exe"]);
+  assert.deepEqual(sent("gofer:browser-downloads").at(-1).downloads.map((item) => item.filename).sort(), ["running.zip", "setup.exe"]);
+  assert.equal(running.cancelled, undefined);
+
+  // The kept download still reports when it finishes.
+  fs.writeFileSync(running.savePath, "zip");
+  running.emit("done", {}, "completed");
+  assert.equal(listedDownload(store, "running.zip").state, "completed");
+});
+
+test("downloads: discard deletes a quarantined file and the entry stops waiting for review", async () => {
+  const { open, profiles, browsers, store, downloads } = harness();
+  const web = open({ url: "https://example.com/" });
+  const risky = startDownload(profiles, web, "setup.exe", { body: "MZ" });
+  const entry = listedDownload(store, "setup.exe");
+  assert.equal(entry.state, "quarantined");
+  assert.equal(entry.quarantinePath, risky.savePath);
+  assert.equal(fs.existsSync(risky.savePath), true);
+
+  const result = await downloadCommand(browsers, "discard", entry.id);
+  assert.equal(fs.existsSync(risky.savePath), false);
+  assert.equal(fs.existsSync(path.join(downloads, "setup.exe")), false);
+  const discarded = result.downloads.find((item) => item.id === entry.id);
+  assert.equal(discarded.state, "cancelled");
+  assert.equal(discarded.quarantinePath, "");
+  assert.deepEqual(listedDownload(store, "setup.exe"), discarded);
+  await assert.rejects(downloadCommand(browsers, "keep", entry.id), /not waiting for review/);
+});
+
+test("downloads: a Chromium download in Rem's tab is refused unless Rem may download", () => {
+  const { openRem, profiles, browsers, store, sent } = harness({ policy: { remDownloads: "ask" } });
+  const rem = openRem();
+  let prevented = 0;
+  const item = fakeDownload("tool.zip");
+  profiles[PARTITIONS.rem].emit("will-download", { preventDefault: () => { prevented += 1; } }, item, rem.contents);
+  assert.equal(prevented, 1);
+  assert.equal(rem.session.lastBlockedDownload, "tool.zip");
+  assert.deepEqual(rem.session.agentLog.at(-1), { action: "download blocked", detail: "tool.zip", at: rem.session.agentLog.at(-1).at });
+  assert.equal(typeof rem.session.agentLog.at(-1).at, "number");
+  // The tab's state carries the activity, and nothing is saved or listed.
+  const state = sent("gofer:browser-state").filter((item) => item.id === rem.id).at(-1);
+  assert.equal(state.agent.log.at(-1).action, "download blocked");
+  assert.equal(item.savePath, "");
+  assert.deepEqual(store.listDownloads(), []);
+  assert.deepEqual(sent("gofer:browser-downloads"), []);
+
+  browsers.setPolicy(null, { remDownloads: "allow" });
+  const allowed = fakeDownload("allowed.zip");
+  profiles[PARTITIONS.rem].emit("will-download", { preventDefault: () => { prevented += 1; } }, allowed, rem.contents);
+  assert.equal(prevented, 1);
+  assert.equal(listedDownload(store, "allowed.zip").byRem, true);
+});
+
 test("Ask Rem about this sends the right-clicked element, but not one from another frame", () => {
   const { open, menus, sent } = harness();
   const web = open({ url: "https://example.com/" });
@@ -852,6 +1058,191 @@ test("HTTP sign-in is asked in the tab and never offered to Rem", async () => {
   browsers.browserAction(event, { id: web.id, action: "prompt-response", requestId: request.requestId, response: { username: "ada", password: "s3cret" } });
   assert.deepEqual(await credentials, ["ada", "s3cret"]);
   assert.equal(JSON.stringify(sent("gofer:browser-state")).includes("s3cret"), false);
+});
+
+// A sign-in popup window as Electron hands it to did-create-window.
+function fakeChildWindow(url, title = "") {
+  const contents = Object.assign(new EventEmitter(), {
+    url,
+    title,
+    getURL() { return this.url; },
+    getTitle() { return this.title; },
+    setWindowOpenHandler(handler) { this.openHandler = handler; },
+  });
+  return Object.assign(new EventEmitter(), {
+    webContents: contents,
+    destroyed: false,
+    closeCalls: 0,
+    isDestroyed() { return this.destroyed; },
+    setMenuBarVisibility(value) { this.menuBarVisible = value; },
+    setTitle(value) { this.title = value; },
+    close() { this.closeCalls += 1; this.destroyed = true; },
+  });
+}
+
+function fakeNavigation() {
+  return { prevented: false, preventDefault() { this.prevented = true; } };
+}
+
+test("a sign-in popup opens no windows of its own, stays on web pages and shows the site's host", () => {
+  const { open, sent } = harness();
+  const web = open({ url: "https://shop.example/" });
+  const popup = fakeChildWindow("https://accounts.example.com/login", "Sign in to Example");
+  web.contents.emit("did-create-window", popup);
+  assert.equal(popup.menuBarVisible, false);
+
+  // window.open from the popup is denied and opens the address as a tab instead.
+  const before = sent("gofer:browser-open-tab").length;
+  assert.deepEqual(popup.webContents.openHandler({ url: "https://accounts.example.com/help" }), { action: "deny" });
+  const tabs = sent("gofer:browser-open-tab").slice(before);
+  assert.equal(tabs.length, 1);
+  assert.equal(tabs[0].url, "https://accounts.example.com/help");
+  assert.equal(tabs[0].engine, "raticode");
+  // A non-web address gets no tab at all.
+  assert.deepEqual(popup.webContents.openHandler({ url: "file:///etc/passwd" }), { action: "deny" });
+  assert.equal(sent("gofer:browser-open-tab").length, before + 1);
+
+  // Navigations and redirects stay on web pages.
+  for (const name of ["will-navigate", "will-redirect"]) {
+    const local = fakeNavigation();
+    popup.webContents.emit(name, local, "file:///home/user/.ssh/id_ed25519");
+    assert.equal(local.prevented, true, `${name} to a file: URL is stopped`);
+    const custom = fakeNavigation();
+    popup.webContents.emit(name, custom, "javascript:alert(1)");
+    assert.equal(custom.prevented, true, `${name} to a javascript: URL is stopped`);
+    for (const allowed of ["https://accounts.example.com/next", "http://accounts.example.com/", "about:blank", "blob:https://accounts.example.com/1"]) {
+      const web = fakeNavigation();
+      popup.webContents.emit(name, web, allowed);
+      assert.equal(web.prevented, false, `${name} to ${allowed} goes ahead`);
+    }
+  }
+
+  // The page can't set the title bar: the host always leads it.
+  const titled = fakeNavigation();
+  popup.webContents.title = "Your bank — sign in";
+  popup.webContents.emit("page-title-updated", titled, "Your bank — sign in");
+  assert.equal(titled.prevented, true);
+  assert.equal(popup.title, "accounts.example.com — Your bank — sign in");
+  assert.ok(popup.title.startsWith("accounts.example.com"));
+  popup.webContents.url = "https://login.other.example/";
+  popup.webContents.title = "";
+  popup.webContents.emit("did-navigate");
+  assert.equal(popup.title, "login.other.example — Raticode");
+  // A page that isn't on the web shows no host.
+  popup.webContents.url = "about:blank";
+  popup.webContents.emit("did-navigate");
+  assert.equal(popup.title, "Sign in — Raticode");
+});
+
+test("a tab's open sign-in popups close with it, and a closed popup is forgotten", () => {
+  const { open, browsers, event } = harness();
+  const web = open({ url: "https://shop.example/" });
+  const closedEarly = fakeChildWindow("https://accounts.example.com/login");
+  const stillOpen = fakeChildWindow("https://accounts.example.com/other");
+  web.contents.emit("did-create-window", closedEarly);
+  web.contents.emit("did-create-window", stillOpen);
+  closedEarly.emit("closed");
+  browsers.browserAction(event, { id: web.id, action: "close" });
+  assert.equal(stillOpen.closeCalls, 1);
+  assert.equal(closedEarly.closeCalls, 0, "a popup that left the list isn't closed again");
+  // A popup that closed is gone from the list, so a later tab close skips it too.
+  const other = open({ url: "https://two.example/" });
+  const late = fakeChildWindow("https://accounts.example.com/late");
+  other.contents.emit("did-create-window", late);
+  late.emit("closed");
+  browsers.browserAction(event, { id: other.id, action: "close" });
+  assert.equal(late.closeCalls, 0);
+});
+
+test("client certificates are never offered to Rem and a user's choice is remembered for the site", async () => {
+  const { open, openRem, browsers, event, sent } = harness();
+  const certificates = [
+    { subjectName: "Ada Work", issuerName: "Corp CA", fingerprint: "sha256/work", validStart: 1, validExpiry: 2 },
+    { subjectName: "Ada Home", issuerName: "Home CA", fingerprint: "sha256/home", validStart: 3, validExpiry: 4 },
+  ];
+  const call = (contents, url, list) => {
+    const calls = [];
+    const prevented = fakeNavigation();
+    const handled = browsers.handleSelectClientCertificate(prevented, contents, url, list, (...args) => calls.push(args));
+    return { calls, handled, prevented: prevented.prevented };
+  };
+  const promptCount = () => sent("gofer:browser-state").flatMap((state) => state.prompts || []).filter((item) => item.kind === "client-certificate").length;
+
+  // Rem gets no certificate, and the user isn't asked on Rem's behalf.
+  const rem = openRem();
+  const remCall = call(rem.contents, "https://vpn.corp.example/", certificates);
+  assert.equal(remCall.handled, true);
+  assert.equal(remCall.prevented, true);
+  assert.deepEqual(remCall.calls, [[]]);
+  assert.equal(promptCount(), 0);
+
+  // A user tab with nothing to choose from goes on without one.
+  const web = open({ url: "https://vpn.corp.example/" });
+  assert.deepEqual(call(web.contents, "https://vpn.corp.example/", []).calls, [[]]);
+  assert.equal(promptCount(), 0);
+
+  // The first choice is asked in the tab and remembered for the host.
+  const chosen = new Promise((resolve) => browsers.handleSelectClientCertificate(fakeNavigation(), web.contents, "https://vpn.corp.example/", certificates, (...args) => resolve(args)));
+  const request = sent("gofer:browser-state").at(-1).prompts.at(-1);
+  assert.equal(request.kind, "client-certificate");
+  assert.equal(request.host, "vpn.corp.example");
+  assert.deepEqual(request.certificates.map((item) => [item.index, item.subject, item.fingerprint]), [[0, "Ada Work", "sha256/work"], [1, "Ada Home", "sha256/home"]]);
+  browsers.browserAction(event, { id: web.id, action: "prompt-response", requestId: request.requestId, response: { index: 1 } });
+  assert.deepEqual(await chosen, [certificates[1]]);
+
+  // The next request from that host gets the same certificate without a prompt, even reordered.
+  const asked = promptCount();
+  const again = call(web.contents, "https://vpn.corp.example/portal", [certificates[1], certificates[0]]);
+  assert.deepEqual(again.calls, [[certificates[1]]]);
+  assert.equal(promptCount(), asked);
+  // Rem still gets none for a host the user chose a certificate for.
+  assert.deepEqual(call(rem.contents, "https://vpn.corp.example/", certificates).calls, [[]]);
+  // Another host is asked again.
+  void browsers.handleSelectClientCertificate(fakeNavigation(), web.contents, "https://mail.corp.example/", certificates, () => {});
+  assert.equal(sent("gofer:browser-state").at(-1).prompts.at(-1).host, "mail.corp.example");
+
+  // Contents that aren't a Browser tab are left to Electron.
+  const stray = { id: 999, hostWebContents: null };
+  const strayEvent = fakeNavigation();
+  assert.equal(browsers.handleSelectClientCertificate(strayEvent, stray, "https://vpn.corp.example/", certificates, () => assert.fail("no callback")), false);
+  assert.equal(strayEvent.prevented, false);
+});
+
+test("clearing Rem's browsing data keeps the user's history and puts shared sign-ins back", async () => {
+  const { browsers, event, profiles, store } = harness();
+  profiles[PARTITIONS.user].cookieList = [
+    { name: "session", value: "gh", domain: ".github.com", path: "/", secure: true, httpOnly: true, hostOnly: false, session: true },
+    { name: "session", value: "bank", domain: "bank.test", path: "/", secure: true, httpOnly: true, hostOnly: true, session: true },
+  ];
+  browsers.setPolicy(null, { remSignInSites: ["github.com"] });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  store.recordVisit({ url: "https://news.example/story", title: "A story" });
+  store.setPermission("https://news.example", "notifications", "allow");
+  // Something Rem picked up on its own.
+  profiles[PARTITIONS.rem].cookieList.push({ name: "tracker", value: "rem-only", domain: "ads.example", path: "/", secure: true, httpOnly: false, hostOnly: true, session: true });
+
+  assert.deepEqual(await browsers.browserLibrary(event, { action: "clear-data", profile: "rem", history: true, cookies: true, cache: true, siteSettings: true }), { cleared: true });
+  assert.deepEqual(store.searchHistory("").map((item) => item.url), ["https://news.example/story"], "the user's history stays");
+  assert.equal(store.listSites().length, 1, "the user's site settings stay");
+  assert.equal(profiles[PARTITIONS.rem].cacheCleared, true);
+  assert.equal(profiles[PARTITIONS.user].cacheCleared, undefined);
+  assert.deepEqual(profiles[PARTITIONS.rem].cookieList.map((cookie) => cookie.value), ["gh"], "Rem's own cookies go and the shared sign-in comes back");
+  assert.deepEqual(profiles[PARTITIONS.user].cookieList.map((cookie) => cookie.value), ["gh", "bank"], "the user stays signed in");
+});
+
+test("clearing the user's browsing data clears history and site settings only when asked", async () => {
+  const { browsers, event, profiles, store } = harness();
+  store.recordVisit({ url: "https://news.example/story", title: "A story" });
+  store.setPermission("https://news.example", "notifications", "allow");
+  store.updateSite("https://maps.example", { zoom: 1.5 });
+  profiles[PARTITIONS.rem].cookieList = [{ name: "rem", value: "kept", domain: "rem.example", path: "/", secure: true, hostOnly: true, session: true }];
+
+  await browsers.browserLibrary(event, { action: "clear-data", profile: "user", history: false, siteSettings: true });
+  assert.deepEqual(store.listSites(), []);
+  assert.equal(store.searchHistory("").length, 1, "history stays when it isn't ticked");
+  await browsers.browserLibrary(event, { action: "clear-data", profile: "user", history: true });
+  assert.deepEqual(store.searchHistory(""), []);
+  assert.deepEqual(profiles[PARTITIONS.rem].cookieList.map((cookie) => cookie.value), ["kept"], "Rem's profile is left alone");
 });
 
 test("sharing a tab binds it to the thread's Rem owner until stopped", () => {
@@ -1105,7 +1496,7 @@ test("printing without printers offers a PDF instead of opening a failing dialog
 });
 
 test("Save as PDF writes the file and reports failures to the user", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-pdf-"));
+  const directory = tempFolder("browser-pdf-");
   const target = path.join(directory, "page.pdf");
   const { open, browsers, event, messages, opened } = harness({ dialog: { savePath: target } });
   const web = open({ url: "https://example.com/" });

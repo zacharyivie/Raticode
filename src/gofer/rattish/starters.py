@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import shutil
@@ -10,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from gofer.rattish.artifacts import RattishArtifactError, rattish_asset_root
+from gofer.rattish.artifacts import RattishArtifactError, provider_contracts, rattish_asset_root
 from gofer.rattish.workspaces import (
     WORKFLOW_ENTRYPOINT,
     WORKSPACE_DIRECTORY,
@@ -29,6 +30,10 @@ STARTER_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _BASH_SHELL_LINE = re.compile(r"^[ \t]+shell:[ \t]*\"?bash\"?[ \t]*(?:#.*)?$", re.IGNORECASE | re.M)
 _WORKFLOW_NAME_LINE = re.compile(
     r"^(workflow:\n(?:#[^\n]*\n)*  name: )[^\n]*$", re.IGNORECASE | re.M
+)
+# A node's own provider field. Fallback entries sit deeper, so they keep theirs.
+_NODE_PROVIDER_LINE = re.compile(
+    r"^(  provider:[ \t]*)\"?([a-z][a-z0-9-]*)\"?([ \t]*(?:#.*)?)$", re.M
 )
 
 
@@ -53,13 +58,32 @@ class Starter:
 
         return shells._on_windows() and shells.find_bash() is None
 
+    def model_providers(self) -> tuple[str, ...]:
+        """The listed providers a provider contract covers: the apps its model nodes call.
+
+        Jev and other services without a contract are left out.
+        """
+        contracts = provider_contracts()
+        return tuple(item for item in self.providers if item in contracts)
+
+    def with_provider(self, provider_id: str) -> Starter:
+        """This starter as it reads once its model nodes call PROVIDER_ID instead."""
+        replaced = self.model_providers()
+        providers = [provider_id if item in replaced else item for item in self.providers]
+        return dataclasses.replace(self, providers=tuple(dict.fromkeys(providers)))
+
     def to_payload(self) -> dict[str, Any]:
+        contracts = provider_contracts()
         return {
             "id": self.starter_id,
             "name": self.name,
             "summary": self.summary,
             "docsUrl": f"https://raticode.dev{self.docs_path}",
             "providers": list(self.providers),
+            # The app IDs (claude_code) the New workflow dialog checks are installed.
+            "providerApps": [
+                contracts[item].runtime_subscription for item in self.model_providers()
+            ],
             "secrets": list(self.secrets),
             "trigger": dict(self.trigger) if self.trigger else None,
             "hasTests": (self.root / STARTER_TESTS).is_file(),
@@ -87,6 +111,26 @@ def list_starters() -> tuple[Starter, ...]:
     return tuple(sorted(starters, key=lambda item: (item.order, item.starter_id)))
 
 
+def provider_apps() -> list[str]:
+    """App IDs (claude_code, codex) that can run a starter's agent and common-llm-task nodes."""
+    return sorted(
+        contract.runtime_subscription
+        for contract in provider_contracts().values()
+        if contract.runtime_subscription
+    )
+
+
+def rattish_provider_id(provider: str) -> str:
+    """The Rattish provider ID for an app ID (claude_code) or a Rattish ID (claude-code)."""
+    wanted = provider.strip().lower()
+    contracts = provider_contracts()
+    for contract in contracts.values():
+        if wanted in (contract.provider_id, contract.runtime_subscription):
+            return contract.provider_id
+    choices = ", ".join(sorted(contracts))
+    raise RattishWorkspaceError(f"Unknown provider {provider!r}. Choose one of: {choices}.")
+
+
 def find_starter(starter_id: str) -> Starter:
     wanted = starter_id.strip().lower()
     starters = list_starters()
@@ -102,14 +146,24 @@ def create_workflow_from_starter(
     starter_id: str,
     name: str | None = None,
     *,
+    provider: str | None = None,
     registry_dir: Path | None = None,
 ) -> RegisteredWorkflow:
     """Copy a starter into PROJECT/.raticode/<id>/ and register it.
 
     Secret references stay as ``secret["NAME"]`` text: nothing is resolved while copying.
+    PROVIDER, an app ID or Rattish provider ID, replaces the provider on the nodes that
+    call the one starter.json lists. Registering compiles the copy, so a choice that
+    doesn't validate leaves nothing behind.
     """
     starter = find_starter(starter_id)
     workflow_name = (name or "").strip() or starter.name
+    replaced = starter.model_providers()
+    new_provider = rattish_provider_id(provider) if provider else None
+    if new_provider and not replaced:
+        raise RattishWorkspaceError(
+            f"Starter {starter.starter_id} doesn't call a model, so it has no provider to change."
+        )
     staging = Path(tempfile.mkdtemp(prefix="raticode-starter-"))
     try:
         staged = staging / starter.starter_id
@@ -128,6 +182,15 @@ def create_workflow_from_starter(
         )
         if count != 1:
             raise RattishWorkspaceError(f"Starter {starter.starter_id} has no workflow name line")
+        if new_provider:
+            renamed = _NODE_PROVIDER_LINE.sub(
+                lambda match: (
+                    match.group(1) + new_provider + match.group(3)
+                    if match.group(2) in replaced
+                    else match.group(0)
+                ),
+                renamed,
+            )
         entrypoint.write_text(renamed, encoding="utf-8")
         workflow = install_registered_workflow(
             project_root,

@@ -1,4 +1,5 @@
 import { apiJson } from "./api.js";
+import { clockTime, dateTime, localTimeZone, toLocalInput, weekdayName } from "./timeText.js";
 
 // The Posts plugin's backend calls and the pure helpers its dashboard uses. Approving
 // and publishing always send the content hash of the version on screen, so the backend
@@ -17,6 +18,10 @@ export const requestChanges = (id, note = "") => request(`${postPath(id)}/reques
 export const cancelPost = id => request(`${postPath(id)}/cancel`, { method: "POST", body: {} });
 export const publishVariant = (post, variantId) => request(`${variantPath(post.id, variantId)}/publish`, { method: "POST", body: { content_hash: post.content_hash } });
 export const markPosted = (post, variantId, url) => request(`${variantPath(post.id, variantId)}/mark-posted`, { method: "POST", body: { url } });
+// A copy a platform still holds that Raticode couldn't delete: try again, or say you deleted it.
+const copyPath = (id, copyId) => `${postPath(id)}/copies/${encodeURIComponent(copyId)}`;
+export const retryCopy = (post, copyId) => request(`${copyPath(post.id, copyId)}/retry`, { method: "POST", body: {} });
+export const markCopyDeleted = (post, copyId) => request(`${copyPath(post.id, copyId)}/mark-deleted`, { method: "POST", body: {} });
 export const setPaused = paused => request("/social/pause", { method: "POST", body: { paused } });
 export const saveSocialSettings = body => request("/social/settings", { method: "PUT", body: body ?? {} });
 export const connectAccount = body => request("/social/accounts", { method: "POST", body: body ?? {} });
@@ -50,11 +55,18 @@ const PROBLEM_POSTS = new Set(["failed", "missed", "needs_attention", "partly_pu
 const PROBLEM_VARIANTS = new Set(["failed", "missed", "needs_reconnect", "outcome_unknown", "held"]);
 const DONE_VARIANTS = new Set(["published", "posted_by_you"]);
 
-// Which lane a post belongs to, or "closed" for declined, cancelled and expired posts.
+// The copies a platform still holds that Raticode tried and failed to delete.
+export function undeletedCopies(post) {
+  return (post?.platform_copies || []).filter(copy => copy.error);
+}
+
+// Which lane a post belongs to, or "closed" for declined, cancelled and expired posts. A copy
+// Raticode couldn't delete puts any post past review in Problems, even a cancelled one.
 export function laneFor(post) {
   const state = post?.state || "proposed";
   const variants = post?.variants || [];
   if (REVIEW.has(state)) return "review";
+  if (undeletedCopies(post).length) return "problems";
   if (CLOSED.has(state)) return "closed";
   if (PROBLEM_POSTS.has(state) || variants.some(variant => PROBLEM_VARIANTS.has(variant.state))) return "problems";
   if (state === "due" || variants.some(variant => variant.state === "due")) return "due";
@@ -75,22 +87,15 @@ export function groupPosts(posts = []) {
   return lanes;
 }
 
-// "Tue 18 Nov, 10:00" in the user's locale and time zone; "As soon as approved" when unset.
-export function formatWhen(iso, { locale, timeZone } = {}) {
+// When a post goes out: "Tue, Nov 18, 10:00 AM" in timeZone (yours when left out), or
+// "As soon as approved" when it has no time.
+export function postTime(iso, { timeZone } = {}) {
   if (!iso) return "As soon as approved";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Unknown time";
-  return new Intl.DateTimeFormat(locale, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone }).format(date);
+  return dateTime(iso, { timeZone, weekday: true }) || "Unknown time";
 }
 
 // A datetime-local input value ("2026-11-18T10:00") for an ISO time, in local time.
-export function toLocalInput(iso) {
-  if (!iso) return "";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  const pad = value => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
+export { toLocalInput };
 
 // The ISO UTC time for a datetime-local value, or null when it is empty or invalid.
 export function fromLocalInput(value) {
@@ -228,10 +233,6 @@ export function optionLines(variant) {
 // The schedule picker takes a wall-clock time in a chosen zone ("9:00 in Denver"). These turn
 // that into UTC and back without a date library.
 
-export function localTimeZone() {
-  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; }
-}
-
 function zoneOffsetMs(ms, timeZone) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
     timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
@@ -312,7 +313,7 @@ export function timeTargets(variants = []) {
 export function slotLabel(iso, timeZone) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit", timeZone: timeZone || undefined }).format(date);
+  return `${weekdayName(date, { timeZone })} ${clockTime(date, { timeZone })}`;
 }
 
 // Quick picks for the schedule: in an hour, tomorrow morning, next Monday morning.

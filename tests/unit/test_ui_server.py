@@ -10,7 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import pytest
 
@@ -1979,9 +1979,7 @@ def test_expensive_request_budget_does_not_block_health_and_recovers(tmp_path, m
     assert denied.status == 503
     assert _request(tmp_path, "GET", "/api/health").status == 200
     server._expensive_slots.release()
-    monkeypatch.setattr(
-        GoferUiRequestHandler, "_dispatch_POST", lambda self: self._send_json({"ok": True})
-    )
+    monkeypatch.setattr(GoferUiRequestHandler, "_chat_turn", lambda self, request: {"ok": True})
     assert _request(tmp_path, "POST", "/api/chat", body={}).status == 200
     assert server._expensive_slots.acquire(blocking=False)
     server._expensive_slots.release()
@@ -2505,7 +2503,7 @@ def test_discovery_cancellation_sends_no_error_response(
     handler = _fake_handler(_fake_server(tmp_path))
     handler.path = "/api/workflows" if method == "GET" else "/api/projects/open"
     monkeypatch.setattr(handler, "_request_data_dir", lambda query: tmp_path)
-    monkeypatch.setattr(handler, "_read_json", lambda: {"projectRoot": str(tmp_path)})
+    monkeypatch.setattr(handler, "_read_json", lambda **_: {"projectRoot": str(tmp_path)})
     monkeypatch.setattr(handler, "_assert_bundle_path_allowed", lambda *args, **kwargs: tmp_path)
 
     def cancelled(*args: Any, **kwargs: Any) -> Any:
@@ -2517,7 +2515,9 @@ def test_discovery_cancellation_sends_no_error_response(
     monkeypatch.setattr(server_module, "list_workflow_payloads", cancelled)
     monkeypatch.setattr(server_module, "open_project_payload", cancelled)
     monkeypatch.setattr(handler, "_send_json", unexpected)
-    getattr(handler, f"_dispatch_{method}")()
+    # Both are answered from the route table.
+    handler.headers = Message()
+    assert handler._answer_route(method, urlparse(handler.path))
 
 
 def test_swarm_external_workspace_requires_its_own_current_grant(tmp_path: Path) -> None:
@@ -3077,9 +3077,10 @@ def test_rattish_trigger_api_reports_bad_settings(tmp_path: Path) -> None:
         tmp_path,
         "POST",
         "/api/rattish/triggers/preview",
-        body={"expression": "0 9 * * *", "timezone": "UTC"},
+        body={"expression": "0 9 * * 1-5", "timezone": "UTC"},
     )
     assert len(json.loads(preview.body)["nextRuns"]) == 3
+    assert json.loads(preview.body)["summary"] == "Weekdays at 9:00"
 
 
 def test_start_at_login_api_writes_the_entry(

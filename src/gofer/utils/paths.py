@@ -13,17 +13,31 @@ def get_data_dir() -> Path:
     ``GOFER_DATA_DIR`` names the data folder itself. The desktop app sets it when the
     user chose a custom folder, so the CLI and the app agree on where data lives.
     Otherwise the folder is ``gofer`` inside the OS-appropriate user data directory.
+
+    The path is resolved: a link above it, such as ``/home -> var/home`` on Fedora
+    Kinoite, is followed once here. Writers below it open every folder without
+    following links, so a link inside the data folder is still refused.
     """
     configured = os.environ.get(DATA_DIR_ENV, "").strip()
     if configured:
-        return Path(configured).expanduser()
+        return Path(configured).expanduser().resolve()
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return base / "gofer"
+    return (base.expanduser() / "gofer").resolve()
+
+
+def chosen_destination(path: Path) -> Path:
+    """Resolve the folder of a file the user chose and keep the file's own name.
+
+    A link above the chosen file is the user's choice and is followed once here. The
+    name itself is not resolved, so writers still refuse a link put there.
+    """
+    path = path.expanduser().absolute()
+    return path.parent.resolve() / path.name
 
 
 def restrict_to_owner(directory: Path) -> bool:

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +38,7 @@ from gofer.core.secrets_folder import (
     folder_has_file,
     read_folder_secret,
 )
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.paths import get_data_dir
 
 KEYCHAIN_SERVICE = "Raticode provider keys"
@@ -103,15 +103,8 @@ def _load(data_dir: Path | None) -> dict[str, Any]:
 
 
 def _save(data_dir: Path | None, settings: dict[str, Any]) -> None:
-    path = _settings_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        temporary.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    text = json.dumps(settings, indent=2) + "\n"
+    replace_file(_settings_path(data_dir), text.encode("utf-8"))
 
 
 def jev_key_configured(data_dir: Path | None = None) -> bool:

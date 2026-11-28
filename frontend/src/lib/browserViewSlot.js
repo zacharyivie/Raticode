@@ -22,7 +22,7 @@ export function openOverlays(rect, doc, view) {
 }
 
 // Whether anything Raticode draws is over the slot.
-export function slotCovered(slot, rect, doc, view) {
+function slotCovered(slot, rect, doc, view) {
   const cutouts = coverCutouts(slot, rect, {
     elementAt: (x, y) => doc.elementFromPoint?.(x, y) ?? null,
     positionOf: (element) => view?.getComputedStyle?.(element)?.position || "",
@@ -32,7 +32,7 @@ export function slotCovered(slot, rect, doc, view) {
   return cutouts === null || cutouts.length > 0;
 }
 
-export function samePlace(a, b) {
+function samePlace(a, b) {
   return Boolean(a && b) && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && a.visible === b.visible && a.host === b.host;
 }
 

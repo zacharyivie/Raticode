@@ -517,6 +517,11 @@ def _status(view: dict[str, Any]) -> CommandResult:
     accounts = _accounts_line(view)
     if accounts:
         text += f"\n{accounts}"
+    for row in view.get("projects") or []:
+        text += (
+            f"\n{row['name']}: level of effort {row['effort_percent']}%, "
+            f"{row['running_threads']} of {row['target_threads']} threads ({row['root']})"
+        )
     schedule = view.get("schedule") or {}
     if "saved_enabled" in settings and settings["saved_enabled"] != settings["enabled"]:
         text += f" (switch saved as {'on' if settings['saved_enabled'] else 'off'})"
@@ -642,6 +647,29 @@ def selfwork_report(
     backend.run("selfwork report", output, (endpoint, token_file, data_dir), body)
 
 
+def _project_root(view: dict[str, Any], name: str) -> str:
+    """The folder of the Rem project ``name`` names (its name or folder), from the status."""
+    rows = view.get("projects") or []
+    for row in rows:
+        if name in (row["root"], row["name"]) or name.casefold() == row["name"].casefold():
+            return str(row["root"])
+    known = ", ".join(row["name"] for row in rows) or "none"
+    raise backend.invalid(f"{name!r} isn't one of Rem's projects ({known}).")
+
+
+def _effort_choices(view: dict[str, Any], values: list[str]) -> dict[str, int]:
+    """PROJECT=PERCENT pairs from --effort, by project folder."""
+    choices: dict[str, int] = {}
+    for value in values:
+        name, sep, percent = value.rpartition("=")
+        if not sep or not name.strip() or not percent.strip().isdigit():
+            raise backend.invalid(
+                f"--effort takes PROJECT=PERCENT, such as Raticode=70, not {value!r}."
+            )
+        choices[_project_root(view, name.strip())] = int(percent)
+    return choices
+
+
 def _put_settings(client: ApiClient, wanted: dict[str, Any], revision: int) -> CommandResult:
     view = client.put("/rem/kanban/settings", wanted, expected_revision=revision)["self_work"]
     return _status(view)
@@ -724,6 +752,13 @@ def selfwork_set(
         "ACCOUNT is an account name, auto (choose by usage), @default (the default sign-in) "
         "or empty for Rem's setting (Settings > Rem > Accounts); repeat for several providers",
     ),
+    effort: list[str] | None = typer.Option(
+        None,
+        "--effort",
+        help="PROJECT=PERCENT: a Rem project's level of effort, its share of self-work's "
+        "threads, by name or folder. Repeat for several; the projects you leave out share the "
+        "rest so all of Rem's projects total 100",
+    ),
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
     token_file: opts.TokenFile = None,
@@ -762,6 +797,8 @@ def selfwork_set(
             wanted["allowance_mode"] = allowance_mode
         if account:
             wanted["provider_accounts"] = _account_choices(account)
+        if effort:
+            wanted["project_effort"] = _effort_choices(_self_work(client), effort)
         if not wanted:
             raise backend.invalid("Change at least one setting.")
         return _put_settings(client, wanted, expected_revision)
@@ -953,7 +990,7 @@ def selfwork_stop_when(
     backend.run("selfwork stop-when", output, (endpoint, token_file, data_dir), body)
 
 
-OBJECTIVE_ACTIONS = ("list", "add", "edit", "remove", "check", "uncheck")
+OBJECTIVE_ACTIONS = ("list", "add", "edit", "remove", "check", "uncheck", "ask")
 
 
 def _objective_line(item: dict[str, Any]) -> str:
@@ -966,16 +1003,29 @@ def _objective_line(item: dict[str, Any]) -> str:
     return line
 
 
-def _objectives_text(view: dict[str, Any]) -> str:
-    """Current objectives (open above done, newest first), then the stale ones."""
+def _objectives_text(view: dict[str, Any], project: str | None = None) -> str:
+    """Current objectives (open above done, newest first), then the stale ones.
+
+    The global list comes with each project's own after it.
+    """
+    text = _scope_text(view, project)
+    for root, scope in (view.get("projects") or {}).items():
+        text += "\n\n" + _scope_text(scope, Path(root).name or root)
+    return text
+
+
+def _scope_text(view: dict[str, Any], project: str | None) -> str:
     items = view.get("items") or []
     if not view.get("total") and not items:
+        if project:
+            return f"No objectives of {project}'s own."
         return "No self-work objectives. Rem writes its own when self-work starts with none."
     done, total = (
         int(view.get("done") or 0),
         int(view.get("open") or 0) + int(view.get("done") or 0),
     )
-    lines = [f"Objectives (revision {view.get('revision', 0)}), {done}/{total} done:"]
+    heading = f"{project}'s own objectives" if project else "Objectives"
+    lines = [f"{heading} (revision {view.get('revision', 0)}), {done}/{total} done:"]
     current = [i for i in items if not (i.get("done") and i.get("stale"))]
     stale = [i for i in items if i.get("done") and i.get("stale")]
     lines += [_objective_line(i) for i in current]
@@ -988,9 +1038,22 @@ def _objectives_text(view: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _ask_text(view: dict[str, Any], root: str, project: str) -> str:
+    """How an Ask Rem press stands, with how to see its objectives."""
+    asked = (view.get("asking") or {}).get(root) or {}
+    message = str(asked.get("message") or f"Rem is writing objectives for {project}.")
+    return (
+        f"{message}\nIt takes a minute or so; see them with "
+        f"`Raticode selfwork objectives list --project {project}`."
+    )
+
+
 @selfwork_app.command("objectives")
 def selfwork_objectives(
-    action: str = typer.Argument("list", help="list, add, edit, remove, check or uncheck"),
+    action: str = typer.Argument(
+        "list",
+        help="list, add, edit, remove, check, uncheck, or ask (Rem writes 3-5 for --project)",
+    ),
     text: str | None = typer.Option(None, "--text", help="The objective, for add or edit"),
     done_when: str | None = typer.Option(
         None, "--done-when", help="Its doneness criteria; leave out for an open-ended one"
@@ -1002,6 +1065,15 @@ def selfwork_objectives(
     revision: int | None = typer.Option(
         None, "--expected-revision", help="The list's revision from `list`"
     ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="One of Rem's projects, by name or folder: list or add that project's own "
+        "objectives, which steer only its tickets and research, or with edit move one there",
+    ),
+    to_global: bool = typer.Option(
+        False, "--global", help="With edit, move the objective to the global ones"
+    ),
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
     token_file: opts.TokenFile = None,
@@ -1010,20 +1082,39 @@ def selfwork_objectives(
     """Show or change the self-work objectives: the goals that guide a whole session.
 
     They list newest first, open above done; ones done in an earlier session are stale.
+    Without --project, list shows the global objectives and then each project's own.
+    edit with --project NAME or --global moves an objective; it keeps its ID.
+    ask --project NAME is the Ask Rem button: Rem reads that project and writes three to
+    five broad, open-ended objectives for it in the background; list it again to see them.
     """
 
     def body(client: ApiClient, out: Output) -> CommandResult:
         if action not in OBJECTIVE_ACTIONS:
             raise backend.invalid(f"Choose one of: {', '.join(OBJECTIVE_ACTIONS)}.")
+        root = _project_root(_self_work(client), project) if project else None
         if action == "list":
-            view = client.get("/rem/objectives", query={"limit": limit, "offset": offset})
-            return CommandResult(data=view, text=_objectives_text(view))
+            query: dict[str, Any] = {"limit": limit, "offset": offset}
+            if root:
+                query["project"] = root
+            view = client.get("/rem/objectives", query=query)
+            return CommandResult(data=view, text=_objectives_text(view, project=project))
         backend.require_user("change Rem's self-work objectives")
+        if action == "ask":
+            if not root:
+                raise backend.invalid("ask needs --project: the project Rem writes them for.")
+            view = client.post("/rem/objectives/ask", {"project": root, "limit": limit})
+            return CommandResult(data=view, text=_ask_text(view, root, project or root))
         if action == "add" and not text:
             raise backend.invalid("add needs --text.")
         if action != "add" and not identity:
             raise backend.invalid(f"{action} needs --id.")
+        if root and action not in {"add", "edit"}:
+            raise backend.invalid("--project goes with list, add or edit; the others take --id.")
+        if to_global and (action != "edit" or root):
+            raise backend.invalid("--global goes with edit, instead of --project.")
         payload: dict[str, Any] = {"action": action, "limit": limit}
+        if root or to_global:
+            payload["project"] = root or ""
         for key, value in (
             ("text", text),
             ("done_when", done_when),

@@ -27,3 +27,36 @@ export function starterOptionLabel(starter) {
   if (!starter) return "";
   return starter.needsGitForWindows ? `${starter.name} (Needs Git for Windows)` : starter.name;
 }
+
+// Whether the apps a starter's model steps call are on this computer, and which installed
+// app can call them instead. apps are the provider capabilities, each with status from
+// providerStatus; providerApps are the app IDs that can run agent and common-llm-task
+// nodes. checking is true until discovery has answered for the starter's own apps.
+export function starterProviderChoice(starter, apps, providerApps, remProvider) {
+  const wanted = Array.isArray(starter?.providerApps) ? starter.providerApps : [];
+  const none = { checking: false, missing: [], options: [], defaultId: "" };
+  if (!wanted.length) return none;
+  const byId = new Map((apps ?? []).map((app) => [app.id, app]));
+  const known = (app) => app && app.status !== "checking";
+  const turnedOff = (app) => app.enabled === false;
+  const absent = (app) => app.discoveryStatus === "missing";
+  if (!wanted.every((id) => known(byId.get(id)))) return { ...none, checking: true };
+  const missing = wanted
+    .map((id) => byId.get(id))
+    .filter((app) => absent(app) || turnedOff(app))
+    .map((app) => ({ id: app.id, name: app.displayName || app.id, turnedOff: !absent(app) }));
+  if (!missing.length) return none;
+  const runnable = new Set(Array.isArray(providerApps) ? providerApps : []);
+  const options = (apps ?? [])
+    .filter((app) => runnable.has(app.id) && known(app) && !absent(app) && !turnedOff(app))
+    .map((app) => ({ id: app.id, name: app.displayName || app.id }));
+  const defaultId = options.some((app) => app.id === remProvider) ? remProvider : options[0]?.id ?? "";
+  return { checking: false, missing, options, defaultId };
+}
+
+// The line beside Needs for an app a starter calls that this computer can't run.
+export function missingAppLine(app) {
+  return app.turnedOff
+    ? `${app.name} is turned off in Settings > Providers.`
+    : `${app.name} isn't installed on this computer.`;
+}

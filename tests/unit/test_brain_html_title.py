@@ -4,13 +4,10 @@ one-time re-read corrects titles stored by the older reader."""
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 from typing import Any
 
-import pytest
-
 from gofer.ui.brain_documents import HTML_READER, extract, html_reader_stale
-from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_task
 
 CHART = (
@@ -62,13 +59,6 @@ def test_og_title_comes_before_the_first_h1():
     )
     assert title(html) == "Shared title"
     assert title("<body><p>No title anywhere.</p></body>") == ""
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def report_record(brain_id: str, report_id: str, path: str, title: str) -> dict[str, Any]:

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { apiJson } from "../lib/api.js";
 
 // How often the offline model's download progress is read while it runs.
-export const MODEL_POLL_MS = 700;
+const MODEL_POLL_MS = 700;
 const ACTIVE_DOWNLOAD = new Set(["starting", "downloading", "installing"]);
 
 const loadEngines = (refresh, signal) => apiJson(`/chat/transcribe/engines${refresh ? "?refresh=1" : ""}`, { signal, failure: "Could not check speech recognition" });

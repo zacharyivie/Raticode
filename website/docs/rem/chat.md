@@ -71,7 +71,13 @@ The answer appears word by word as the provider writes it. When Rem then runs a 
 - Turn summaries show timing and, where supported, file changes.
 - When Rem used the web, cards under the reply list the pages it cited, read and found, with titles and thumbnails. YouTube links become video cards. Rem can also show images from pages it read.
 - Cards and images open in Raticode's browser. The backend fetches previews from public addresses only, never from this computer or your local network.
-- A link in a reply, or in a Markdown file, that points to a folder outside the open project asks before opening that folder as a project, because Rem can work in any project you open. Folders opened this way aren't added to recent projects.
+- A link in a reply, or in a Markdown file, that points to a folder outside the open project asks before opening that folder as a project, because Rem can work in any project you open. The question names the folder the link really leads to, after any symlinks, and Raticode gets no access to it unless you choose **Open project**. Folders opened this way aren't added to recent projects.
+
+The thread follows new text while you're at the bottom. Scroll up to read and it stays where you are; messages that arrive meanwhile are counted on a **new messages** button over the bottom of the conversation, such as **2 new messages**.
+
+- Click the button to jump to the newest message and follow new text again. Scrolling back to the bottom yourself clears it too.
+- Earlier messages loaded above what you're reading never count, and neither do thought groups.
+- Opening another thread starts the count again.
 
 ## Steer a running response
 

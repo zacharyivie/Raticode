@@ -194,7 +194,9 @@ def run_git_access(working_dir: Path) -> RunGitAccess | None:
 
     None when no worktree run is executing or the step works outside the run's worktree;
     such steps keep the general rule. When the repository's ``.git`` folder can't be
-    read, the step gets an empty set of folders rather than the whole of it.
+    read, or the repository doesn't list the project's checkout back
+    (claude_sandbox.repository_git_dir), the step gets an empty set of folders rather
+    than the whole of it.
     """
     current = _RUN_WORKTREE.get()
     if current is None:
@@ -573,8 +575,12 @@ def claude_step_settings(
     network: Network,
     input_files: Path | None = None,
     run_git: RunGitAccess | None = None,
+    hidden: Iterable[Path] = (),
 ) -> dict[str, Any]:
     """Claude Code settings for one sandboxed agent step.
+
+    ``hidden`` are private Second Brain folders (``private_brains_to_hide``) that
+    neither the shell nor any file tool may read.
 
     The same settings as Rem's unattended turns, with three differences: the
     step's ``extra-paths`` are writable, its ``network`` hosts are allowed, and
@@ -588,9 +594,16 @@ def claude_step_settings(
     """
     from gofer.ui import claude_sandbox
 
-    git_writable = (
-        run_git.writable() if run_git is not None else [claude_sandbox.git_common_dir(working_dir)]
-    )
+    if run_git is not None:
+        git_writable: list[Path | None] = list(run_git.writable())
+        git_protected = run_git.protected()
+        git_rules: list[str] = []
+    else:
+        common = claude_sandbox.git_common_dir(working_dir)
+        git_writable = [common]
+        # The shared folder's hooks and config would run code outside the sandbox.
+        git_protected = claude_sandbox.git_control_paths(working_dir, common)
+        git_rules = claude_sandbox.git_control_deny_rules(git_protected)
     settings = claude_sandbox.sandbox_settings(
         root=working_dir,
         data_dir=data_dir,
@@ -598,8 +611,10 @@ def claude_step_settings(
         writable=[scratch, *extra_paths, *git_writable],
         # The run's file input copies, read-only, even inside the data folder.
         visible=[input_files],
-        protected=[input_files, *(run_git.protected() if run_git is not None else [])],
+        protected=[input_files, *git_protected],
+        hidden=hidden,
     )
+    settings["permissions"]["deny"] += git_rules
     sandbox = settings["sandbox"]
     sandbox["autoAllowBashIfSandboxed"] = False
     if network == ANY_HOST:
@@ -610,6 +625,48 @@ def claude_step_settings(
     else:
         sandbox["network"] = {"allowedDomains": list(network), "strictAllowlist": True}
     return settings
+
+
+def private_brains_to_hide(
+    settings: ResolvedProviderSettings,
+    *,
+    working_dir: Path,
+    extra_paths: Iterable[Path],
+    data_dir: Path,
+) -> list[Path]:
+    """Every private Second Brain folder a sandboxed Claude Code step must hide.
+
+    A brain with Allow cloud processing off reaches only providers on localhost, and
+    the sandboxed shell reads the whole computer except what it denies, so a step on
+    any other provider hides every one of them, wherever its folder is. The Settings >
+    Memory folder was approved when the user chose it and never counts. A step whose
+    ``working-dir`` or ``extra-paths`` entry is or sits inside one is refused.
+    """
+    from gofer.ui.brain_privacy import (
+        PrivateBrainError,
+        local_profile,
+        memory_folder,
+        private_brain_folders,
+        registered_brains,
+    )
+
+    if local_profile(settings):
+        return []
+    try:
+        found = private_brain_folders(
+            [working_dir, *extra_paths],
+            registered_brains(data_dir),
+            approved=[memory_folder(data_dir)],
+            everywhere=True,
+        )
+    except PrivateBrainError as exc:
+        raise SandboxError(
+            "RATTISH_SANDBOX_PRIVATE_BRAIN",
+            str(exc),
+            "Turn on Allow cloud processing in the brain's settings, or move the step's "
+            "folders out of it.",
+        ) from exc
+    return [root for _name, root in found]
 
 
 def prepare_step(
@@ -658,20 +715,33 @@ def prepare_step(
         return PreparedStep(settings, sandboxed=True)
     from gofer.ui import claude_sandbox
 
+    hidden = private_brains_to_hide(
+        settings, working_dir=working_dir, extra_paths=extra_paths, data_dir=data_dir
+    )
     scratch = run_scratch_dir(data_dir.resolve(), run_id)
     scratch.mkdir(parents=True, exist_ok=True)
     run_git = run_git_access(working_dir)
     if run_git is not None:
         run_git.create_folders()
-    claude_settings = claude_step_settings(
-        working_dir=working_dir,
-        data_dir=data_dir,
-        scratch=scratch,
-        extra_paths=extra_paths,
-        network=network,
-        input_files=input_files_folder(),
-        run_git=run_git,
-    )
+    try:
+        claude_settings = claude_step_settings(
+            working_dir=working_dir,
+            data_dir=data_dir,
+            scratch=scratch,
+            extra_paths=extra_paths,
+            network=network,
+            input_files=input_files_folder(),
+            run_git=run_git,
+            hidden=hidden,
+        )
+    except ValueError as exc:
+        # A private brain holds a folder the step must write, such as an extra-paths entry.
+        raise SandboxError(
+            "RATTISH_SANDBOX_PRIVATE_BRAIN",
+            str(exc),
+            "Turn on Allow cloud processing in the brain's settings, or move the step's "
+            "folders out of it.",
+        ) from exc
     settings = settings.model_copy(
         update={
             "extra_args": [

@@ -6,7 +6,7 @@ import { startPolling } from "./refresh.js";
 import { conversationRepository } from "./conversationRepository.js";
 import { mergeInServerOrder } from "./conversationCache.js";
 import { mergeTaskThreadMetadata, threadIndexEntry } from "./threadActivity.js";
-import { NO_OBJECTIVES, OBJECTIVES_PAGE, applyObjectiveChange, sameObjectives } from "./remObjectives.js";
+import { NO_OBJECTIVES, OBJECTIVES_PAGE, applyObjectiveChange, previewObjectiveChange, sameObjectives, withProjectPage } from "./remObjectives.js";
 import { CONFLICT_MESSAGE, GONE_MESSAGE, NO_DECISIONS, applyDecisionChange, sameDecisions, scanSummary, settleEditLocally } from "./remDecisions.js";
 import { backgroundNoticesAllowed, newRemReplies, showBackgroundNotice } from "./backgroundNotices.js";
 
@@ -29,7 +29,7 @@ function initialState() {
   // messages: what the chat shows, oldest first: `older` (pages read with Show earlier
   // messages), then the server's newest window, then unsent messages. `earlier` counts
   // the stored messages before the first one shown; olderTickets are the pages' tickets.
-  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], older: [], earlier: 0, loadingEarlier: false, tasks: [], objectives: NO_OBJECTIVES, decisions: NO_DECISIONS, decisionsLoaded: false, chatTickets: NO_TICKETS, taskTickets: NO_TICKETS, olderTickets: NO_TICKETS, fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null, messageRequest: null };
+  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], older: [], earlier: 0, loadingEarlier: false, tasks: [], objectives: NO_OBJECTIVES, decisions: NO_DECISIONS, decisionsLoaded: false, chatTickets: NO_TICKETS, taskTickets: NO_TICKETS, olderTickets: NO_TICKETS, fixture: false, resetting: false, notice: "", sideNotice: "", sheet: null, composerRequest: null, messageRequest: null };
 }
 
 // Files attached in Rem's chat upload to this chat attachment thread.
@@ -259,10 +259,11 @@ export async function refreshRemHome() {
           ...windowedMessages(conversation, current),
           chatTickets: sameTickets(conversation.tickets, current.chatTickets),
         }),
-        ...(tasks.unchanged ? {} : { tasks: mergeTasks(tasks.tasks ?? [], current.tasks), taskTickets: sameTickets(tasks.tickets, current.taskTickets), objectives: sameObjectives(tasks.objectives, current.objectives) }),
+        ...(tasks.unchanged ? {} : { tasks: withDismissals(mergeTasks(tasks.tasks ?? [], current.tasks), { settle: true }), taskTickets: sameTickets(tasks.tickets, current.taskTickets), objectives: shownObjectives(tasks.objectives) }),
       }));
       // The poll sends the first page; a changed list reloads as many as the user had loaded.
       if (!tasks.unchanged && loadedObjectives > OBJECTIVES_PAGE && state.objectives.items.length < Math.min(loadedObjectives, state.objectives.total ?? Infinity)) void loadRemObjectives(loadedObjectives);
+      if (!tasks.unchanged) reloadProjectObjectives();
       if (!tasks.unchanged) notifyFinishedRuns(previousTasks, tasks.tasks ?? []);
       if (!conversation.unchanged) notifyRemReply(previousMessages, conversation.messages ?? []);
     }
@@ -442,6 +443,10 @@ export function closeTaskSheet() { set({ sheet: null }); }
 export function suggestMessage(text) { set({ composerRequest: { text, id: ++sequence } }); }
 export function focusRemComposer() { set({ composerRequest: { id: ++sequence } }); }
 function notify(message) { set({ notice: message }); }
+// A refusal of something the user did in the side pane, shown there: Rem's chat, where
+// `notice` shows, may not be open.
+export function tellSidePane(message) { set({ sideNotice: message }); }
+export function dismissSideNotice() { set({ sideNotice: "" }); }
 
 // `conflict` explains a 409 for commands that send the revision they edited.
 async function command(run, failure, conflict = "") {
@@ -579,7 +584,7 @@ async function loadRemObjectives(limit) {
   loadingObjectives = (async () => {
     try {
       const view = await request(`/objectives?limit=${limit}`);
-      if (Array.isArray(view?.items) && view.revision >= state.objectives.revision) set({ objectives: sameObjectives(view, state.objectives) });
+      if (Array.isArray(view?.items)) { set({ objectives: shownObjectives(view) }); reloadProjectObjectives(); }
     } catch {
       // The next scroll or poll tries again.
     } finally {
@@ -596,16 +601,142 @@ export function loadMoreRemObjectives() {
   return loadRemObjectives(loadedObjectives);
 }
 
-// The user's change to the self-work objectives: add, edit, remove, check, uncheck.
-// It carries the revision this window shows, so it never overwrites a change made meanwhile.
+// Each project's section pages on its own: how many of its objectives the user has loaded,
+// by project folder, when more than the first page the poll sends.
+const loadedProjectObjectives = new Map();
+const loadingProjectObjectives = new Map();
+
+function loadProjectObjectives(root, limit, offset) {
+  if (loadingProjectObjectives.has(root)) return loadingProjectObjectives.get(root);
+  const loading = (async () => {
+    try {
+      const page = await request(`/objectives?project=${encodeURIComponent(root)}&limit=${limit}&offset=${offset}`);
+      const merged = withProjectPage(serverObjectives, root, page);
+      if (merged) { serverObjectives = merged; showObjectives(); }
+    } catch {
+      // The next Show more or poll tries again.
+    } finally {
+      loadingProjectObjectives.delete(root);
+    }
+  })();
+  loadingProjectObjectives.set(root, loading);
+  return loading;
+}
+
+// Show more in a project's section: the next page from where its loaded list ends.
+export function loadMoreProjectObjectives(root) {
+  if (state.fixture || state.status !== "ready") return Promise.resolve();
+  const section = serverObjectives.projects?.[root] || NO_OBJECTIVES;
+  const offset = (section.offset || 0) + section.items.length;
+  loadedProjectObjectives.set(root, Math.max(loadedProjectObjectives.get(root) || 0, offset) + OBJECTIVES_PAGE);
+  return loadProjectObjectives(root, OBJECTIVES_PAGE, offset);
+}
+
+// A changed list comes with each project's first page: load again as many as the user had.
+function reloadProjectObjectives() {
+  for (const [root, limit] of loadedProjectObjectives) {
+    const section = serverObjectives.projects?.[root];
+    if (!section) loadedProjectObjectives.delete(root);
+    else if (section.items.length < Math.min(limit, section.total ?? Infinity)) void loadProjectObjectives(root, limit, 0);
+  }
+}
+
+// The objectives as the server last sent them. What the side pane shows is this with the
+// user's changes still on their way laid over it (pendingObjectives).
+let serverObjectives = NO_OBJECTIVES;
+// Changes waiting for the backend, oldest first. Each one goes after the one before it has
+// answered, with the revision that answer carried, so quick clicks never trip over each other.
+const pendingObjectives = [];
+let sendingObjectives = null;
+
+// A view from the server becomes the base; one older than the base (a poll that set off
+// before the last change landed) is ignored. Returns what the side pane should show.
+function shownObjectives(view) {
+  if (Array.isArray(view?.items) && (view.revision ?? 0) >= (serverObjectives.revision ?? 0)) serverObjectives = sameObjectives(view, serverObjectives);
+  if (!pendingObjectives.length) return serverObjectives;
+  const shown = pendingObjectives.reduce((current, entry) => previewObjectiveChange(current, entry.change) || current, serverObjectives);
+  // Not sameObjectives: a removal shows fewer items at the same revision, which it would
+  // take for a shorter page and ignore.
+  return JSON.stringify(shown) === JSON.stringify(state.objectives) ? state.objectives : shown;
+}
+function showObjectives() {
+  const objectives = shownObjectives(null);
+  if (objectives !== state.objectives) set({ objectives });
+}
+
+async function sendObjectives() {
+  const generation = historyGeneration;
+  while (pendingObjectives.length && !state.resetting) {
+    const entry = pendingObjectives[0];
+    entry.sent = true;
+    const limit = loadedObjectives > OBJECTIVES_PAGE ? { limit: loadedObjectives } : {};
+    try {
+      const view = await request("/objectives", { method: "POST", body: { ...entry.change, ...limit, expected_revision: serverObjectives.revision } });
+      // A reset meanwhile emptied the queue and started over; this answer is for neither.
+      if (generation !== historyGeneration) return;
+      pendingObjectives.shift();
+      // The answer is the list with this change in it, so it replaces the base even when a
+      // poll has already shown the same revision.
+      if (Array.isArray(view?.items)) serverObjectives = sameObjectives(view, serverObjectives);
+      showObjectives();
+      reloadProjectObjectives();
+      entry.settle(view ?? true);
+    } catch (error) {
+      if (generation !== historyGeneration) return;
+      if (error.status === 409) {
+        // Someone else changed the list first (Rem, the phone, the CLI). Every change still
+        // waiting was made on the list this one assumed, so none of them is sent.
+        const dropped = pendingObjectives.splice(0);
+        showObjectives();
+        tellSidePane("The objectives changed meanwhile, so your last changes weren't saved. Check them and try again.");
+        for (const item of dropped) item.settle(null);
+        await loadRemObjectives(Math.max(loadedObjectives, OBJECTIVES_PAGE));
+      } else {
+        pendingObjectives.shift();
+        showObjectives();
+        tellSidePane(`Couldn't change the objectives. ${error.message}`);
+        entry.settle(null);
+      }
+    }
+  }
+}
+
+// Ask Rem in a project's section: the backend starts Rem writing objectives for it and
+// answers with the list, whose ``asking`` the polls then follow. Throws the backend's reason.
+export async function askRemObjectives(root) {
+  if (state.fixture) return true;
+  if (state.status !== "ready") throw new Error("Rem's task service isn't connected.");
+  const limit = loadedObjectives > OBJECTIVES_PAGE ? { limit: loadedObjectives } : {};
+  const view = await request("/objectives/ask", { method: "POST", body: { project: root, ...limit } });
+  if (Array.isArray(view?.items)) set({ objectives: shownObjectives(view) });
+  return true;
+}
+
+// The user's change to the self-work objectives: add, edit, remove, check, uncheck. A check,
+// uncheck or remove shows at once and is sent in the background; it goes back, with the
+// reason in the side pane, when the backend refuses it. A check undone before it was sent
+// cancels out, so nothing goes. Every change carries the revision it was made on, so it
+// never overwrites a change made meanwhile. Resolves to the new list, or null.
 export function changeRemObjectives(change) {
   if (state.fixture) { set(current => ({ ...current, objectives: applyObjectiveChange(current.objectives, change) })); return Promise.resolve(true); }
-  return command(async () => {
-    const limit = loadedObjectives > OBJECTIVES_PAGE ? { limit: loadedObjectives } : {};
-    const view = await request("/objectives", { method: "POST", body: { ...change, ...limit, expected_revision: state.objectives.revision } });
-    set({ objectives: sameObjectives(view, state.objectives) });
-    return view;
-  }, "Couldn't change the objectives.", "The objectives changed meanwhile, so nothing was saved. Check them and try again.");
+  if (state.resetting) return Promise.resolve(null);
+  if (state.status !== "ready") { tellSidePane("Rem's task service isn't connected, so nothing changed."); return Promise.resolve(null); }
+  const opposite = { check: "uncheck", uncheck: "check" }[change.action];
+  const waiting = opposite && pendingObjectives.findIndex(entry => !entry.sent && entry.change.id === change.id && entry.change.action === opposite);
+  if (opposite && waiting >= 0) {
+    const [undone] = pendingObjectives.splice(waiting, 1);
+    undone.settle(null);
+    showObjectives();
+    return Promise.resolve(state.objectives);
+  }
+  return new Promise(resolve => {
+    pendingObjectives.push({ change, sent: false, settle: resolve });
+    showObjectives();
+    if (!sendingObjectives) {
+      const loop = sendObjectives().finally(() => { if (sendingObjectives === loop) sendingObjectives = null; });
+      sendingObjectives = loop;
+    }
+  });
 }
 
 // The user's answer or change to Rem's decisions: use, change, edit, reject, reopen, forget,
@@ -681,7 +812,7 @@ export async function countRemDecisionPaths(target, appliesTo, forbids) {
 }
 
 // Reads the whole list again, whatever version this window holds.
-export async function reloadRemDecisions() {
+async function reloadRemDecisions() {
   if (state.fixture) return;
   try {
     const view = await request("/decisions");
@@ -778,10 +909,68 @@ export function runRemRunThere(task) {
   return command(() => request(`/runs/${encodeURIComponent(run.id)}/run_there`, { method: "POST", body: { request_id: requestId("run-there"), computer_id: suggestion.computer_id } }), "Couldn't send the task to that computer.");
 }
 
+// Runs the user dismissed that the task list may not show as dismissed yet: run id to
+// "sending" while the request is out, then "sent" until a poll shows it dismissed.
+const dismissing = new Map();
+
+// The task list with every dismissal on its way shown as done. With `settle`, `tasks` is
+// what the server just sent: a sent dismissal it now shows, or whose run is no longer a
+// task's latest, has nothing left to cover.
+function withDismissals(tasks, { settle = false } = {}) {
+  if (!dismissing.size) return tasks;
+  if (settle) {
+    const latest = new Map(tasks.filter(task => task.last_run?.id).map(task => [task.last_run.id, task.last_run]));
+    for (const [id, stage] of dismissing) if (stage === "sent" && (!latest.has(id) || latest.get(id).acknowledged === true)) dismissing.delete(id);
+  }
+  return tasks.map(task => (dismissing.has(task.last_run?.id) && task.last_run.acknowledged !== true ? { ...task, last_run: { ...task.last_run, acknowledged: true } } : task));
+}
+
+// Dismiss and Dismiss all: the updates leave the list at once and the request goes in the
+// background, so the user can move on to the next one. Runs the backend didn't dismiss come
+// back, with its reason in the side pane when it refused.
+function dismissRuns(ids, send, failure) {
+  const fresh = ids.filter(id => !dismissing.has(id));
+  if (!fresh.length) return Promise.resolve(false);
+  if (state.resetting) return Promise.resolve(null);
+  if (state.status !== "ready") { tellSidePane("Rem's task service isn't connected, so nothing changed."); return Promise.resolve(null); }
+  const previous = new Map(state.tasks.filter(task => fresh.includes(task.last_run?.id)).map(task => [task.last_run.id, task.last_run.acknowledged]));
+  for (const id of fresh) dismissing.set(id, "sending");
+  set(current => ({ ...current, tasks: withDismissals(current.tasks) }));
+  const undo = undone => {
+    if (!undone.length) return;
+    for (const id of undone) dismissing.delete(id);
+    set(current => ({ ...current, tasks: current.tasks.map(task => {
+      const run = task.last_run;
+      if (!run || !undone.includes(run.id) || !previous.has(run.id)) return task;
+      const restored = { ...run };
+      if (previous.get(run.id) === undefined) delete restored.acknowledged;
+      else restored.acknowledged = previous.get(run.id);
+      return { ...task, last_run: restored };
+    }) }));
+  };
+  const generation = historyGeneration;
+  return (async () => {
+    try {
+      const result = await send(fresh);
+      if (generation !== historyGeneration) return null;
+      const done = Array.isArray(result?.dismissed) ? new Set(result.dismissed.map(item => item.run_id)) : new Set(fresh);
+      for (const id of fresh) if (done.has(id) && dismissing.has(id)) dismissing.set(id, "sent");
+      undo(fresh.filter(id => !done.has(id)));
+      void refreshRemHome();
+      return true;
+    } catch (error) {
+      if (generation !== historyGeneration) return null;
+      undo(fresh);
+      tellSidePane(`${failure} ${error.message}`);
+      return null;
+    }
+  })();
+}
+
 export function acknowledgeRemRun(task) {
   if (!task.last_run) return Promise.resolve(false);
   if (state.fixture) { localTask(task.id, { last_run: { ...task.last_run, acknowledged: true } }); return Promise.resolve(true); }
-  return command(() => request(`/runs/${encodeURIComponent(task.last_run.id)}/acknowledge`, { method: "POST", body: { request_id: requestId("run-ack") } }), "Couldn't dismiss that.");
+  return dismissRuns([task.last_run.id], ([id]) => request(`/runs/${encodeURIComponent(id)}/acknowledge`, { method: "POST", body: { request_id: requestId("run-ack") } }), "Couldn't dismiss that.");
 }
 
 // Dismiss all: one request for every task update in `tasks` (see dismissibleUpdates).
@@ -794,7 +983,7 @@ export function acknowledgeAllRemRuns(tasks) {
     set(current => ({ ...current, tasks: current.tasks.map(task => (ids.has(task.last_run?.id) ? { ...task, last_run: { ...task.last_run, acknowledged: true } } : task)) }));
     return Promise.resolve(true);
   }
-  return command(() => request("/runs/acknowledge", { method: "POST", body: { request_id: requestId("run-ack-all"), run_ids: runs } }), "Couldn't dismiss the updates.");
+  return dismissRuns(runs, ids => request("/runs/acknowledge", { method: "POST", body: { request_id: requestId("run-ack-all"), run_ids: ids } }), "Couldn't dismiss the updates.");
 }
 
 export function deleteRemTask(task) {
@@ -870,7 +1059,7 @@ export async function openRemThread(threadId) {
   window.dispatchEvent(new CustomEvent("gofer:rem-open-thread", { detail: { threadId } }));
 }
 
-export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "", decisions: "" }; serverWindow = []; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; loadedObjectives = OBJECTIVES_PAGE; loadingObjectives = null; emit(); }
+export function resetRemHomeStore() { ++historyGeneration; serverObjectives = NO_OBJECTIVES; for (const entry of pendingObjectives.splice(0)) entry.settle(null); sendingObjectives = null; dismissing.clear(); stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "", decisions: "" }; serverWindow = []; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; loadedObjectives = OBJECTIVES_PAGE; loadingObjectives = null; loadedProjectObjectives.clear(); loadingProjectObjectives.clear(); emit(); }
 // Explicit fixtures for tests, the visual harness and development previews.
 // Production never seeds sample tasks or messages.
 export async function loadRemHomeFixture(scene = "busy") {

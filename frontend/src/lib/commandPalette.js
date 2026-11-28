@@ -1,15 +1,16 @@
 // The command palette (every command, with its key) and quick open (files,
-// workflows, Rem threads and Settings sections). This module holds what can be
+// workflows, Rem threads, board tickets and Settings sections). This module holds what can be
 // worked out without the app: matching, ordering, recent items and the lists.
 import { KEYBINDING_COMMANDS, formatKeybinding, settingBinding } from "./settings.js";
 import { SETTINGS_SECTIONS } from "./settingsSections.js";
+import { ticketStatusLabel } from "./ticketMentions.js";
 
 export const PALETTE_COMMAND_ID = "palette.commands";
 export const QUICK_OPEN_COMMAND_ID = "palette.quickOpen";
 export const PALETTE_RECENT_STORAGE_KEY = "raticode.palette.recent.v1";
 export const RECENT_LIMIT = 30;
 // The most rows the list shows at once. Typing narrows it.
-export const SHOWN_LIMIT = 200;
+const SHOWN_LIMIT = 200;
 
 // Places where the palette keys belong to what has focus: a terminal sends them
 // to the shell and the code editor keeps its own keys.
@@ -96,13 +97,17 @@ export function fuzzyMatch(query, text) {
 
 // An item matches on its label, or on its label with its group and detail.
 // A label match scores higher, so "app" finds App.jsx before src/app/x.js.
-export function matchItem(item, query) {
-  if (!String(query ?? "").trim()) return { score: 0, indices: [] };
+// A query that is exactly one of an item's exact names (a ticket's key) puts it
+// first, so REM-12 comes before REM-120. Closed tickets score a little lower.
+function matchItem(item, query) {
+  const typed = String(query ?? "").trim().toLowerCase();
+  if (!typed) return { score: 0, indices: [] };
   const label = fuzzyMatch(query, item.label);
   const whole = fuzzyMatch(query, [item.group, item.label, item.description, ...(item.keywords || [])].filter(Boolean).join(" "));
   if (!label && !whole) return null;
-  if (label && (!whole || label.score + 25 >= whole.score)) return { score: label.score + 25, indices: label.indices };
-  return { score: whole.score, indices: [] };
+  const bonus = (item.exactNames?.includes(typed) ? 60 : 0) - (item.closed ? 15 : 0);
+  if (label && (!whole || label.score + 25 >= whole.score)) return { score: label.score + 25 + bonus, indices: label.indices };
+  return { score: whole.score + bonus, indices: [] };
 }
 
 // Recent items come first, most recent at the top. Without a query the rest
@@ -168,7 +173,7 @@ export function keybindingPaletteItems(settings, platform) {
 
 // One Go to entry per plugin in the activity rail, in the rail's default order.
 // Keywords are the other words people type for the same place.
-export const PLUGIN_DESTINATIONS = Object.freeze([
+const PLUGIN_DESTINATIONS = Object.freeze([
   { pluginId: "rem", label: "Go to Rem", keywords: ["home", "threads", "chat"] },
   { pluginId: "workflows", label: "Go to Workflows" },
   { pluginId: "files", label: "Go to File explorer", keywords: ["explorer", "files", "folders", "tree"] },
@@ -199,7 +204,7 @@ export function actionPaletteItems({ triggersPaused = false } = {}) {
   ];
 }
 
-export function settingsSectionItem(section) {
+function settingsSectionItem(section) {
   return { id: `settings:${section.id}`, settingsSection: section.id, group: "Settings", label: `Settings: ${section.label}`, keywords: ["preferences", "open settings"] };
 }
 
@@ -213,8 +218,37 @@ function parentOf(relativePath) {
   return parts.slice(0, -1).join("/");
 }
 
-// Quick open's rows: Settings sections, workflows, Rem threads and project files.
-export function quickOpenItems({ files = [], workflows = [], threads = [], projectName = "" } = {}) {
+const CLOSED_TICKET = new Set(["done", "cancelled"]);
+
+// One row per board ticket: open tickets first, then Done and Closed ones,
+// each newest first. Its key matches with or without the dash.
+function ticketItems(tickets) {
+  const closed = (ticket) => CLOSED_TICKET.has(ticket.status);
+  const ordered = tickets.filter((ticket) => ticket?.ticket_id && String(ticket.key ?? "").trim())
+    .sort((left, right) => Number(closed(left)) - Number(closed(right))
+      || String(right.updated_at ?? "").localeCompare(String(left.updated_at ?? "")));
+  return ordered.map((ticket) => {
+    const key = String(ticket.key).trim();
+    const bare = key.replace("-", "");
+    const status = ticketStatusLabel(ticket.status);
+    return {
+      id: `ticket:${ticket.ticket_id}`,
+      kind: "ticket",
+      ticketId: ticket.ticket_id,
+      ticketKey: key,
+      group: "Ticket",
+      label: String(ticket.title ?? "").trim() || key,
+      description: status ? `${key} · ${status}` : key,
+      keywords: [bare, ticket.organization_name].filter(Boolean),
+      exactNames: [key.toLowerCase(), bare.toLowerCase()],
+      closed: closed(ticket),
+    };
+  });
+}
+
+// Quick open's rows: Settings sections, workflows, Rem threads, board tickets
+// and project files.
+export function quickOpenItems({ files = [], workflows = [], threads = [], tickets = [], projectName = "" } = {}) {
   const items = [];
   for (const workflow of workflows) {
     if (!workflow?.id) continue;
@@ -238,6 +272,7 @@ export function quickOpenItems({ files = [], workflows = [], threads = [], proje
       description: thread.scopeMode === "global" ? "Global" : lastSegment(thread.projectRoot),
     });
   }
+  items.push(...ticketItems(tickets));
   for (const section of SETTINGS_SECTIONS) items.push({ ...settingsSectionItem(section), kind: "settings" });
   for (const file of files) {
     if (!file?.path) continue;

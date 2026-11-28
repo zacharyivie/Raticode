@@ -166,3 +166,10 @@
 /* A blocked, running or in-review card keeps its colored left edge. */
 .oh-card[aria-current="true"] { border-top-color: var(--accent); border-right-color: var(--accent); border-bottom-color: var(--accent); box-shadow: 0 0 0 3px var(--soft); }
 .oh-card[aria-current="true"]:not(.flagged):not(.is-running):not(.is-review) { border-left-color: var(--accent); }
+.kb-facts { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; font-size: 12.5px; }
+.kb-facts div { display: flex; gap: 6px; }
+.kb-facts dt { color: var(--muted); font-weight: 600; }
+.kb-facts dd { margin: 0; }
+.kb-edit { padding-top: 0; }
+.kb-edit-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.kb-edit-error { margin: 0; padding: 7px 10px; border-radius: 7px; color: var(--blocked); background: var(--blocked-soft); font-size: 12.5px; overflow-wrap: anywhere; }

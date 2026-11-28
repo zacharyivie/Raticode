@@ -40,7 +40,7 @@ private fun tone(outcome: Outcome): Color {
         Outcome.FAILED -> MaterialTheme.colorScheme.error
         Outcome.UNRESOLVED -> if (dark) UnresolvedDark else Unresolved
         Outcome.PASSED -> if (dark) PassedDark else Passed
-        Outcome.UNCHECKED -> MaterialTheme.colorScheme.onSurfaceVariant
+        Outcome.UNCHECKED, Outcome.NOTES -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 }
 
@@ -49,11 +49,13 @@ private fun symbol(outcome: Outcome) = when (outcome) {
     Outcome.UNRESOLVED -> "?"
     Outcome.PASSED -> "✓"
     Outcome.UNCHECKED -> "○"
+    Outcome.NOTES -> "✎"
 }
 
 /**
  * Which checks of a task's newest run failed or stayed unresolved, each with the reviewer's
- * reason, apart from the run's summary. Passed checks fold away below. Before a review has
+ * reason, apart from the run's summary. Passed checks fold away below, and so do the review's
+ * notes: findings that never send the work back. Before a review has
  * looked at any check only the count line shows, and a desktop that sends counts only gets
  * the count line it always had.
  */
@@ -79,19 +81,21 @@ internal fun RemTaskChecksGroup(run: RemRun) {
                     items.forEach { CheckRow(it, run.id) }
                 }
             }
-            if (groups.passed.isNotEmpty()) PassedChecks(groups.passed, run.id)
+            if (groups.passed.isNotEmpty()) FoldedChecks(Outcome.PASSED, groups.passed, run.id)
+            val notes = RemTaskChecks.notes(run.notes)
+            if (notes.isNotEmpty()) FoldedChecks(Outcome.NOTES, notes, run.id)
         }
     }
 }
 
 @Composable
-private fun PassedChecks(items: List<RemTaskChecks.Item>, runId: String) {
-    var open by rememberSaveable(runId) { mutableStateOf(false) }
-    Column(Modifier.testTag("remChecks-passed"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun FoldedChecks(outcome: Outcome, items: List<RemTaskChecks.Item>, runId: String) {
+    var open by rememberSaveable(runId, outcome.name) { mutableStateOf(false) }
+    Column(Modifier.testTag("remChecks-${outcome.name.lowercase()}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         TextButton(onClick = { open = !open }, contentPadding = PaddingValues(horizontal = 0.dp),
             modifier = Modifier.semantics { stateDescription = if (open) "Expanded" else "Collapsed" }) {
-            Text("${if (open) "▾" else "▸"} ${Outcome.PASSED.heading} · ${items.size}", style = MaterialTheme.typography.labelLarge,
-                color = tone(Outcome.PASSED))
+            Text("${if (open) "▾" else "▸"} ${outcome.heading} · ${items.size}", style = MaterialTheme.typography.labelLarge,
+                color = tone(outcome))
         }
         if (open) items.forEach { CheckRow(it, runId) }
     }

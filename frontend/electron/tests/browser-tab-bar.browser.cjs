@@ -14,6 +14,8 @@ const path = require("node:path");
 const http = require("node:http");
 const { app } = require("electron");
 const { X11Client } = require("../x11-client.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 15_000, interval: 100 };
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-tab-bar-test-"));
 const home = path.join(profile, "home");
@@ -46,16 +48,6 @@ const site = http.createServer((request, response) => {
 });
 const log = (message) => console.log(`[tab bar] ${message}`);
 
-async function waitFor(check, message, timeout = 15000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
-
 async function run() {
   await new Promise((resolve) => api.listen(0, "127.0.0.1", resolve));
   await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
@@ -66,13 +58,13 @@ async function run() {
   const window = await created;
   await new Promise((resolve) => window.webContents.once("did-finish-load", resolve));
   const page = (code) => window.webContents.executeJavaScript(code);
-  await waitFor(() => page("document.querySelector('#root')?.children.length > 0"), "Studio did not render");
+  await waitFor(() => page("document.querySelector('#root')?.children.length > 0"), "Studio did not render", WAIT);
 
   // New tabs open the local test page.
   await page(`localStorage.setItem("raticode.settings.v1", JSON.stringify({ appearance: { theme: "dark" }, browser: { homepage: ${JSON.stringify(siteUrl)} } }))`);
   window.webContents.reload();
   await new Promise((resolve) => window.webContents.once("did-finish-load", resolve));
-  await waitFor(() => page("Boolean(document.querySelector('.studio-sidebar #sidebar-tab-browser'))"), "Studio did not render after reload");
+  await waitFor(() => page("Boolean(document.querySelector('.studio-sidebar #sidebar-tab-browser'))"), "Studio did not render after reload", WAIT);
   await page("document.querySelector('.studio-sidebar #sidebar-tab-browser').click()");
 
   const byLabel = (label) => `[...document.querySelectorAll('[aria-label]')].find((node) => node.getAttribute('aria-label') === ${JSON.stringify(label)} && node.offsetParent)`;
@@ -84,49 +76,49 @@ async function run() {
   const family = (engine) => `document.querySelector('[data-browser-family="${engine}"]')`;
 
   // Empty Browser plugin: one button per browser, and no old top-right controls.
-  await waitFor(() => page("Boolean(document.querySelector('[data-testid=browser-empty]')?.offsetParent)"), "The empty Browser plugin did not show");
+  await waitFor(() => page("Boolean(document.querySelector('[data-testid=browser-empty]')?.offsetParent)"), "The empty Browser plugin did not show", WAIT);
   assert.equal(await page("document.querySelectorAll('[data-testid=browser-empty] [data-browser-family]').length"), 5);
   const status = await page("window.goferBrowser.library('engine-status')");
   log(`installed: ${JSON.stringify(Object.fromEntries(Object.entries(status || {}).map(([key, value]) => [key, Boolean(value?.available)])))}`);
 
   await click(`${family("raticode")}`);
-  await waitFor(async () => (await tabTitles()).some((title) => title.includes("Smoke page home")), "The first chromium tab did not load the test page");
+  await waitFor(async () => (await tabTitles()).some((title) => title.includes("Smoke page home")), "The first chromium tab did not load the test page", WAIT);
   assert.equal(await page(`Boolean(${byLabel("All browser tabs")})`), false, "the all-tabs dropdown is gone");
   assert.equal(await page("Boolean(document.querySelector('[data-testid=browser-new-tab], [data-testid=browser-new-tab-menu]'))"), false, "the top-right + and arrow are gone");
   assert.deepEqual(await groupButtons(), ["raticode"]);
 
   // The + after chromium's tabs.
   await click(byLabel("New Raticode (chromium) tab"));
-  await waitFor(async () => (await badges()).length === 2, "+ did not open a second chromium tab");
+  await waitFor(async () => (await badges()).length === 2, "+ did not open a second chromium tab", WAIT);
   assert.deepEqual(await badges(), ["raticode", "raticode"]);
 
   // "+ Browser" lists browsers with no tabs yet, inline in the tab bar.
   await click(byLabel("Open a tab in another browser"));
-  await waitFor(() => page(`Boolean(${family("private")})`), "The browser chooser did not open");
+  await waitFor(() => page(`Boolean(${family("private")})`), "The browser chooser did not open", WAIT);
   const offered = await page(`[...document.querySelectorAll('[aria-label="Open a tab in"] [data-browser-family]')].map((node) => node.getAttribute('data-browser-family'))`);
   assert.deepEqual(offered, ["gecko", "firefox", "chrome", "edge", "private"]);
   // Escape closes it and puts focus back on its button. Opening it focuses the first choice.
   window.webContents.focus();
-  await waitFor(() => page("document.activeElement?.getAttribute('data-browser-family') === 'gecko'"), "Opening the chooser did not focus its first choice");
+  await waitFor(() => page("document.activeElement?.getAttribute('data-browser-family') === 'gecko'"), "Opening the chooser did not focus its first choice", WAIT);
   window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
   window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Escape" });
-  await waitFor(async () => !(await page(`Boolean(${family("private")})`)), "Escape did not close the browser chooser");
+  await waitFor(async () => !(await page(`Boolean(${family("private")})`)), "Escape did not close the browser chooser", WAIT);
   assert.equal(await page("document.activeElement?.getAttribute('aria-label')"), "Open a tab in another browser");
   // A click elsewhere closes it too.
   await click(byLabel("Open a tab in another browser"));
-  await waitFor(() => page(`Boolean(${family("private")})`), "The browser chooser did not reopen");
+  await waitFor(() => page(`Boolean(${family("private")})`), "The browser chooser did not reopen", WAIT);
   const tab = await page(`(() => { const box = document.querySelector('[aria-label="Browser tabs"] [role=tab]').getBoundingClientRect(); return { x: Math.round(box.x + 20), y: Math.round(box.y + box.height / 2) }; })()`);
   window.webContents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: 1, ...tab });
   window.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...tab });
-  await waitFor(async () => !(await page(`Boolean(${family("private")})`)), "An outside click did not close the browser chooser");
+  await waitFor(async () => !(await page(`Boolean(${family("private")})`)), "An outside click did not close the browser chooser", WAIT);
 
   // Private tabs group apart, with a + that opens another private tab.
   await click(byLabel("Open a tab in another browser"));
-  await waitFor(() => page(`Boolean(${family("private")})`), "The chooser did not open for a private tab");
+  await waitFor(() => page(`Boolean(${family("private")})`), "The chooser did not open for a private tab", WAIT);
   await click(family("private"));
-  await waitFor(async () => (await groupButtons()).includes("private"), "The private tab did not get its own group");
+  await waitFor(async () => (await groupButtons()).includes("private"), "The private tab did not get its own group", WAIT);
   await click(byLabel("New private tab"));
-  await waitFor(async () => (await badges()).length === 4, "The private group's + did not open a private tab");
+  await waitFor(async () => (await badges()).length === 4, "The private group's + did not open a private tab", WAIT);
   assert.equal(await page(`[...document.querySelectorAll('[aria-label="Browser tabs"] [role=tab]')].filter((node) => node.textContent.startsWith('Private')).length`), 2);
   assert.deepEqual(await groupButtons(), ["raticode", "private"]);
 
@@ -135,9 +127,9 @@ async function run() {
   if (missing) {
     const before = (await badges()).length;
     await click(byLabel("Open a tab in another browser"));
-    await waitFor(() => page(`${family(missing)}?.getAttribute('aria-disabled') === 'true'`), `${missing} was not marked unavailable`);
+    await waitFor(() => page(`${family(missing)}?.getAttribute('aria-disabled') === 'true'`), `${missing} was not marked unavailable`, WAIT);
     await click(family(missing));
-    const shown = await waitFor(notice, `Choosing ${missing} showed no message`);
+    const shown = await waitFor(notice, `Choosing ${missing} showed no message`, WAIT);
     assert.equal(shown.role, "alert");
     assert.match(shown.text, /isn't installed/);
     assert.equal((await badges()).length, before);
@@ -154,7 +146,7 @@ async function run() {
   window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Tab", modifiers: ["control"] });
   window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Tab", modifiers: ["control"] });
   const selected = () => page(`[...document.querySelectorAll('[aria-label="Browser tabs"] [role=tab]')].findIndex((node) => node.getAttribute('aria-selected') === 'true')`);
-  await waitFor(async () => (await selected()) === 1, `Ctrl+Tab did not move to the next tab in ${JSON.stringify(order)}`);
+  await waitFor(async () => (await selected()) === 1, `Ctrl+Tab did not move to the next tab in ${JSON.stringify(order)}`, WAIT);
 
   if (process.env.RATICODE_TAB_BAR_SHOT) {
     await click(byLabel("Open a tab in another browser"));
@@ -169,12 +161,12 @@ async function run() {
     log(`Raticode (gecko) can't run here (${gecko?.problem || (gecko?.executable ? "unsupported display" : "no Firefox")}); skipping its part.`);
   } else {
     await click(byLabel("Open a tab in another browser"));
-    await waitFor(() => page(`Boolean(${family("gecko")})`), "The chooser did not offer Raticode (gecko)");
+    await waitFor(() => page(`Boolean(${family("gecko")})`), "The chooser did not offer Raticode (gecko)", WAIT);
     await click(family("gecko"));
-    await waitFor(async () => (await page("window.goferBrowser.gecko('status')"))?.placed, "Firefox's window did not move into the Gecko tab", 60000);
+    await waitFor(async () => (await page("window.goferBrowser.gecko('status')"))?.placed, "Firefox's window did not move into the Gecko tab", { ...WAIT, timeout: 60000 });
     // Firefox's window has its own "+", so the Gecko tab gets none beside "+ Browser".
     assert.deepEqual(await groupButtons(), ["raticode", "private"]);
-    await waitFor(async () => /Smoke page home/.test((await page("window.goferBrowser.gecko('status')"))?.title || ""), "Firefox did not open the home page", 30000);
+    await waitFor(async () => /Smoke page home/.test((await page("window.goferBrowser.gecko('status')"))?.title || ""), "Firefox did not open the home page", { ...WAIT, timeout: 30000 });
 
     // What is on screen, read from the display itself: Firefox's window doesn't
     // show in Electron's own captures. The test page is green (#22aa77).
@@ -187,12 +179,12 @@ async function run() {
     };
     const slotBox = await page("(() => { const box = document.querySelector('[data-testid=gecko-slot]').getBoundingClientRect(); return { left: box.left, top: box.top, right: box.right, bottom: box.bottom }; })()");
     const farCorner = { x: slotBox.right - 40, y: slotBox.bottom - 40 };
-    await waitFor(() => green(farCorner), "Firefox's page did not show in the Gecko tab", 15000);
+    await waitFor(() => green(farCorner), "Firefox's page did not show in the Gecko tab", { ...WAIT, timeout: 15000 });
 
     // A tab's right-click menu over the page: a hole for the menu, the rest of the page stays.
     await page(`(() => { const gecko = [...document.querySelectorAll('[aria-label="Browser tabs"] [role=tab]')].find((node) => node.querySelector('[data-browser-engine=gecko]')); const box = gecko.getBoundingClientRect(); gecko.parentElement.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: box.x + 20, clientY: box.bottom })); })()`);
-    const menu = await waitFor(() => page("(() => { const node = [...document.querySelectorAll('[role=menu]')].find((item) => item.getClientRects().length); if (!node) return null; const box = node.getBoundingClientRect(); return { x: box.x + box.width / 2, y: box.y + box.height / 2 }; })()"), "The tab's right-click menu did not open");
-    await waitFor(async () => !(await green(menu)), "The right-click menu was hidden under Firefox's window", 5000);
+    const menu = await waitFor(() => page("(() => { const node = [...document.querySelectorAll('[role=menu]')].find((item) => item.getClientRects().length); if (!node) return null; const box = node.getBoundingClientRect(); return { x: box.x + box.width / 2, y: box.y + box.height / 2 }; })()"), "The tab's right-click menu did not open", WAIT);
+    await waitFor(async () => !(await green(menu)), "The right-click menu was hidden under Firefox's window", { ...WAIT, timeout: 5000 });
     assert.equal(await green(farCorner), true, "the page around the menu stays on screen");
     // A click in Firefox's page closes the menu, as a click anywhere else would.
     const xtest = await display.extension("XTEST");
@@ -200,8 +192,8 @@ async function run() {
     display.fakeInput(xtest, 6, 0, at.x, at.y);
     display.fakeInput(xtest, 4, 1, at.x, at.y);
     display.fakeInput(xtest, 5, 1, at.x, at.y);
-    await waitFor(async () => !(await page("[...document.querySelectorAll('[role=menu]')].some((item) => item.getClientRects().length)")), "A click in Firefox's page did not close the menu", 5000);
-    await waitFor(() => green(menu), "The hole stayed after the menu closed", 5000);
+    await waitFor(async () => !(await page("[...document.querySelectorAll('[role=menu]')].some((item) => item.getClientRects().length)")), "A click in Firefox's page did not close the menu", { ...WAIT, timeout: 5000 });
+    await waitFor(() => green(menu), "The hole stayed after the menu closed", { ...WAIT, timeout: 5000 });
     log("Raticode (gecko): a menu over the page cuts a hole in Firefox's window; the page stays on screen around it, and a click in the page closes the menu.");
     display.close();
     // The tab bar, the chooser and the notice never cover Firefox's page, so it stays on screen.
@@ -214,14 +206,14 @@ async function run() {
     })()`);
     // "+ Browser" still offers Raticode (gecko): a new tab inside Firefox's window.
     await click(byLabel("Open a tab in another browser"));
-    await waitFor(() => page(`${family("gecko")}?.getAttribute('aria-label') === "New tab inside Raticode (gecko)'s Firefox window"`), "+ Browser did not offer a tab inside Raticode (gecko)");
+    await waitFor(() => page(`${family("gecko")}?.getAttribute('aria-label') === "New tab inside Raticode (gecko)'s Firefox window"`), "+ Browser did not offer a tab inside Raticode (gecko)", WAIT);
     await click(family("gecko"));
-    const shown = await waitFor(notice, "A new Gecko tab showed no message");
+    const shown = await waitFor(notice, "A new Gecko tab showed no message", WAIT);
     assert.equal(shown.role, "status");
     assert.match(shown.text, /one Firefox window/);
     assert.equal((await badges()).filter((engine) => engine === "gecko").length, 1, "Gecko keeps one tab");
     let lastTitle = "";
-    await waitFor(async () => { lastTitle = (await page("window.goferBrowser.gecko('status')"))?.title || ""; return !/Smoke page home/.test(lastTitle); }, "Firefox did not open a new tab", 30000).catch((error) => { throw new Error(`${error.message}; its title stayed ${JSON.stringify(lastTitle)}`); });
+    await waitFor(async () => { lastTitle = (await page("window.goferBrowser.gecko('status')"))?.title || ""; return !/Smoke page home/.test(lastTitle); }, "Firefox did not open a new tab", { ...WAIT, timeout: 30000 }).catch((error) => { throw new Error(`${error.message}; its title stayed ${JSON.stringify(lastTitle)}`); });
     // An empty Firefox tab has no title of its own, so the window is just "Mozilla Firefox".
     assert.match(lastTitle, /^(Mozilla Firefox|New Tab)$/);
     await click(byLabel("Open a tab in another browser"));
@@ -237,7 +229,7 @@ async function run() {
     await click(`document.querySelector('[aria-label="Browser tabs"] [aria-label^="Close "]')`);
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
-  await waitFor(() => page("Boolean(document.querySelector('[data-testid=browser-empty]')?.offsetParent)"), "Closing every tab did not show the empty Browser plugin");
+  await waitFor(() => page("Boolean(document.querySelector('[data-testid=browser-empty]')?.offsetParent)"), "Closing every tab did not show the empty Browser plugin", WAIT);
 
   clearTimeout(timer);
   console.log("Browser tab bar passed.");

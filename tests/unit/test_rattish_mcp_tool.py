@@ -1032,7 +1032,8 @@ def test_trigger_approval_covers_the_server_definition(
     before = trigger_approval.take_snapshot(source, data_dir)
     entry = next(item for item in before.files if item.role == "mcp_server")
     assert entry.path == "mcp-server:fake"
-    assert entry.text is not None and str(server_script) in entry.text
+    definition = mcp_tool.definition_from_text(entry.text)
+    assert definition is not None and str(server_script) in definition["args"]
 
     rem_library.save_mcp_server(
         data_dir,

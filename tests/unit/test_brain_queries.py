@@ -19,6 +19,7 @@ from gofer.ui.brain_queries import (
     saved_matches,
     semantic_text,
 )
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
 
 TABLE = json.loads(
@@ -63,13 +64,6 @@ NOTES = {
         "2026-11-13",
     ),
 }
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 @pytest.fixture

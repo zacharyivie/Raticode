@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import IO, Any, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.paths import get_data_dir
 
 __all__ = [
@@ -139,6 +140,7 @@ API_DIR_NAME = "headless"
 ENDPOINT_FILE_NAME = "endpoint.json"
 TOKEN_FILE_NAME = "owner-token"
 DEFAULT_URL = "http://127.0.0.1:8765"
+CLI_BACKEND_DOCS_URL = "https://raticode.dev/docs/reference/cli#talk-to-a-running-backend"
 
 MAX_TOKEN_BYTES = 4096
 MAX_ENDPOINT_FILE_BYTES = 65536
@@ -276,6 +278,8 @@ class Endpoint:
     pid: int | None = None
     # The endpoint file says the backend answers GET /api/instance/proof.
     proof: bool = False
+    # The data folder discovery read, so errors can tell whether the desktop app holds it.
+    data_dir: Path | None = None
 
     def describe(self) -> dict[str, Any]:
         """Safe-to-print description; never includes the token."""
@@ -532,21 +536,12 @@ def discover_endpoint(
         token_source=token_source,
         pid=pid,
         proof=proof,
+        data_dir=files.directory.parent,
     )
 
 
 def _write_private(path: Path, content: str) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        if sys.platform != "win32":
-            os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    replace_file(path, content.encode("utf-8"))
 
 
 def write_api_files(
@@ -1015,13 +1010,30 @@ class ApiClient:
             exit_code=ExitCode.UNREACHABLE,
         )
 
+    def _desktop_hint(self) -> str | None:
+        """What to say when the desktop app holds the data folder, or None when it doesn't."""
+        if self.endpoint.data_dir is None:
+            return None
+        from gofer.ui.headless import backend_lock_holder
+
+        if backend_lock_holder(self.endpoint.data_dir) != "desktop":
+            return None
+        return (
+            f"The Raticode desktop app is running with the data folder {self.endpoint.data_dir}, "
+            "and its backend doesn't share its address or token with the CLI yet. See "
+            f"{CLI_BACKEND_DOCS_URL}"
+        )
+
     def _unreachable(self, exc: BaseException) -> CliError:
         where = self.endpoint.socket_path or self.endpoint.url
         hint = (
             "Start one with `Raticode serve --headless` (see Headless backend in the "
             "Raticode docs), or point RATICODE_URL at a running backend."
         )
-        if self.endpoint.pid is not None and not _pid_alive(self.endpoint.pid):
+        desktop = self._desktop_hint()
+        if desktop:
+            hint = desktop
+        elif self.endpoint.pid is not None and not _pid_alive(self.endpoint.pid):
             hint = (
                 f"The backend recorded in {self.endpoint.source} (pid {self.endpoint.pid}) "
                 "is no longer running."
@@ -1037,7 +1049,10 @@ class ApiClient:
             return
         message, code = _error_message(status, data)
         if status == 401:
-            if self.endpoint.token:
+            desktop = self._desktop_hint()
+            if desktop:
+                message += f" {desktop}"
+            elif self.endpoint.token:
                 message += " The token was rejected; the backend may have restarted."
             else:
                 message += f" No token found. Set {ENV_TOKEN_FILE} or pass --token-file" + (

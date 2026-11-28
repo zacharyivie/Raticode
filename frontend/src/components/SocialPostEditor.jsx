@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookmarkPlus, CalendarClock, Check, Copy, LayoutTemplate, Lightbulb, Link2, Paperclip, Plus, Send, Sparkles, X } from "lucide-react";
 import {
-  LATE_WINDOW_CHOICES, charCounter, durationLabel, foldText, formatWhen, linkParts, localTimeZone, quickTimes, slotLabel, suggestTimes, templateBlanks,
+  LATE_WINDOW_CHOICES, charCounter, durationLabel, foldText, linkParts, quickTimes, slotLabel, suggestTimes, templateBlanks,
   templateBody, templateDraft, timeTargets, timeZoneChoices, zonedInput, zonedToIso,
 } from "../lib/socialApi.js";
+import { dateTime, localTimeZone } from "../lib/timeText.js";
 import { PlatformIcon } from "./SocialPostsParts.jsx";
 import { useDiscardGuard } from "./ConfirmDialog.jsx";
 import { useRovingChoice } from "../lib/useRovingChoice.js";
@@ -255,7 +256,7 @@ export default function SocialPostEditor({ title, post, draft, template: startTe
               <div className="sp-chips" aria-label="Quick picks">
                 {quickTimes(new Date(), form.zone).map(item => <button key={item.label} type="button" className="sp-chip-btn" onClick={() => set({ when: zonedInput(item.at, form.zone) })}>{item.label}</button>)}
               </div>
-              {scheduledIso && form.zone !== local ? <p className="sp-field-hint">That's {formatWhen(scheduledIso)} your time.</p> : null}
+              {scheduledIso && form.zone !== local ? <p className="sp-field-hint">That's {dateTime(scheduledIso, { weekday: true })} your time.</p> : null}
               {shownSlots.length ? <div className="sp-suggest" aria-label="Good times to post">
                 <Lightbulb size={13} aria-hidden="true" />
                 <div>
@@ -317,7 +318,7 @@ export function CharMeter({ counter, platform }) {
 
 // A light, platform-flavored mock of how the post will read. Not pixel-exact; it shows the
 // account, the text with line breaks, the link and attachments.
-export function PlatformPreview({ variant, target, platform }) {
+function PlatformPreview({ variant, target, platform }) {
   const links = linkParts(variant);
   const name = target?.name || variant.account_name || platform?.label || variant.platform;
   return <div className={`sp-preview-card pv-${variant.platform}`}>
@@ -335,7 +336,7 @@ export function PlatformPreview({ variant, target, platform }) {
 
 // The text as the feed shows it: the part before "see more", then the rest faded, with a
 // note saying where the platform cuts it.
-export function FoldedText({ text, platform }) {
+function FoldedText({ text, platform }) {
   const { shown, rest } = foldText(text, platform);
   if (!rest) return <p className="sp-preview-text">{text}</p>;
   return <>

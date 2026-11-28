@@ -38,6 +38,7 @@ const { createMediaPreviews } = require("./media-preview.cjs");
 const mediaPreviews = createMediaPreviews();
 const { autoUpdater } = require("electron-updater");
 const updateSchedule = require("./update-schedule.cjs");
+const { helpMenuTemplate } = require("./help-menu.cjs");
 const { raticodeReleaseSigning } = require("../package.json");
 const pty = require("node-pty");
 const { previousBrands: LEGACY_BRANDS } = require("./brand-compat.json");
@@ -113,6 +114,7 @@ const { installPermissionPolicy, isStudioDocument, studioCsp } = require("./stud
 const { createSystemMicrophoneGate, describeSpeechHelper } = require("./voice-diagnostics.cjs");
 const { createIpcSecurity, isSafeExternalUrl } = require("./security.cjs");
 const { createTrustedProjectStore } = require("./trusted-projects.cjs");
+const { writeFileAtomicSync } = require("./atomic-file.cjs");
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..");
 const distIndexPath = path.join(__dirname, "..", "dist", "index.html");
@@ -190,6 +192,8 @@ let backendStoppedDuringQuit = false;
 // How long a backend that stopped by itself waits for a quit to start before it is
 // reported as a crash. Ctrl+C reaches the backend and Electron at the same moment.
 const BACKEND_CRASH_GRACE_MS = 2000;
+// A restart waits this long for the old backend to exit; it is killed after 3 seconds.
+const BACKEND_STOP_WAIT_MS = 5000;
 
 // Before the app log opens, entries go to stderr, which may itself be closed.
 function logMainError(level, message) {
@@ -699,23 +703,30 @@ function dataDirConfigPath() {
   return path.join(app.getPath("userData"), "settings.json");
 }
 
+// Resolves when the stopped backend has exited and so freed the data folder's lock,
+// or after BACKEND_STOP_WAIT_MS; the next backend also retries the lock for a while.
 function stopBackend() {
   backendPathGrants.reset();
   loggedPathGrants.clear();
   // Turns end with their backend, and so does their browser access.
   agentBrowserCapabilities.revokeAll();
-  if (!backendProcess || backendProcess.killed) return;
+  if (!backendProcess || backendProcess.killed) return Promise.resolve();
 
   const child = backendProcess;
   backendProcess = undefined;
   expectedBackendStops.add(child);
   closeBackendLogStream();
+  const exited = new Promise(resolve => {
+    child.once("exit", resolve);
+    setTimeout(resolve, BACKEND_STOP_WAIT_MS).unref();
+  });
   child.kill("SIGTERM");
   setTimeout(() => {
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGKILL");
     }
   }, 3000).unref();
+  return exited;
 }
 
 function createBackendLogStream() {
@@ -843,6 +854,11 @@ app.whenReady().then(async () => {
         } },
     ] },
     { role: "windowMenu" },
+    helpMenuTemplate((item) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.show();
+      mainWindow.webContents.send("gofer:browser-command", { action: "help-menu", item });
+    }),
   ]) : null);
   setupIpcHandlers();
   setupAutoUpdater();
@@ -2876,8 +2892,7 @@ async function configureRem(_event, options = {}) {
   else throw new Error("Unknown Rem setting.");
   if (!config.secondBrainRoot) config.secondBrainEnabled = false;
   const file = path.join(app.getPath("userData"), "rem-settings.json");
-  fs.writeFileSync(`${file}.tmp`, JSON.stringify(config), { mode: 0o600 });
-  fs.renameSync(`${file}.tmp`, file);
+  writeFileAtomicSync(file, JSON.stringify(config));
   if (options.key === "archivePurgeDays" || options.key === "archiveFolder") void runArchiveRetention();
   return config;
 }
@@ -3262,7 +3277,8 @@ async function restartBackend() {
 }
 
 async function replaceBackendWindow() {
-  stopBackend();
+  // The new backend takes the same data-folder lock, so let the old one free it first.
+  await stopBackend();
   try {
     removeLegacyAgentBrowserConnection(getGoferDataDir());
     backendReady = startBackend();

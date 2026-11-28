@@ -720,630 +720,9 @@ class DeviceApplication:
             desktop_result = self.desktop.handle(peer, event, prepared)
             if desktop_result is not None:
                 return desktop_result
-            if kind == "thread.create":
-
-                def rejected(code: str, detail: str) -> list[dict[str, Any]]:
-                    return [
-                        self._emit(
-                            peer,
-                            event,
-                            "error",
-                            {"code": code, "retryable": False, "detail": detail},
-                        )
-                    ]
-
-                creation_digest = hashlib.sha256(
-                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
-                previous = db.execute(
-                    "SELECT digest,thread FROM device_thread_requests WHERE peer=? AND request=?",
-                    (peer, event["request_id"]),
-                ).fetchone()
-                if previous:
-                    if previous["digest"] != creation_digest:
-                        return rejected(
-                            "conflict", "This creation request already has different content."
-                        )
-                    existing = db.execute(
-                        "SELECT context FROM device_grants WHERE peer=? AND thread=?",
-                        (peer, previous["thread"]),
-                    ).fetchone()
-                    if existing is None:
-                        return rejected("unauthorized", "This conversation was revoked on desktop.")
-                    context = self._decode(peer, existing["context"])
-                    thread = previous["thread"]
-                else:
-                    templates = db.execute(
-                        "SELECT thread,context FROM device_grants WHERE peer=? ORDER BY thread",
-                        (peer,),
-                    ).fetchall()
-                    # Only an explicit local creation grant can supply execution context.
-                    matches = [
-                        (row["thread"], self._decode(peer, row["context"])) for row in templates
-                    ]
-                    matches = [
-                        (identifier, value)
-                        for identifier, value in matches
-                        if value.get("allow_thread_create") is True
-                        and (
-                            payload.get("template_thread_id") is None
-                            or identifier == payload["template_thread_id"]
-                        )
-                        and (value.get("project_id") is not None or value.get("desktop_parity"))
-                        and (
-                            value.get("desktop_parity")
-                            or all(
-                                value.get(field, [] if field == "resource_ids" else None)
-                                == payload[field]
-                                for field in ("project_id", "resource_ids", "provider", "model")
-                            )
-                        )
-                    ]
-                    if len(matches) != 1:
-                        return rejected(
-                            "unauthorized",
-                            "Allow phone conversation creation for this project on desktop.",
-                        )
-                    if len(templates) >= 10000:
-                        return rejected(
-                            "too_large", "The desktop allows up to 10000 conversations per phone."
-                        )
-                    parent, template = matches[0]
-                    from gofer.ui.device_chat import validate_context
-
-                    try:
-                        context = validate_context(
-                            {
-                                **template,
-                                "title": payload["title"],
-                                "allow_thread_create": False,
-                                "parent_thread": parent,
-                                "revision": 1,
-                                # A new thread follows Rem's account setting unless the
-                                # phone's Account menu names one (payload "account").
-                                "provider_accounts": {},
-                            }
-                        )
-                    except (ValueError, OSError):
-                        return rejected("unauthorized", "The desktop project grant needs renewal.")
-                    if template.get("desktop_parity"):
-                        try:
-                            context = self.workspace.configure_context(context, payload)
-                            context["revision"] = 1
-                        except (ValueError, OSError):
-                            return rejected(
-                                "invalid_request",
-                                "Refresh desktop projects, models and permissions. Choose again.",
-                            )
-                    native_thread = str(uuid4())
-                    if template.get("desktop_thread_id"):
-                        from gofer.devices.workspace import wire_id
-
-                        thread = wire_id(native_thread)
-                        context["desktop_thread_id"] = native_thread
-                        parent_value = self.workspace.value(peer, parent)
-                        metadata = dict((parent_value or {}).get("metadata", {}))
-                        metadata.update(
-                            id=native_thread,
-                            title=payload["title"],
-                            archived=False,
-                            pinned=False,
-                            mobileGroup="active",
-                            createdAt=datetime.fromtimestamp(
-                                self.registry.clock(), UTC
-                            ).isoformat(),
-                            updatedAt=datetime.fromtimestamp(
-                                self.registry.clock(), UTC
-                            ).isoformat(),
-                        )
-                        self.workspace.put(
-                            peer,
-                            thread,
-                            {
-                                "metadata": metadata,
-                                "messages": [],
-                                "revision": 1,
-                                "mobile_created": True,
-                            },
-                        )
-                    else:
-                        thread = native_thread
-                    if parent == host_template(peer):
-                        # The turn journal is keyed by this thread, so history can show
-                        # the paired desktop each thought and tool step as it happens.
-                        self.workspace.put(
-                            peer,
-                            thread,
-                            {
-                                "metadata": {"id": thread, "title": payload["title"]},
-                                "messages": [],
-                                "revision": 1,
-                            },
-                        )
-                    db.execute(
-                        "INSERT INTO device_grants VALUES (?,?,?)",
-                        (peer, thread, self._encode(peer, context)),
-                    )
-                    db.execute(
-                        "INSERT INTO device_thread_requests VALUES (?,?,?,?)",
-                        (peer, event["request_id"], creation_digest, thread),
-                    )
-                return [
-                    self._emit(
-                        peer,
-                        {**event, "thread_id": thread},
-                        "thread.snapshot",
-                        {
-                            "title": context["title"],
-                            "project_id": context["project_id"],
-                            "resource_ids": context.get("resource_ids", []),
-                            "provider": context["provider"],
-                            "model": context["model"],
-                            "revision": 1,
-                            **self.workspace.details(peer, thread, context),
-                        },
-                    )
-                ]
-            if kind == "sync.request":
-                cursor = payload["after_sequence"]
-                if cursor is not None:
-                    self._prune_acknowledged(peer, cursor)
-                events = self.pending(peer, payload["after_sequence"] or 0, payload["limit"])
-                threads = []
-                for grant in db.execute(
-                    "SELECT thread,context FROM device_grants WHERE peer=? ORDER BY thread", (peer,)
-                ):
-                    context = self._decode(peer, grant["context"])
-                    threads.append(
-                        {
-                            "thread_id": grant["thread"],
-                            "title": context.get("title", "Remote Rem"),
-                            "revision": context.get("revision", 1),
-                            "project_id": context.get("project_id"),
-                            "resource_ids": context.get("resource_ids", []),
-                            "provider": context["provider"],
-                            "model": context["model"],
-                            **(
-                                self.workspace.details(
-                                    peer,
-                                    grant["thread"],
-                                    context,
-                                    activity=payload.get("include_activity") is True,
-                                )
-                                if payload.get("include_thread_details")
-                                else {}
-                            ),
-                            **(
-                                {"can_create": context.get("allow_thread_create") is True}
-                                if payload.get("include_connection")
-                                else {}
-                            ),
-                        }
-                    )
-                offset = payload.get("threads_offset", 0)
-                page = []
-                page_bytes = 0
-                for candidate in threads[offset : offset + 50]:
-                    size = len(json.dumps(candidate).encode())
-                    if page_bytes + size > 45000:
-                        break
-                    page.append(candidate)
-                    page_bytes += size
-                next_offset = offset + len(page)
-                events.append(
-                    self._emit(
-                        peer,
-                        event,
-                        "sync.snapshot",
-                        {
-                            "revision": 1,
-                            "through_sequence": events[-1]["sequence"] if events else 0,
-                            "threads": page,
-                            **(
-                                {
-                                    "threads_offset": payload["threads_offset"],
-                                    "next_threads_offset": next_offset
-                                    if len(threads) > next_offset
-                                    else None,
-                                }
-                                if "threads_offset" in payload
-                                else {}
-                            ),
-                            **(
-                                {
-                                    "connection": {
-                                        "lan_endpoint": self.lan_endpoint,
-                                        "rem_ready": self.rem_ready(),
-                                        "remote_control": self.remote.allowed(peer),
-                                        "desktop_control": self.desktop.allowed(peer),
-                                        # Older phones reject unknown fields, so only a
-                                        # phone that asks learns the Tailscale address.
-                                        **(
-                                            {"tailnet_endpoint": self.tailnet_endpoint}
-                                            if payload.get("include_tailnet_endpoint") is True
-                                            and (self.tailnet_endpoint or self.tailnet_known)
-                                            else {}
-                                        ),
-                                    }
-                                }
-                                if payload.get("include_connection")
-                                else {}
-                            ),
-                        },
-                    )
-                )
-                return events
-            if kind == "fleet.request":
-                load = None
-                if "advertise" in payload:
-                    # A paired desktop names its own listener inside its pinned session,
-                    # so the reverse direction works without typing an address.
-                    self._advertised(peer, payload["advertise"])
-                    if payload["advertise"].get("load") is True:
-                        load = self._load_reading(
-                            memory_hold=payload["advertise"].get("memory_hold") is True,
-                            running_by_kind=payload["advertise"].get("running_by_kind") is True,
-                        )
-                now = int(self.registry.clock())
-                devices = [
-                    {
-                        "device_id": row["device_id"],
-                        "name": self._label(row),
-                        "role": row["role"],
-                        "status": row["reachability"],
-                        "last_seen": int(row["last_seen"]) if row["last_seen"] else None,
-                        "observed_at": now,
-                        "fresh_until": now + 60,
-                        "running_jobs": row["running_jobs"] or [],
-                    }
-                    for row in self.fleet()
-                    if row["state"] in ("active", "indirect") and row["device_id"] != peer
-                ][:99]
-                jobs = [
-                    row[0]
-                    for row in db.execute("SELECT request FROM device_work WHERE state='running'")
-                ]
-                if self.local_jobs is not None:
-                    remote_turns = {
-                        row[0]
-                        for row in db.execute("SELECT turn FROM device_work WHERE state='running'")
-                    }
-                    jobs.extend(
-                        str(
-                            uuid5(
-                                NAMESPACE_URL, "raticode-job:" + j["thread_id"] + ":" + j["turn_id"]
-                            )
-                        )
-                        for j in self.local_jobs()
-                        if j["turn_id"] not in remote_turns
-                    )
-                devices.insert(
-                    0,
-                    {
-                        "device_id": self.registry.identity.device_id,
-                        "name": self.name,
-                        "role": "desktop",
-                        "status": "reachable",
-                        "last_seen": now,
-                        "observed_at": now,
-                        "fresh_until": now + 60,
-                        "running_jobs": jobs[:100],
-                        **({"load": load} if load is not None else {}),
-                    },
-                )
-                return [
-                    self._emit(
-                        peer,
-                        event,
-                        "fleet.snapshot",
-                        {"revision": now, "observed_at": now, "devices": devices},
-                    )
-                ]
-            if kind in ("file.offer", "file.chunk", "file.request", "file.status", "file.cancel"):
-                grant = db.execute(
-                    "SELECT 1 FROM device_grants WHERE peer=? AND thread=?",
-                    (peer, event["thread_id"]),
-                ).fetchone()
-                # Rem's chat has one private file channel per phone, open only
-                # while the user lets that phone use Raticode.
-                rem_files = event["thread_id"] == self.desktop.files_thread(
-                    peer
-                ) and self.desktop.allowed(peer)
-                if grant is None and not rem_files:
-                    raise PairingError("file_thread_grant_required")
-                if kind == "file.offer":
-                    self.files.offer(peer, event["thread_id"], payload)
-                    return [
-                        self._emit(
-                            peer,
-                            event,
-                            "file.status",
-                            {
-                                "file_id": payload["file_id"],
-                                "state": "receiving",
-                                "received_size": 0,
-                            },
-                        )
-                    ]
-                if kind == "file.chunk":
-                    status = self.files.receive(peer, event["thread_id"], payload)
-                    return [self._emit(peer, event, "file.status", status)]
-                if kind == "file.cancel":
-                    self.files.cancel(peer, event["thread_id"], payload["file_id"])
-                    self._finish_file_send(peer, event["thread_id"], payload["file_id"])
-                    return [
-                        self._emit(
-                            peer,
-                            event,
-                            "file.status",
-                            {
-                                "file_id": payload["file_id"],
-                                "state": "cancelled",
-                                "received_size": 0,
-                            },
-                        )
-                    ]
-                if kind == "file.request":
-                    db.execute(
-                        "INSERT OR REPLACE INTO device_file_sends VALUES (?,?,?,?)",
-                        (peer, payload["file_id"], event["thread_id"], event["request_id"]),
-                    )
-                    return [self._file_chunk(peer, event, payload["file_id"], 0)]
-                sending = db.execute(
-                    "SELECT * FROM device_file_sends WHERE peer=? AND id=? AND thread=?",
-                    (peer, payload["file_id"], event["thread_id"]),
-                ).fetchone()
-                # Status is an acknowledgment, not a request for another status.
-                # Check its thread before pruning any pending chunks or receipts.
-                if sending is None:
-                    return []
-                if payload["state"] == "receiving":
-                    db.execute(
-                        "DELETE FROM device_outbox WHERE peer=? AND sequence IN (SELECT sequence "
-                        "FROM device_chunk_receipts WHERE peer=? AND id=? AND end_offset<=?)",
-                        (peer, peer, payload["file_id"], payload["received_size"]),
-                    )
-                    db.execute(
-                        "DELETE FROM device_chunk_receipts WHERE peer=? AND id=? AND end_offset<=?",
-                        (peer, payload["file_id"], payload["received_size"]),
-                    )
-                    return [
-                        self._file_chunk(peer, event, payload["file_id"], payload["received_size"])
-                    ]
-                if payload["state"] in ("available", "cancelled", "failed"):
-                    self._finish_file_send(peer, event["thread_id"], payload["file_id"])
-                return []
-            if kind in ("job.get", "job.cancel"):
-                work = db.execute(
-                    "SELECT w.* FROM device_job_ids j JOIN device_work w ON w.peer=j.peer "
-                    "AND w.request=j.request WHERE j.peer=? AND j.id=? AND w.thread=?",
-                    (peer, payload["job_id"], event["thread_id"]),
-                ).fetchone()
-                if work is None or self.registry._row(peer)["role"] != "desktop":
-                    raise PairingError("job_unavailable")
-                state = work["state"]
-                if kind == "job.cancel" and state in ("accepted", "running"):
-                    db.execute(
-                        "UPDATE device_work SET state='cancelled' WHERE peer=? AND request=?",
-                        (peer, work["request"]),
-                    )
-                    state = "cancel_requested"
-                return [
-                    self._emit(
-                        peer,
-                        event,
-                        "job.status",
-                        {
-                            "job_id": payload["job_id"],
-                            "state": state,
-                            "revision": 1,
-                            "detail": "Target desktop job state",
-                        },
-                    )
-                ]
-            if kind == "request.cancel":
-                work = db.execute(
-                    "SELECT state FROM device_work WHERE peer=? AND request=? AND thread=?",
-                    (peer, event["request_id"], event["thread_id"]),
-                ).fetchone()
-                if work is None:
-                    raise PairingError("request_unavailable")
-                if work[0] in ("accepted", "running"):
-                    db.execute(
-                        "UPDATE device_work SET state='cancelled' WHERE peer=? AND request=?",
-                        (peer, event["request_id"]),
-                    )
-                    return [
-                        self._status(
-                            peer, event, "cancel_requested", "Cancellation requested on desktop"
-                        )
-                    ]
-                return self.pending(peer)
-            if kind == "job.submit":
-                grant_row = db.execute(
-                    "SELECT context FROM device_grants WHERE peer=? AND thread=?",
-                    (peer, event["thread_id"]),
-                ).fetchone()
-                context = self._decode(peer, grant_row[0]) if grant_row else {}
-                refusal = (
-                    self._rem_task_refusal(peer, event, context)
-                    if payload.get("rem_task") is not None
-                    else "Target desktop project grant required"
-                    if (
-                        self.registry._row(peer)["role"] != "desktop"
-                        or payload["target_device_id"] != self.registry.identity.device_id
-                        or payload["project_id"] != context.get("project_id")
-                        or payload["expected_policy_revision"] != context.get("policy_revision", 1)
-                        or payload["resource_ids"]
-                    )
-                    else None
-                )
-                if refusal is not None:
-                    return [
-                        self._emit(
-                            peer,
-                            event,
-                            "job.status",
-                            {
-                                "job_id": payload["job_id"],
-                                "state": "rejected",
-                                "revision": 1,
-                                "detail": refusal,
-                            },
-                        )
-                    ]
-                job_digest = hashlib.sha256(
-                    json.dumps(
-                        {"thread": event["thread_id"], "payload": payload}, sort_keys=True
-                    ).encode()
-                ).hexdigest()
-                job = db.execute(
-                    "SELECT * FROM device_job_ids WHERE peer=? AND id=?", (peer, payload["job_id"])
-                ).fetchone()
-                if job is not None:
-                    if job["digest"] != job_digest:
-                        raise PairingError("job_id_conflict")
-                    work = db.execute(
-                        "SELECT state FROM device_work WHERE peer=? AND request=?",
-                        (peer, job["request"]),
-                    ).fetchone()
-                    return [
-                        self._emit(
-                            peer,
-                            event,
-                            "job.status",
-                            {
-                                "job_id": payload["job_id"],
-                                "state": work[0] if work else "outcome_unknown",
-                                "revision": 1,
-                                "detail": "Existing job; not dispatched twice",
-                            },
-                        )
-                    ]
-                db.execute(
-                    "INSERT INTO device_job_ids VALUES (?,?,?,?)",
-                    (peer, payload["job_id"], event["request_id"], job_digest),
-                )
-            if kind in ("chat.submit", "job.submit"):
-                grant = db.execute(
-                    "SELECT context FROM device_grants WHERE peer=? AND thread=?",
-                    (peer, event["thread_id"]),
-                ).fetchone()
-                context = self._decode(peer, grant[0]) if grant else {}
-                if (
-                    (self.workspace.value(peer, event["thread_id"]) or {}).get("delete_requested")
-                    or grant is None
-                    or (
-                        context.get("desktop_thread_id")
-                        and (
-                            not context.get("project_path")
-                            or context.get("provider")
-                            not in context.get("provider_permissions", {})
-                        )
-                    )
-                ):
-                    return [
-                        self._emit(
-                            peer,
-                            event,
-                            "error",
-                            {
-                                "code": "unauthorized",
-                                "retryable": False,
-                                "detail": (
-                                    "This thread has no available desktop project or provider. "
-                                    "Refresh, then choose a scope and provider in Thread settings."
-                                ),
-                            },
-                        )
-                    ]
-                previous = db.execute(
-                    "SELECT event FROM device_work WHERE peer=? AND request=?",
-                    (peer, event["request_id"]),
-                ).fetchone()
-                if previous is not None:
-                    old = self._decode(peer, previous[0])
-                    if old["thread_id"] != event["thread_id"] or old["payload"] != payload:
-                        raise PairingError("request_id_conflict")
-                    return self.pending(peer)
-                attachment_metadata = []
-                for attachment in payload.get("attachment_ids", []):
-                    offer = self.files.metadata(peer, event["thread_id"], attachment)
-                    attachment_metadata.append(
-                        {
-                            "id": attachment,
-                            "name": offer["name"],
-                            "size": offer["size"],
-                            "mime": offer["mime"],
-                            "type": offer["mime"],
-                        }
-                    )
-                if (
-                    db.execute(
-                        "SELECT COUNT(*) FROM device_work WHERE peer=? AND state IN "
-                        "('accepted','running')",
-                        (peer,),
-                    ).fetchone()[0]
-                    >= 100
-                ):
-                    raise PairingError("work_quota")
-                db.execute(
-                    "INSERT INTO device_work (peer,request,thread,event,state,turn,incoming) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (
-                        peer,
-                        event["request_id"],
-                        event["thread_id"],
-                        self._encode(peer, event),
-                        "accepted",
-                        str(uuid4()),
-                        int(_bridge_starts_incoming(event)),
-                    ),
-                )
-                if kind == "job.submit" and payload.get("rem_task") is not None:
-                    # This desktop's Rem picks it up (rem_tasks), never the chat bridge.
-                    db.execute(
-                        "INSERT OR IGNORE INTO device_rem_tasks VALUES (?,?,NULL,0)",
-                        (peer, event["request_id"]),
-                    )
-                if kind == "chat.submit":
-                    self.workspace.name_from_message(
-                        peer, event["thread_id"], payload.get("text", "")
-                    )
-                if attachment_metadata:
-                    encoded_attachments = self._encode(peer, {"attachments": attachment_metadata})
-                    metadata_bytes = db.execute(
-                        "SELECT COALESCE(SUM(LENGTH(value)),0) FROM device_message_attachments "
-                        "WHERE peer=?",
-                        (peer,),
-                    ).fetchone()[0]
-                    if metadata_bytes + len(encoded_attachments) > 32 * 1024 * 1024:
-                        raise PairingError("attachment_history_quota")
-                    db.execute(
-                        "INSERT INTO device_message_attachments VALUES (?,?,?)",
-                        (
-                            peer,
-                            event["request_id"],
-                            encoded_attachments,
-                        ),
-                    )
-                return [
-                    self._emit(
-                        peer,
-                        event,
-                        "job.status",
-                        {
-                            "job_id": payload["job_id"],
-                            "state": "accepted",
-                            "revision": 1,
-                            "detail": "Accepted by target desktop",
-                        },
-                    )
-                    if kind == "job.submit"
-                    else self._emit(
-                        peer, event, "chat.accepted", {"message_id": event["request_id"]}
-                    )
-                ]
+            handler = EVENT_HANDLERS.get(kind)
+            if handler is not None:
+                return handler(self, peer, event, payload)
             return [
                 self._emit(
                     peer,
@@ -1356,6 +735,647 @@ class DeviceApplication:
                     },
                 )
             ]
+
+    def _thread_create(
+        self, peer: str, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """A new conversation from a phone, made from a desktop creation grant."""
+        db = self.registry.db
+
+        def rejected(code: str, detail: str) -> list[dict[str, Any]]:
+            return [
+                self._emit(
+                    peer,
+                    event,
+                    "error",
+                    {"code": code, "retryable": False, "detail": detail},
+                )
+            ]
+
+        creation_digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        previous = db.execute(
+            "SELECT digest,thread FROM device_thread_requests WHERE peer=? AND request=?",
+            (peer, event["request_id"]),
+        ).fetchone()
+        if previous:
+            if previous["digest"] != creation_digest:
+                return rejected("conflict", "This creation request already has different content.")
+            existing = db.execute(
+                "SELECT context FROM device_grants WHERE peer=? AND thread=?",
+                (peer, previous["thread"]),
+            ).fetchone()
+            if existing is None:
+                return rejected("unauthorized", "This conversation was revoked on desktop.")
+            context = self._decode(peer, existing["context"])
+            thread = previous["thread"]
+        else:
+            templates = db.execute(
+                "SELECT thread,context FROM device_grants WHERE peer=? ORDER BY thread",
+                (peer,),
+            ).fetchall()
+            # Only an explicit local creation grant can supply execution context.
+            matches = [(row["thread"], self._decode(peer, row["context"])) for row in templates]
+            matches = [
+                (identifier, value)
+                for identifier, value in matches
+                if value.get("allow_thread_create") is True
+                and (
+                    payload.get("template_thread_id") is None
+                    or identifier == payload["template_thread_id"]
+                )
+                and (value.get("project_id") is not None or value.get("desktop_parity"))
+                and (
+                    value.get("desktop_parity")
+                    or all(
+                        value.get(field, [] if field == "resource_ids" else None) == payload[field]
+                        for field in ("project_id", "resource_ids", "provider", "model")
+                    )
+                )
+            ]
+            if len(matches) != 1:
+                return rejected(
+                    "unauthorized",
+                    "Allow phone conversation creation for this project on desktop.",
+                )
+            if len(templates) >= 10000:
+                return rejected(
+                    "too_large", "The desktop allows up to 10000 conversations per phone."
+                )
+            parent, template = matches[0]
+            from gofer.ui.device_chat import validate_context
+
+            try:
+                context = validate_context(
+                    {
+                        **template,
+                        "title": payload["title"],
+                        "allow_thread_create": False,
+                        "parent_thread": parent,
+                        "revision": 1,
+                        # A new thread follows Rem's account setting unless the
+                        # phone's Account menu names one (payload "account").
+                        "provider_accounts": {},
+                    }
+                )
+            except (ValueError, OSError):
+                return rejected("unauthorized", "The desktop project grant needs renewal.")
+            if template.get("desktop_parity"):
+                try:
+                    context = self.workspace.configure_context(context, payload)
+                    context["revision"] = 1
+                except (ValueError, OSError):
+                    return rejected(
+                        "invalid_request",
+                        "Refresh desktop projects, models and permissions. Choose again.",
+                    )
+            native_thread = str(uuid4())
+            if template.get("desktop_thread_id"):
+                from gofer.devices.workspace import wire_id
+
+                thread = wire_id(native_thread)
+                context["desktop_thread_id"] = native_thread
+                parent_value = self.workspace.value(peer, parent)
+                metadata = dict((parent_value or {}).get("metadata", {}))
+                metadata.update(
+                    id=native_thread,
+                    title=payload["title"],
+                    archived=False,
+                    pinned=False,
+                    mobileGroup="active",
+                    createdAt=datetime.fromtimestamp(self.registry.clock(), UTC).isoformat(),
+                    updatedAt=datetime.fromtimestamp(self.registry.clock(), UTC).isoformat(),
+                )
+                self.workspace.put(
+                    peer,
+                    thread,
+                    {
+                        "metadata": metadata,
+                        "messages": [],
+                        "revision": 1,
+                        "mobile_created": True,
+                    },
+                )
+            else:
+                thread = native_thread
+            if parent == host_template(peer):
+                # The turn journal is keyed by this thread, so history can show
+                # the paired desktop each thought and tool step as it happens.
+                self.workspace.put(
+                    peer,
+                    thread,
+                    {
+                        "metadata": {"id": thread, "title": payload["title"]},
+                        "messages": [],
+                        "revision": 1,
+                    },
+                )
+            db.execute(
+                "INSERT INTO device_grants VALUES (?,?,?)",
+                (peer, thread, self._encode(peer, context)),
+            )
+            db.execute(
+                "INSERT INTO device_thread_requests VALUES (?,?,?,?)",
+                (peer, event["request_id"], creation_digest, thread),
+            )
+        return [
+            self._emit(
+                peer,
+                {**event, "thread_id": thread},
+                "thread.snapshot",
+                {
+                    "title": context["title"],
+                    "project_id": context["project_id"],
+                    "resource_ids": context.get("resource_ids", []),
+                    "provider": context["provider"],
+                    "model": context["model"],
+                    "revision": 1,
+                    **self.workspace.details(peer, thread, context),
+                },
+            )
+        ]
+
+    def _sync_request(
+        self, peer: str, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Pending events plus a page of the phone's conversations."""
+        db = self.registry.db
+        cursor = payload["after_sequence"]
+        if cursor is not None:
+            self._prune_acknowledged(peer, cursor)
+        events = self.pending(peer, payload["after_sequence"] or 0, payload["limit"])
+        threads = []
+        for grant in db.execute(
+            "SELECT thread,context FROM device_grants WHERE peer=? ORDER BY thread", (peer,)
+        ):
+            context = self._decode(peer, grant["context"])
+            threads.append(
+                {
+                    "thread_id": grant["thread"],
+                    "title": context.get("title", "Remote Rem"),
+                    "revision": context.get("revision", 1),
+                    "project_id": context.get("project_id"),
+                    "resource_ids": context.get("resource_ids", []),
+                    "provider": context["provider"],
+                    "model": context["model"],
+                    **(
+                        self.workspace.details(
+                            peer,
+                            grant["thread"],
+                            context,
+                            activity=payload.get("include_activity") is True,
+                        )
+                        if payload.get("include_thread_details")
+                        else {}
+                    ),
+                    **(
+                        {"can_create": context.get("allow_thread_create") is True}
+                        if payload.get("include_connection")
+                        else {}
+                    ),
+                }
+            )
+        offset = payload.get("threads_offset", 0)
+        page = []
+        page_bytes = 0
+        for candidate in threads[offset : offset + 50]:
+            size = len(json.dumps(candidate).encode())
+            if page_bytes + size > 45000:
+                break
+            page.append(candidate)
+            page_bytes += size
+        next_offset = offset + len(page)
+        events.append(
+            self._emit(
+                peer,
+                event,
+                "sync.snapshot",
+                {
+                    "revision": 1,
+                    "through_sequence": events[-1]["sequence"] if events else 0,
+                    "threads": page,
+                    **(
+                        {
+                            "threads_offset": payload["threads_offset"],
+                            "next_threads_offset": next_offset
+                            if len(threads) > next_offset
+                            else None,
+                        }
+                        if "threads_offset" in payload
+                        else {}
+                    ),
+                    **(
+                        {
+                            "connection": {
+                                "lan_endpoint": self.lan_endpoint,
+                                "rem_ready": self.rem_ready(),
+                                "remote_control": self.remote.allowed(peer),
+                                "desktop_control": self.desktop.allowed(peer),
+                                # Older phones reject unknown fields, so only a
+                                # phone that asks learns the Tailscale address.
+                                **(
+                                    {"tailnet_endpoint": self.tailnet_endpoint}
+                                    if payload.get("include_tailnet_endpoint") is True
+                                    and (self.tailnet_endpoint or self.tailnet_known)
+                                    else {}
+                                ),
+                            }
+                        }
+                        if payload.get("include_connection")
+                        else {}
+                    ),
+                },
+            )
+        )
+        return events
+
+    def _fleet_request(
+        self, peer: str, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """This desktop and the paired devices it can see."""
+        db = self.registry.db
+        load = None
+        if "advertise" in payload:
+            # A paired desktop names its own listener inside its pinned session,
+            # so the reverse direction works without typing an address.
+            self._advertised(peer, payload["advertise"])
+            if payload["advertise"].get("load") is True:
+                load = self._load_reading(
+                    memory_hold=payload["advertise"].get("memory_hold") is True,
+                    running_by_kind=payload["advertise"].get("running_by_kind") is True,
+                )
+        now = int(self.registry.clock())
+        devices = [
+            {
+                "device_id": row["device_id"],
+                "name": self._label(row),
+                "role": row["role"],
+                "status": row["reachability"],
+                "last_seen": int(row["last_seen"]) if row["last_seen"] else None,
+                "observed_at": now,
+                "fresh_until": now + 60,
+                "running_jobs": row["running_jobs"] or [],
+            }
+            for row in self.fleet()
+            if row["state"] in ("active", "indirect") and row["device_id"] != peer
+        ][:99]
+        jobs = [
+            row[0] for row in db.execute("SELECT request FROM device_work WHERE state='running'")
+        ]
+        if self.local_jobs is not None:
+            remote_turns = {
+                row[0] for row in db.execute("SELECT turn FROM device_work WHERE state='running'")
+            }
+            jobs.extend(
+                str(uuid5(NAMESPACE_URL, "raticode-job:" + j["thread_id"] + ":" + j["turn_id"]))
+                for j in self.local_jobs()
+                if j["turn_id"] not in remote_turns
+            )
+        devices.insert(
+            0,
+            {
+                "device_id": self.registry.identity.device_id,
+                "name": self.name,
+                "role": "desktop",
+                "status": "reachable",
+                "last_seen": now,
+                "observed_at": now,
+                "fresh_until": now + 60,
+                "running_jobs": jobs[:100],
+                **({"load": load} if load is not None else {}),
+            },
+        )
+        return [
+            self._emit(
+                peer,
+                event,
+                "fleet.snapshot",
+                {"revision": now, "observed_at": now, "devices": devices},
+            )
+        ]
+
+    def _file_event(
+        self, peer: str, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """One file transfer step in a granted conversation or Rem's file channel."""
+        kind = event["type"]
+        db = self.registry.db
+        grant = db.execute(
+            "SELECT 1 FROM device_grants WHERE peer=? AND thread=?",
+            (peer, event["thread_id"]),
+        ).fetchone()
+        # Rem's chat has one private file channel per phone, open only
+        # while the user lets that phone use Raticode.
+        rem_files = event["thread_id"] == self.desktop.files_thread(peer) and self.desktop.allowed(
+            peer
+        )
+        if grant is None and not rem_files:
+            raise PairingError("file_thread_grant_required")
+        if kind == "file.offer":
+            self.files.offer(peer, event["thread_id"], payload)
+            return [
+                self._emit(
+                    peer,
+                    event,
+                    "file.status",
+                    {
+                        "file_id": payload["file_id"],
+                        "state": "receiving",
+                        "received_size": 0,
+                    },
+                )
+            ]
+        if kind == "file.chunk":
+            status = self.files.receive(peer, event["thread_id"], payload)
+            return [self._emit(peer, event, "file.status", status)]
+        if kind == "file.cancel":
+            self.files.cancel(peer, event["thread_id"], payload["file_id"])
+            self._finish_file_send(peer, event["thread_id"], payload["file_id"])
+            return [
+                self._emit(
+                    peer,
+                    event,
+                    "file.status",
+                    {
+                        "file_id": payload["file_id"],
+                        "state": "cancelled",
+                        "received_size": 0,
+                    },
+                )
+            ]
+        if kind == "file.request":
+            db.execute(
+                "INSERT OR REPLACE INTO device_file_sends VALUES (?,?,?,?)",
+                (peer, payload["file_id"], event["thread_id"], event["request_id"]),
+            )
+            return [self._file_chunk(peer, event, payload["file_id"], 0)]
+        sending = db.execute(
+            "SELECT * FROM device_file_sends WHERE peer=? AND id=? AND thread=?",
+            (peer, payload["file_id"], event["thread_id"]),
+        ).fetchone()
+        # Status is an acknowledgment, not a request for another status.
+        # Check its thread before pruning any pending chunks or receipts.
+        if sending is None:
+            return []
+        if payload["state"] == "receiving":
+            db.execute(
+                "DELETE FROM device_outbox WHERE peer=? AND sequence IN (SELECT sequence "
+                "FROM device_chunk_receipts WHERE peer=? AND id=? AND end_offset<=?)",
+                (peer, peer, payload["file_id"], payload["received_size"]),
+            )
+            db.execute(
+                "DELETE FROM device_chunk_receipts WHERE peer=? AND id=? AND end_offset<=?",
+                (peer, payload["file_id"], payload["received_size"]),
+            )
+            return [self._file_chunk(peer, event, payload["file_id"], payload["received_size"])]
+        if payload["state"] in ("available", "cancelled", "failed"):
+            self._finish_file_send(peer, event["thread_id"], payload["file_id"])
+        return []
+
+    def _job_lookup(
+        self, peer: str, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """A paired desktop asks about, or cancels, a job it sent here."""
+        kind = event["type"]
+        db = self.registry.db
+        work = db.execute(
+            "SELECT w.* FROM device_job_ids j JOIN device_work w ON w.peer=j.peer "
+            "AND w.request=j.request WHERE j.peer=? AND j.id=? AND w.thread=?",
+            (peer, payload["job_id"], event["thread_id"]),
+        ).fetchone()
+        if work is None or self.registry._row(peer)["role"] != "desktop":
+            raise PairingError("job_unavailable")
+        state = work["state"]
+        if kind == "job.cancel" and state in ("accepted", "running"):
+            db.execute(
+                "UPDATE device_work SET state='cancelled' WHERE peer=? AND request=?",
+                (peer, work["request"]),
+            )
+            state = "cancel_requested"
+        return [
+            self._emit(
+                peer,
+                event,
+                "job.status",
+                {
+                    "job_id": payload["job_id"],
+                    "state": state,
+                    "revision": 1,
+                    "detail": "Target desktop job state",
+                },
+            )
+        ]
+
+    def _request_cancel(
+        self, peer: str, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Cancel a chat or job request that has not finished."""
+        db = self.registry.db
+        work = db.execute(
+            "SELECT state FROM device_work WHERE peer=? AND request=? AND thread=?",
+            (peer, event["request_id"], event["thread_id"]),
+        ).fetchone()
+        if work is None:
+            raise PairingError("request_unavailable")
+        if work[0] in ("accepted", "running"):
+            db.execute(
+                "UPDATE device_work SET state='cancelled' WHERE peer=? AND request=?",
+                (peer, event["request_id"]),
+            )
+            return [
+                self._status(peer, event, "cancel_requested", "Cancellation requested on desktop")
+            ]
+        return self.pending(peer)
+
+    def _job_submit(
+        self, peer: str, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """A paired desktop's job: refused, answered as before, or submitted."""
+        db = self.registry.db
+        grant_row = db.execute(
+            "SELECT context FROM device_grants WHERE peer=? AND thread=?",
+            (peer, event["thread_id"]),
+        ).fetchone()
+        context = self._decode(peer, grant_row[0]) if grant_row else {}
+        refusal = (
+            self._rem_task_refusal(peer, event, context)
+            if payload.get("rem_task") is not None
+            else "Target desktop project grant required"
+            if (
+                self.registry._row(peer)["role"] != "desktop"
+                or payload["target_device_id"] != self.registry.identity.device_id
+                or payload["project_id"] != context.get("project_id")
+                or payload["expected_policy_revision"] != context.get("policy_revision", 1)
+                or payload["resource_ids"]
+            )
+            else None
+        )
+        if refusal is not None:
+            return [
+                self._emit(
+                    peer,
+                    event,
+                    "job.status",
+                    {
+                        "job_id": payload["job_id"],
+                        "state": "rejected",
+                        "revision": 1,
+                        "detail": refusal,
+                    },
+                )
+            ]
+        job_digest = hashlib.sha256(
+            json.dumps({"thread": event["thread_id"], "payload": payload}, sort_keys=True).encode()
+        ).hexdigest()
+        job = db.execute(
+            "SELECT * FROM device_job_ids WHERE peer=? AND id=?", (peer, payload["job_id"])
+        ).fetchone()
+        if job is not None:
+            if job["digest"] != job_digest:
+                raise PairingError("job_id_conflict")
+            work = db.execute(
+                "SELECT state FROM device_work WHERE peer=? AND request=?",
+                (peer, job["request"]),
+            ).fetchone()
+            return [
+                self._emit(
+                    peer,
+                    event,
+                    "job.status",
+                    {
+                        "job_id": payload["job_id"],
+                        "state": work[0] if work else "outcome_unknown",
+                        "revision": 1,
+                        "detail": "Existing job; not dispatched twice",
+                    },
+                )
+            ]
+        db.execute(
+            "INSERT INTO device_job_ids VALUES (?,?,?,?)",
+            (peer, payload["job_id"], event["request_id"], job_digest),
+        )
+        return self._submit(peer, event, payload)
+
+    def _submit(
+        self, peer: str, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Queue a chat message or job for this desktop's bridge or Rem."""
+        kind = event["type"]
+        db = self.registry.db
+        grant = db.execute(
+            "SELECT context FROM device_grants WHERE peer=? AND thread=?",
+            (peer, event["thread_id"]),
+        ).fetchone()
+        context = self._decode(peer, grant[0]) if grant else {}
+        if (
+            (self.workspace.value(peer, event["thread_id"]) or {}).get("delete_requested")
+            or grant is None
+            or (
+                context.get("desktop_thread_id")
+                and (
+                    not context.get("project_path")
+                    or context.get("provider") not in context.get("provider_permissions", {})
+                )
+            )
+        ):
+            return [
+                self._emit(
+                    peer,
+                    event,
+                    "error",
+                    {
+                        "code": "unauthorized",
+                        "retryable": False,
+                        "detail": (
+                            "This thread has no available desktop project or provider. "
+                            "Refresh, then choose a scope and provider in Thread settings."
+                        ),
+                    },
+                )
+            ]
+        previous = db.execute(
+            "SELECT event FROM device_work WHERE peer=? AND request=?",
+            (peer, event["request_id"]),
+        ).fetchone()
+        if previous is not None:
+            old = self._decode(peer, previous[0])
+            if old["thread_id"] != event["thread_id"] or old["payload"] != payload:
+                raise PairingError("request_id_conflict")
+            return self.pending(peer)
+        attachment_metadata = []
+        for attachment in payload.get("attachment_ids", []):
+            offer = self.files.metadata(peer, event["thread_id"], attachment)
+            attachment_metadata.append(
+                {
+                    "id": attachment,
+                    "name": offer["name"],
+                    "size": offer["size"],
+                    "mime": offer["mime"],
+                    "type": offer["mime"],
+                }
+            )
+        if (
+            db.execute(
+                "SELECT COUNT(*) FROM device_work WHERE peer=? AND state IN ('accepted','running')",
+                (peer,),
+            ).fetchone()[0]
+            >= 100
+        ):
+            raise PairingError("work_quota")
+        db.execute(
+            "INSERT INTO device_work (peer,request,thread,event,state,turn,incoming) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                peer,
+                event["request_id"],
+                event["thread_id"],
+                self._encode(peer, event),
+                "accepted",
+                str(uuid4()),
+                int(_bridge_starts_incoming(event)),
+            ),
+        )
+        if kind == "job.submit" and payload.get("rem_task") is not None:
+            # This desktop's Rem picks it up (rem_tasks), never the chat bridge.
+            db.execute(
+                "INSERT OR IGNORE INTO device_rem_tasks VALUES (?,?,NULL,0)",
+                (peer, event["request_id"]),
+            )
+        if kind == "chat.submit":
+            self.workspace.name_from_message(peer, event["thread_id"], payload.get("text", ""))
+        if attachment_metadata:
+            encoded_attachments = self._encode(peer, {"attachments": attachment_metadata})
+            metadata_bytes = db.execute(
+                "SELECT COALESCE(SUM(LENGTH(value)),0) FROM device_message_attachments "
+                "WHERE peer=?",
+                (peer,),
+            ).fetchone()[0]
+            if metadata_bytes + len(encoded_attachments) > 32 * 1024 * 1024:
+                raise PairingError("attachment_history_quota")
+            db.execute(
+                "INSERT INTO device_message_attachments VALUES (?,?,?)",
+                (
+                    peer,
+                    event["request_id"],
+                    encoded_attachments,
+                ),
+            )
+        return [
+            self._emit(
+                peer,
+                event,
+                "job.status",
+                {
+                    "job_id": payload["job_id"],
+                    "state": "accepted",
+                    "revision": 1,
+                    "detail": "Accepted by target desktop",
+                },
+            )
+            if kind == "job.submit"
+            else self._emit(peer, event, "chat.accepted", {"message_id": event["request_id"]})
+        ]
 
     def claim(
         self, *, own: bool = True, organization: bool = True, waiting: str | None = None
@@ -2734,3 +2754,26 @@ class DeviceApplication:
             "sequence FROM device_outbox WHERE peer=?)",
             (peer, peer),
         )
+
+
+PhoneEvent = Callable[
+    [DeviceApplication, str, dict[str, Any], dict[str, Any]], list[dict[str, Any]]
+]
+
+# The phone event kinds DeviceApplication answers itself, once the workspace, remote
+# and desktop handlers pass an event on. Any other kind is answered "unsupported".
+EVENT_HANDLERS: dict[str, PhoneEvent] = {
+    "thread.create": DeviceApplication._thread_create,
+    "sync.request": DeviceApplication._sync_request,
+    "fleet.request": DeviceApplication._fleet_request,
+    "file.offer": DeviceApplication._file_event,
+    "file.chunk": DeviceApplication._file_event,
+    "file.request": DeviceApplication._file_event,
+    "file.status": DeviceApplication._file_event,
+    "file.cancel": DeviceApplication._file_event,
+    "job.get": DeviceApplication._job_lookup,
+    "job.cancel": DeviceApplication._job_lookup,
+    "request.cancel": DeviceApplication._request_cancel,
+    "job.submit": DeviceApplication._job_submit,
+    "chat.submit": DeviceApplication._submit,
+}

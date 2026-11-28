@@ -1696,16 +1696,7 @@ class LiveClient(app: Application,
         (op == "organizations.task" && (params.optString("action") == "move" || params.has("status") || params.has("epic_id") || params.has("project_id")))
     /** Drops queued polling reads of [ops]; an older desktop would close the session on an op it doesn't know. */
     private fun dropQueuedReads(state: JSONObject, ops: Set<String>): Boolean {
-        val outbox = state.optJSONArray("outbox") ?: return false
-        val kept = JSONArray()
-        for (i in 0 until outbox.length()) {
-            val event = JSONObject(outbox.getString(i))
-            val op = event.optJSONObject("payload")?.optString("op").orEmpty()
-            if (event.optString("type") != "desktop.read" || op !in ops) kept.put(outbox.getString(i))
-        }
-        if (kept.length() == outbox.length()) return false
-        state.put("outbox", kept)
-        return true
+        return Outbox.drop(state) { it.optString("type") == "desktop.read" && it.optJSONObject("payload")?.optString("op").orEmpty() in ops }
     }
     /** Shows only [levels]; the desktop filters, so the log starts again from its newest entries. */
     fun setLogLevels(levels: Set<String>) {

@@ -11,10 +11,15 @@
 // each browser file needs about 1 GB. Inside a capped scope the run ends with its memory
 // peak (ℹ memory_peak_mib), which shows whether more would fit. `npm run test:serial`
 // runs everything in one process.
+//
+// Every process shares one temp folder for the run (test-tmp.cjs), removed when the run
+// ends, even after a failure. The totals end with how many entries the tests left in it
+// (ℹ temp_left_behind), so a test that stops cleaning up shows.
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { dropInheritedSettings } = require("./test-env.cjs");
 
 const FRONTEND = path.join(__dirname, "..", "..");
 
@@ -38,6 +43,8 @@ const SEPARATE = [
   "electron/tests/chrome-browser.test.cjs", // 6 s
   "electron/tests/git-watch.test.cjs", // 6 s
   "electron/tests/git-preview-security.test.cjs", // 3 s
+  "electron/tests/terminal-find.test.cjs", // real Electron, xterm and search addon: 3 s
+  "electron/tests/terminal-links.test.cjs", // real Electron and xterm, trusted mouse input: 3 s
 ];
 
 const NODE_TEST_ARGS = ["--require", "./electron/tests/test-tmp.cjs", "--test", "--experimental-test-isolation=none", "--test-reporter=spec"];
@@ -118,8 +125,9 @@ function main() {
   process.on("SIGTERM", () => stop("SIGTERM"));
   // After the handlers above, so they run before it removes the run's folder. Every
   // test process shares that folder through RATICODE_TEST_TMP.
-  require("./test-tmp.cjs");
-  const env = { ...process.env };
+  const { reportLeftBehind } = require("./test-tmp.cjs");
+  // Without Raticode's push block, commit hook and app settings (test-env.cjs).
+  const env = dropInheritedSettings({ ...process.env });
   if (process.stdout.isTTY && !env.NO_COLOR && !env.FORCE_COLOR) env.FORCE_COLOR = "1";
 
   const report = (lane) => {
@@ -166,6 +174,8 @@ function main() {
     process.stdout.write(`ℹ duration_ms ${Date.now() - started}\n`);
     const memory = cgroupMemory();
     if (memory) process.stdout.write(`ℹ memory_peak_mib ${Math.round(memory.peak / 2 ** 20)} of ${Math.round(memory.max / 2 ** 20)}\n`);
+    // What the tests left in the run's temp folder, which is removed right after.
+    reportLeftBehind((line) => process.stdout.write(line));
     if (failed.length) process.stdout.write(`✖ Failed: ${failed.join(", ")}\n`);
     if (failed.length || stopping) process.exitCode = 1;
   });

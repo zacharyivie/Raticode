@@ -96,16 +96,7 @@ internal object DeviceRoutes {
      * Returns true when the outbox changed.
      */
     fun dropTailnetRequests(state: JSONObject): Boolean {
-        val outbox = state.optJSONArray("outbox") ?: return false
-        val kept = org.json.JSONArray()
-        for (i in 0 until outbox.length()) {
-            val event = JSONObject(outbox.getString(i))
-            if (event.optString("type") == "sync.request" && event.optJSONObject("payload")?.has("include_tailnet_endpoint") == true) continue
-            kept.put(outbox.getString(i))
-        }
-        if (kept.length() == outbox.length()) return false
-        state.put("outbox", kept)
-        return true
+        return Outbox.drop(state) { it.optString("type") == "sync.request" && it.optJSONObject("payload")?.has("include_tailnet_endpoint") == true }
     }
 
     /**

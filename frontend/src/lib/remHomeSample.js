@@ -211,7 +211,7 @@ function decisionCard(item) {
 
 // Self-work objectives for the busy scene: two open goals, one open-ended, one done, and
 // one stale from an earlier session. Ordered as the backend sends them.
-export function sampleObjectives() {
+function sampleObjectives() {
   const items = [
     { id: "obj-ux", text: "Raise UX quality of the workflow studio", done_when: "", done: false, created_by: "user", created_at: ago(300) },
     { id: "obj-sb", text: "Improve reliability of the Second Brain tools", done_when: "No open reliability tickets for Second Brain and the nightly suite passes 3 nights running", done: false, created_by: "rem", created_at: ago(240) },

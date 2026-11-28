@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from gofer.ui import brain_library as library_module
+from gofer.ui import brain_packages
 from gofer.ui.brain_backups import (
     PARTIAL,
     backup_health,
@@ -31,19 +32,13 @@ from gofer.ui.brain_backups import (
 )
 from gofer.ui.brain_library import BrainLibrary
 from gofer.utils import drive_format as drive_format_module
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_task
 
 
 def settle(library: BrainLibrary) -> None:
     for task in library.snapshot()["tasks"]:
         wait_task(library, task)
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def archived_brain(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
@@ -63,6 +58,7 @@ def archived_brain(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
     return brain
 
 
+# Looks in one brain's documents, unlike the shared doc_at.
 def doc_at(library: BrainLibrary, brain: dict[str, Any], path: str) -> dict[str, Any]:
     return next(doc for doc in library.entities("documents", brain["id"]) if doc["path"] == path)
 
@@ -241,15 +237,15 @@ def test_oversized_package_is_refused_before_reading_and_names_the_archive(
     assert estimate["archives"] == ["Rem Conversations"]
     assert estimate["conversations"] >= 4096
     assert estimate["total"] > estimate["conversations"]
-    monkeypatch.setattr(library_module, "MAX_PACKAGE", estimate["total"] - 1)
+    monkeypatch.setattr(brain_packages, "MAX_PACKAGE", estimate["total"] - 1)
     reads: list[str] = []
-    real_read = library_module.read_source
+    real_read = brain_packages.read_source
 
     def counted(root: Path, relative: str, *args: Any) -> bytes:
         reads.append(relative)
         return real_read(root, relative, *args)
 
-    monkeypatch.setattr(library_module, "read_source", counted)
+    monkeypatch.setattr(brain_packages, "read_source", counted)
     with pytest.raises(ValueError, match="Leave out Rem's conversation archive"):
         library.export_package(
             {"brainId": brain["id"], "destination": str(tmp_path / "too-big.zip")},
@@ -259,7 +255,7 @@ def test_oversized_package_is_refused_before_reading_and_names_the_archive(
     assert reads == []
     assert not (tmp_path / "too-big.zip").exists()
     # Without the archive the same brain fits under the limit.
-    monkeypatch.setattr(library_module, "read_source", real_read)
+    monkeypatch.setattr(brain_packages, "read_source", real_read)
     library.export_package(
         {
             "brainId": brain["id"],
@@ -316,7 +312,7 @@ def test_a_backup_that_fails_verification_is_deleted_and_recorded(library, tmp_p
     def corrupt(path: Path) -> dict[str, Any]:
         raise ValueError("Backup verification failed: files/notes.md does not match")
 
-    monkeypatch.setattr(library_module, "verify_package", corrupt)
+    monkeypatch.setattr(brain_packages, "verify_package", corrupt)
     receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))
     assert receipt["state"] == "failed"
     assert existing_backups(folder, library.brain(brain["id"])) == []
@@ -514,13 +510,13 @@ def test_unfinished_files_from_a_killed_backup_are_cleaned_up(library, tmp_path,
         os.utime(path, (hours_ago, hours_ago))
 
     staged: list[str] = []
-    real_check = library_module.checked_archive
+    real_check = brain_packages.checked_archive
 
     def recording(path: Path) -> Any:
         staged.append(path.name)
         return real_check(path)
 
-    monkeypatch.setattr(library_module, "checked_archive", recording)
+    monkeypatch.setattr(brain_packages, "checked_archive", recording)
     receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))
     assert receipt["state"] == "done", receipt.get("error")
     assert not staging.exists() and not publishing.exists()
@@ -804,7 +800,7 @@ def test_backup_skips_a_save_in_progress_and_a_file_removed_after_the_walk(
     temporary = root / f".rem-note.md.{'0123456789abcdef' * 2}.tmp"
     temporary.write_text("# Half written\n")
     (root / "attachment.bin").write_bytes(b"stray file, not a document")
-    real_read = library_module.read_source
+    real_read = brain_packages.read_source
 
     def racing(base: Path, relative: str, *args: Any) -> bytes:
         if relative == temporary.name and temporary.exists():
@@ -813,7 +809,7 @@ def test_backup_skips_a_save_in_progress_and_a_file_removed_after_the_walk(
             (root / relative).unlink(missing_ok=True)
         return real_read(base, relative, *args)
 
-    monkeypatch.setattr(library_module, "read_source", racing)
+    monkeypatch.setattr(brain_packages, "read_source", racing)
     folder = tmp_path / "backups"
     configure(library, brain, folder=str(folder))
     receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))
@@ -827,14 +823,14 @@ def test_backup_skips_a_save_in_progress_and_a_file_removed_after_the_walk(
 
 def test_backup_still_fails_when_a_library_document_disappears(library, tmp_path, monkeypatch):
     brain = archived_brain(library, tmp_path)
-    real_read = library_module.read_source
+    real_read = brain_packages.read_source
 
     def vanished(base: Path, relative: str, *args: Any) -> bytes:
         if relative == "notes.md":
             raise FileNotFoundError(2, "No such file or directory", relative)
         return real_read(base, relative, *args)
 
-    monkeypatch.setattr(library_module, "read_source", vanished)
+    monkeypatch.setattr(brain_packages, "read_source", vanished)
     folder = tmp_path / "backups"
     configure(library, brain, folder=str(folder))
     receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))

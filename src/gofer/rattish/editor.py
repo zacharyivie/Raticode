@@ -23,7 +23,7 @@ from gofer.rattish.diagnostics import (
     SourcePosition,
     SourceSpan,
 )
-from gofer.rattish.parser import InvalidSourceRegion, parse_rattish_recovering
+from gofer.rattish.parser import InvalidSourceRegion, parse_rattish, parse_rattish_recovering
 from gofer.rattish.preflight import run_preflight
 from gofer.rattish.workspaces import (
     RattishWorkspaceError,
@@ -190,7 +190,10 @@ class RattishEditorService:
             )
             updated = source
             applied: list[dict[str, Any]] = []
+            # Names of pasted nodes after renaming, in order, so the graph can select them.
+            pasted: list[str] = []
             for mutation in mutations:
+                before = {node["name"]["canonical"] for node in ast["nodes"]}
                 updated, mutation_edits = _apply_source_mutation(
                     updated, ast, mutation, subflow_paths=subflow_paths, rem_tasks=rem_tasks
                 )
@@ -202,6 +205,13 @@ class RattishEditorService:
                         f"Mutation {mutation_name!r} made the workflow declaration unreadable."
                     )
                 ast = recovered.ast
+                if mutation.get("kind") == "paste_nodes":
+                    pasted.extend(
+                        node["name"]["canonical"]
+                        for node in ast["nodes"]
+                        if node["name"]["canonical"] not in before
+                    )
+            self._check_source_size(updated)
             # Graph edits must never turn a compiling workflow into one that does not compile.
             if was_valid:
                 errors = self._compile_errors(workflow, updated, data_dir=data_dir)
@@ -228,6 +238,8 @@ class RattishEditorService:
                     registry_dir=data_dir,
                 )
             result["sourceEdits"] = applied
+            if pasted:
+                result["pastedNodes"] = pasted
             return result
 
     def _analyze(
@@ -551,6 +563,9 @@ def _apply_source_mutation(
         edit = (offset, offset, prefix + duplicated)
         return _apply_byte_edits(source, [edit]), [_edit_payload(edit)]
 
+    if kind == "paste_nodes":
+        return _paste_nodes(source, ast, mutation.get("source"))
+
     if kind == "delete_node":
         declaration = _mutation_node(ast, mutation.get("node"))
         deleted_id = declaration["name"]["canonical"]
@@ -659,6 +674,115 @@ def _apply_source_mutation(
         return _apply_byte_edits(source, edits), [_edit_payload(edit) for edit in edits]
 
     raise RattishEditorError(f"Unsupported Rattish source mutation {kind!r}.")
+
+
+# Wraps pasted text so the strict parser reads it as the nodes of a workflow.
+_PASTE_HEADER = "Rattish: 1\nWorkflow:\n  name: Pasted nodes\n\n"
+_NOT_NODES = (
+    "The clipboard doesn't hold workflow nodes. Copy nodes from a workflow graph, "
+    "or text that starts with 'Node <name>:'."
+)
+
+
+def _copy_node_name(name: str, taken: set[str]) -> str:
+    """The name a copy of a node gets: name-copy, then name-copy-2, name-copy-3 and on."""
+    candidate = f"{name}-copy"
+    suffix = 2
+    while candidate.lower() in taken:
+        candidate = f"{name}-copy-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _paste_nodes(
+    source: str, ast: Mapping[str, Any], text: Any
+) -> tuple[str, list[dict[str, Any]]]:
+    """Append pasted node declarations, renaming taken names the way Duplicate does."""
+    if not isinstance(text, str) or not text.strip():
+        raise RattishEditorError(_NOT_NODES)
+    if len(text.encode("utf-8")) > MAX_EDITOR_SOURCE_BYTES:
+        raise RattishEditorError(f"Pasted text exceeds {MAX_EDITOR_SOURCE_BYTES} bytes.")
+    wrapped = _PASTE_HEADER + text.replace("\r\n", "\n").replace("\r", "\n").strip("\n") + "\n"
+    try:
+        pasted = parse_rattish(wrapped, source_id="pasted nodes")["nodes"]
+    except RattishError as exc:
+        raise RattishEditorError(_NOT_NODES) from exc
+    if not pasted:
+        raise RattishEditorError(_NOT_NODES)
+
+    existing = {node["name"]["canonical"] for node in ast["nodes"]}
+    # Names that stay: free in the workflow and the first pasted node to use them.
+    kept: set[str] = set()
+    keeps: list[bool] = []
+    for node in pasted:
+        canonical = node["name"]["canonical"]
+        keeps.append(canonical not in existing and canonical not in kept)
+        if keeps[-1]:
+            kept.add(canonical)
+    taken = existing | kept
+    renamed: dict[str, str] = {}
+    pasted_names: set[str] = set()
+    edits: list[tuple[int, int, str]] = []
+    for node, keep in zip(pasted, keeps, strict=True):
+        canonical = node["name"]["canonical"]
+        pasted_names.add(canonical)
+        if keep:
+            continue
+        next_name = _copy_node_name(node["name"]["source"], taken)
+        taken.add(next_name.lower())
+        # A second pasted node with a kept name leaves references on the first one.
+        if canonical not in kept:
+            renamed.setdefault(canonical, next_name)
+        edits.append(_span_edit(node["name"]["span"], next_name))
+
+    def target_name(item: Mapping[str, Any]) -> str | None:
+        """What a needs or route entry points at once pasted, or None to drop it."""
+        canonical = item["canonical"]
+        if canonical in renamed:
+            return renamed[canonical]
+        if canonical in pasted_names or canonical in existing:
+            return str(item["source"])
+        return None
+
+    def rename_references(value: Any) -> None:
+        for previous, next_name in renamed.items():
+            edits.extend(_reference_rename_edits(value, previous, next_name))
+
+    for node in pasted:
+        for entry in node["entries"]:
+            if entry["kind"] == "needs":
+                names = [target_name(item) for item in entry["nodes"]]
+                remaining = [name for name in names if name is not None]
+                if remaining == [item["source"] for item in entry["nodes"]]:
+                    continue
+                indent = _entry_indent(entry)
+                rendered = _render_identifier_list("needs", remaining, indent=indent)
+                edits.append(
+                    _span_edit(entry["span"], rendered[len(indent) :] + "\n")
+                    if remaining
+                    else _line_removal_edit(wrapped, entry["span"])
+                )
+            elif entry["kind"] == "routes":
+                routes = entry["routes"]
+                targets = [target_name(route["target"]) for route in routes]
+                if all(target is None for target in targets):
+                    edits.append(_line_removal_edit(wrapped, entry["span"]))
+                    continue
+                for route, target in zip(routes, targets, strict=True):
+                    if target is None:
+                        edits.append(_line_removal_edit(wrapped, route["span"]))
+                        continue
+                    if target != route["target"]["source"]:
+                        edits.append(_span_edit(route["target"]["span"], target))
+                    rename_references(route.get("predicate"))
+            else:
+                rename_references(entry)
+
+    declarations = _apply_byte_edits(wrapped, edits)[len(_PASTE_HEADER) :]
+    prefix = "\n" if source.endswith(("\n", "\r")) else "\n\n"
+    offset = len(source.encode("utf-8"))
+    edit = (offset, offset, prefix + declarations)
+    return _apply_byte_edits(source, [edit]), [_edit_payload(edit)]
 
 
 _DEFAULT_PROVIDER = "codex"

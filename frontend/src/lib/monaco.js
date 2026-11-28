@@ -17,6 +17,8 @@ import "monaco-editor/editor/contrib/parameterHints/browser/parameterHints";
 import "monaco-editor/editor/contrib/bracketMatching/browser/bracketMatching";
 import "monaco-editor/editor/contrib/caretOperations/browser/caretOperations";
 import "monaco-editor/editor/contrib/clipboard/browser/clipboard";
+// Quick Fix (Ctrl+.), the light bulb and the hover's "Quick Fix..." link.
+import "monaco-editor/editor/contrib/codeAction/browser/codeActionContributions";
 import "monaco-editor/editor/contrib/codelens/browser/codelensController";
 import "monaco-editor/editor/contrib/comment/browser/comment";
 import "monaco-editor/editor/contrib/contextmenu/browser/contextmenu";
@@ -30,6 +32,7 @@ import "monaco-editor/editor/contrib/multicursor/browser/multicursor";
 import "monaco-editor/editor/contrib/suggest/browser/suggestController";
 import "monaco-editor/editor/contrib/wordHighlighter/browser/wordHighlighter";
 import "monaco-editor/editor/contrib/wordOperations/browser/wordOperations";
+import { installRattishQuickFixes } from "./rattishQuickFixes.js";
 
 if (typeof self !== "undefined") {
   self.MonacoEnvironment = {
@@ -79,6 +82,7 @@ function registerRattishLanguage() {
     aliases: ["Rattish", "rattish"],
     extensions: [".rattish", ".rad"],
   });
+  installRattishQuickFixes(monaco);
   monaco.languages.setLanguageConfiguration("rattish", {
     comments: { lineComment: "#" },
     indentationRules: {

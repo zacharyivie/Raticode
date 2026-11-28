@@ -7,11 +7,11 @@
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
     "properties": {
-      "source_path": {"type": "string", "x-rattish-type": "Path"}, "index_path": {"type": "string", "x-rattish-type": "Path"},
-      "glob": {"type": "string"}, "recursive": {"type": "boolean"}, "chunk_size": {"type": "integer", "minimum": 1},
-      "chunk_overlap": {"type": "integer", "minimum": 0}, "encoding": {"type": "string"},
-      "mode": {"enum": ["incremental", "full", "validate"], "x-rattish-case-insensitive": true},
-      "embedding_strategy": {"type": "string", "minLength": 1}, "search_strategy": {"type": "string", "minLength": 1}
+      "source_path": {"description": "Source resource path.", "type": "string", "x-rattish-type": "Path"}, "index_path": {"description": "On-disk local retrieval index path.", "type": "string", "x-rattish-type": "Path"},
+      "glob": {"description": "Source-file pattern.", "type": "string"}, "recursive": {"description": "Permit recursive operation.", "type": "boolean"}, "chunk_size": {"description": "Chunk size used by the indexer.", "type": "integer", "minimum": 1},
+      "chunk_overlap": {"description": "Overlap between text chunks.", "type": "integer", "minimum": 0}, "encoding": {"description": "Text encoding.", "type": "string"},
+      "mode": {"description": "Index update or validation mode.", "enum": ["incremental", "full", "validate"], "x-rattish-case-insensitive": true},
+      "embedding_strategy": {"description": "Installed text-to-vector strategy ID.", "type": "string", "minLength": 1}, "search_strategy": {"description": "Installed ranking strategy ID.", "type": "string", "minLength": 1}
     },
     "required": ["source_path", "index_path"], "additionalProperties": false
   },

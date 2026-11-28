@@ -2,9 +2,9 @@
    The sidebar inherits the navigation region palette; the workspace uses warm
    editor paper with Rem's sage identity and indigo for actions. */
 
-.rem-spin { animation: rem-spin .9s linear infinite; flex-shrink: 0; }
+.rem-spin { animation: rem-spin .9s linear infinite; flex-shrink: 0; will-change: transform; }
 @keyframes rem-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .rem-spin { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .rem-spin { animation: none; will-change: auto; } }
 
 /* ---------- Sidebar ---------- */
 .rem-side { --rem-attention: #fcd34d; --rem-success: #6ee7b7; --rem-danger: #fda4af; }
@@ -29,7 +29,10 @@
 .rem-side-group-head .rem-side-group-heading { flex: 1; min-width: 0; }
 .rem-side-dismiss-all { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 22px; padding: 0 7px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; color: rgb(var(--color-muted)); font-size: 11px; font-weight: 500; white-space: nowrap; }
 .rem-side-dismiss-all:hover:not(:disabled) { color: rgb(var(--color-ink)); background: rgb(var(--color-ink) / .06); }
-.rem-side-dismiss-all:disabled { opacity: .6; cursor: progress; }
+.rem-side-notice { display: flex; align-items: flex-start; gap: 6px; margin: 0 8px 6px; padding: 6px 4px 6px 9px; border: 1px solid color-mix(in srgb, var(--rem-danger) 45%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--rem-danger) 12%, transparent); color: var(--rem-danger); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; }
+.rem-side-notice span { flex: 1; min-width: 0; }
+.rem-side-notice button { display: grid; flex: none; place-items: center; width: 20px; height: 20px; border-radius: 5px; }
+.rem-side-notice button:hover { background: rgb(var(--color-ink) / .08); }
 .rem-side-dismiss-all small { font-size: 10px; font-variant-numeric: tabular-nums; }
 
 /* Start/Stop self-work under Rem's name: tinted with the brand while off, quiet while on. */
@@ -87,6 +90,10 @@
 .rem-objective[data-editing] .rem-objective-form { padding: 0; }
 .rem-objective-form input { width: 100%; min-width: 0; height: 26px; padding: 0 7px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; background: transparent; color: rgb(var(--color-ink)); font-size: 12px; }
 .rem-objective-form input:focus { outline: 2px solid rgb(var(--color-brand) / .5); outline-offset: 0; }
+/* Applies to, when editing: the memory panel's project picker, sized to the form's fields. */
+.rem-objective-form .rem-memory-project { display: flex; color: rgb(var(--color-muted)); font-size: 11.5px; }
+.rem-objective-form .rem-memory-project select { flex: 1; min-width: 0; max-width: none; height: 26px; padding: 0 5px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; background: rgb(var(--color-surface)); color: rgb(var(--color-ink)); font-size: 12px; }
+.rem-objective-form .rem-memory-project select:focus { outline: 2px solid rgb(var(--color-brand) / .5); outline-offset: 0; }
 .rem-objective-form-actions { display: flex; gap: 6px; }
 .rem-objective-form-actions button { height: 24px; padding: 0 9px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; font-size: 11.5px; }
 .rem-objective-form-actions button[type=submit] { border-color: transparent; background: rgb(var(--color-brand)); color: #fff; }
@@ -429,9 +436,12 @@
 .rem-steps li::before { content: ""; position: absolute; inset: 0 0 auto; height: 4px; border-radius: 999px; background: var(--rem-soft-line); }
 .rem-steps li[data-state=done]::before { background: var(--rem-accent); }
 .rem-steps li[data-state=current] { color: var(--rem-ink); font-weight: 600; }
-.rem-steps li[data-state=current]::before { background: linear-gradient(90deg, var(--rem-accent) 50%, var(--rem-soft-line) 50%); background-size: 200% 100%; animation: rem-progress 1.6s ease-in-out infinite alternate; }
-@keyframes rem-progress { from { background-position: 100% 0; } to { background-position: 30% 0; } }
-@media (prefers-reduced-motion: reduce) { .rem-steps li[data-state=current]::before { animation: none; background: var(--rem-accent); opacity: .6; } }
+/* The current step's fill grows and shrinks over its track. It animates transform only, so
+   the compositor runs it without repainting, and it keeps moving while the window is busy
+   reading a poll. rem-progress is shared with the chat's task cards (RemRich.css). */
+.rem-steps li[data-state=current]::after { content: ""; position: absolute; inset: 0 0 auto; height: 4px; border-radius: 999px; background: var(--rem-accent); transform-origin: left center; animation: rem-progress 1.6s ease-in-out infinite alternate; will-change: transform; }
+@keyframes rem-progress { from { transform: scaleX(0); } to { transform: scaleX(.7); } }
+@media (prefers-reduced-motion: reduce) { .rem-steps li[data-state=current]::after { animation: none; transform: none; opacity: .6; will-change: auto; } }
 .rem-checks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px 0 2px; border-top: 1px solid var(--rem-soft-line); }
 .rem-check-group { --check-tone: var(--rem-muted); display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .rem-check-group[data-outcome=failed] { --check-tone: var(--rem-danger); }
@@ -588,3 +598,23 @@
 @keyframes rem-found { 0%, 35% { background: color-mix(in srgb, var(--rem-accent) 16%, transparent); } 100% { background: transparent; } }
 @media (prefers-reduced-motion: reduce) { .rem-msg[data-found], .rem-batch > li[data-found] { animation: none; background: color-mix(in srgb, var(--rem-accent) 12%, transparent); } }
 ::highlight(rem-found) { background-color: color-mix(in srgb, #4f46e5 30%, transparent); }
+/* Each of Rem's projects under Objectives: a folded child with its own list and share. */
+.rem-project-objectives-list { margin: 4px 2px 0; padding-top: 3px; border-top: 1px solid rgb(var(--color-line) / .7); }
+.rem-project-objectives + .rem-project-objectives { margin-top: 1px; }
+.rem-project-heading { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; height: 24px; padding: 0 6px 0 7px; border-radius: 6px; color: rgb(var(--color-ink)); font-size: 11.5px; font-weight: 500; }
+.rem-project-heading:hover { background: rgb(var(--color-ink) / .06); }
+.rem-project-heading small { font-size: 10px; color: rgb(var(--color-muted)); font-variant-numeric: tabular-nums; }
+.rem-project-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rem-project-share { margin-left: auto; flex: none; }
+.rem-project-body { padding: 0 0 4px 12px; }
+/* Ask Rem: Rem writes broad objectives for this project; its progress or reason sits below. */
+.rem-project-ask { padding: 2px 4px 2px 9px; }
+.rem-project-ask-button { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; color: rgb(var(--color-brand)); font-size: 11px; font-weight: 500; }
+.rem-project-ask-button:hover:not(:disabled) { background: rgb(var(--color-ink) / .06); }
+.rem-project-ask-button:disabled { color: rgb(var(--color-muted)); cursor: default; }
+.rem-project-ask-line { margin: 3px 0 2px; font-size: 11px; line-height: 1.45; color: rgb(var(--color-muted)); }
+.rem-project-ask-line[data-tone="error"] { color: rgb(var(--color-danger)); }
+.rem-project-effort { display: flex; align-items: center; gap: 5px; padding: 2px 4px 4px 9px; font-size: 11px; color: rgb(var(--color-muted)); }
+.rem-project-effort span:first-child { margin-right: auto; }
+.rem-project-effort input { width: 44px; height: 22px; padding: 0 5px; border: 1px solid rgb(var(--color-line)); border-radius: 5px; background: transparent; color: rgb(var(--color-ink)); font-size: 11.5px; text-align: right; font-variant-numeric: tabular-nums; }
+.rem-project-effort input:focus { outline: 2px solid rgb(var(--color-brand) / .5); outline-offset: 0; }

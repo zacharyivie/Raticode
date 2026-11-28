@@ -30,7 +30,7 @@ export function BrowserEngineBadge({ engine }) {
 }
 
 // Why a browser can't open a tab right now, or "" when it can.
-export function engineUnavailableReason(engine, engines = null, gecko = null) {
+function engineUnavailableReason(engine, engines = null, gecko = null) {
   if (engine === "raticode") return "";
   if (engine === "gecko") {
     if (!gecko) return "";

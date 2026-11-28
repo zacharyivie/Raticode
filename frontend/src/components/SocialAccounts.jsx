@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, CheckCircle2, Copy, ExternalLink, KeyRound, Link2, Loader2, LogIn, Pause, Pencil, Plug, Timer, TriangleAlert } from "lucide-react";
 import {
-  LATE_WINDOW_CHOICES, MAX_LATE_WINDOW, accountNotice, cancelSignIn, checkAccount, chooseSignInPage, connectAccount, disconnectAccount, durationLabel, formatWhen,
+  LATE_WINDOW_CHOICES, MAX_LATE_WINDOW, accountNotice, cancelSignIn, checkAccount, chooseSignInPage, connectAccount, disconnectAccount, durationLabel,
   reopenSignIn, saveSocialSettings, setPaused, signInStatus, startSignIn, updateAccount,
 } from "../lib/socialApi.js";
 import {
   CONNECT_ORDER, NO_SIGN_IN_NOTE, PLATFORM_GUIDES, SIGN_IN_GUIDES, connectBody, connectChoices, defaultChoice, defaultMethod, guideDocs, guideFields, guideMethods, guideSteps, methodLabel,
   signInBody, signInFields, signInMessage, signInRedirect, signInSteps, validateConnect, validateSignIn,
 } from "../lib/socialPlatforms.js";
+import { dateTime } from "../lib/timeText.js";
 import { AccountStatus, DomainInput, LoginField, PlatformIcon, Stepper, Switch } from "./SocialPostsParts.jsx";
 import { useRovingChoice } from "../lib/useRovingChoice.js";
 
@@ -100,7 +101,7 @@ function AccountCard({ account, label, attempt, busy, onReconnect }) {
     </header>
     {notice && account.status !== "disabled" ? <p className="sp-acc-notice"><TriangleAlert size={12} aria-hidden="true" />{account.status === "needs_reconnect" ? "This login stopped working. Reconnect to keep posting." : `Reconnect in ${account.expires_in_days ?? 0} days to keep posting.`}</p> : null}
     {account.check_error && !result ? <p className="sp-acc-notice"><TriangleAlert size={12} aria-hidden="true" />Last test: {account.check_error}</p> : null}
-    <p className="sp-acc-meta">{account.last_posted_at ? `Last post ${formatWhen(account.last_posted_at)}` : "No posts yet"}</p>
+    <p className="sp-acc-meta">{account.last_posted_at ? `Last post ${dateTime(account.last_posted_at, { weekday: true })}` : "No posts yet"}</p>
     <div className="sp-acc-settings">
       <Switch label="Posting on" description="Off holds its posts until you turn it back on." checked={account.enabled} disabled={busy} onChange={enabled => update({ enabled })} />
       <Switch label="Only my own posts" description="Rem, tasks and workflows can't propose posts for this account." checked={account.quiet} disabled={busy} onChange={quiet => update({ quiet })} />

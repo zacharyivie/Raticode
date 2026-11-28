@@ -286,7 +286,8 @@ def context(
         None,
         "--call",
         help="Rem's own calls of one kind: chat_reply, worker_answer, conversation, "
-        "task_update, self_work_plan, self_work_fit, self_work_stop or organization "
+        "task_update, self_work_plan, self_work_fit, self_work_stop, objective_ideas or "
+        "organization "
         "(self_work for the records from before self-work's kinds were split)",
     ),
     run_id: str | None = typer.Option(None, "--run", help="Rem's own calls about one task run"),

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { SwitchControl } from "./SettingControls.jsx";
 import { setAnywhereStatus, useAnywhereStatus, voiceShortcutLabel } from "../lib/voiceShortcut.js";
+import { clockTime } from "../lib/timeText.js";
 
 // Settings > Devices: the system-wide "Dictate to Rem from any app" shortcut. The desktop
 // app registers it; this says plainly whether that worked on this desktop, and on Linux
@@ -35,7 +36,7 @@ export default function DictateAnywhereSettings({ enabled, binding, onChange }) 
   }
 
   const support = status?.support;
-  const lastPressed = status?.lastPressedAt ? new Date(status.lastPressedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+  const lastPressed = status?.lastPressedAt ? clockTime(status.lastPressedAt) : "";
   const desktop = support === "desktop" && status && !status.error ? desktopStatus(status, label) : null;
   const showCommand = Boolean(status?.command) && (Boolean(status?.error) || Boolean(desktop?.command));
   const shownState = !enabled ? "off"

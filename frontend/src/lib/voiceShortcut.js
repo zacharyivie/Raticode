@@ -18,7 +18,7 @@ export const ANYWHERE_COMMAND_ID = "voice.dictateAnywhere";
 
 // "toggle": press once to start and again to stop. "hold": listen only while held.
 export const DICTATION_MODES = [["toggle", "Press to start and stop"], ["hold", "Hold to talk"]];
-export const DEFAULT_DICTATION_MODE = "toggle";
+const DEFAULT_DICTATION_MODE = "toggle";
 
 const composers = new Set();
 let binding = DEFAULT_VOICE_BINDING;

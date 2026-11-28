@@ -41,7 +41,8 @@ export function useDismiss(open, onClose, refs) {
   }, [open, onClose, refs]);
 }
 
-export function Popover({ label, trigger, triggerClassName = "", align = "start", children, className = "", open: controlledOpen, onOpenChange, disabled, title }) {
+// focusPanel moves focus into the panel when it opens, for panels whose first control isn't the obvious start.
+export function Popover({ label, trigger, triggerClassName = "", align = "start", children, className = "", open: controlledOpen, onOpenChange, disabled, title, focusPanel = false }) {
   const [localOpen, setLocalOpen] = useState(false);
   const open = controlledOpen ?? localOpen;
   const setOpen = value => { onOpenChange ? onOpenChange(value) : setLocalOpen(value); };
@@ -50,9 +51,10 @@ export function Popover({ label, trigger, triggerClassName = "", align = "start"
   const refs = useRef([triggerRef, panelRef]).current;
   const dismiss = refocus => { setOpen(false); if (refocus) triggerRef.current?.focus(); };
   useDismiss(open, dismiss, refs);
+  useEffect(() => { if (open && focusPanel) panelRef.current?.focus(); }, [open, focusPanel]);
   return <div className="sb-popover-anchor">
     <button ref={triggerRef} type="button" className={triggerClassName} aria-haspopup="dialog" aria-expanded={open} aria-label={label} title={title || label} disabled={disabled} onClick={() => setOpen(!open)}>{trigger}</button>
-    {open ? <div ref={panelRef} role="dialog" aria-label={label} className={`sb-popover ${className}`} data-align={align}>{typeof children === "function" ? children(dismiss) : children}</div> : null}
+    {open ? <div ref={panelRef} role="dialog" aria-label={label} className={`sb-popover ${className}`} data-align={align} tabIndex={focusPanel ? -1 : undefined}>{typeof children === "function" ? children(dismiss) : children}</div> : null}
   </div>;
 }
 

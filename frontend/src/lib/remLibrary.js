@@ -21,7 +21,7 @@ async function request(options = {}) {
   return payload;
 }
 
-export function refreshRemLibrary() {
+function refreshRemLibrary() {
   inflight ??= request()
     .then((payload) => publish({ loaded: true, error: "", ...payload }))
     .catch((error) => publish({ ...state, loaded: true, error: error.message }))

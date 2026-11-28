@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000295",
+  "id": "10000000-0000-4000-8000-000000000295",
+  "sequence": 295,
+  "type": "desktop.action",
+  "payload": {
+    "op": "selfwork.objectives",
+    "params": {
+      "action": "edit",
+      "id": "8b5defcdf59e",
+      "text": "Raise the trading strategy's risk-adjusted returns",
+      "done_when": "",
+      "global": true,
+      "expected_revision": 5
+    }
+  }
+}

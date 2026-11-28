@@ -23,7 +23,7 @@ const state = { port: 44233, lan_host: "192.168.1.203", enabled: true, network_r
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(__dirname, ".."), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", cacheDir: testViteCacheDir(), root: path.join(__dirname, ".."), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "isolated-pairing-ui-test",
     resolveId(id) { if (id === "/pairing-entry.jsx") return id; },
     load(id) { if (id === "/pairing-entry.jsx") return `import React from "react"; import {createRoot} from "react-dom/client"; import PairedDevices from "/src/components/PairedDevices.jsx"; import "/src/styles/index.css"; createRoot(document.getElementById("root")).render(React.createElement(PairedDevices));`; },

@@ -27,9 +27,8 @@ from gofer.classifiers.jev import (
     JevLimiter,
     JevQuestion,
     build_request,
-    retry_after_seconds,
 )
-from gofer.core.http import HttpRequest, HttpResponse
+from gofer.core.http import HttpRequest, HttpResponse, retry_after_seconds
 from gofer.core.usage_history import resolve_range, usage_history
 from gofer.core.usage_ledger import usage_db
 
@@ -318,6 +317,14 @@ def test_retry_after_accepts_seconds_and_http_dates() -> None:
     assert retry_after_seconds({"Retry-After": "Fri, 13 Nov 2026 12:02:00 GMT"}, now=now) == 120
     assert retry_after_seconds({"Retry-After": "soon"}, now=now) is None
     assert retry_after_seconds({}, now=now) is None
+
+
+def test_a_retry_after_with_a_non_ascii_digit_is_ignored_instead_of_raising() -> None:
+    """Nightly audit, 27 November: headers are read as Latin-1, and "³" passed
+    str.isdigit() then made float() raise, so an HTTP request step reported an internal
+    configuration error instead of the server's status."""
+    for value in ("\xb3", "1\xb2", "\u0663"):
+        assert retry_after_seconds({"Retry-After": value}) is None, value
 
 
 async def test_network_errors_name_the_type_only(tmp_path: Path) -> None:

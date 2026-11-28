@@ -1,9 +1,10 @@
 import SecondBrainProvider, { ResearchProviderContext, useResearchSelection } from "./SecondBrainProvider.jsx";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { CircleCheck, ClipboardPaste, CopyCheck, FileWarning, FolderOpen, Globe, Inbox, Library, Link2, Pencil, Play, Plus, Quote, RefreshCw, ScanText, Tags, Trash2, Unlink, FilePlus2, Repeat, CalendarClock, HardDrive, LockKeyhole, Layers, CaseSensitive, Wrench, ArchiveRestore } from "lucide-react";
-import { formatDay, formatTime, extractionLabel } from "../lib/secondBrain.js";
+import { libraryDay, extractionLabel } from "../lib/secondBrain.js";
+import { clockTime, dateTime, localTimeZone } from "../lib/timeText.js";
 import { HEALTH_KINDS, RECIPES, deadLinkSummary, linkReason } from "../lib/secondBrain.js";
-import { useSecondBrain, openDocument, openDialog, updateDocument, addToCollection, evidenceItem, resolveHealth, startTask, saveJob, removeJob, removeDocument, updateBrain, markSeries, notify, navigate, uid, backfillProvenance, restrictBrainAccess, refreshLibrary } from "../lib/secondBrainStore.js";
+import { useSecondBrain, openDocument, openDialog, updateDocument, addToCollection, evidenceItem, resolveHealth, startTask, rebuildIndex, saveJob, removeJob, removeDocument, updateBrain, markSeries, notify, navigate, uid, backfillProvenance, restrictBrainAccess, refreshLibrary } from "../lib/secondBrainStore.js";
 import { DraftInput, Empty, Menu, Pill, ProgressBar, TypeIcon } from "./SecondBrainParts.jsx";
 import JobSourceRules from "./SecondBrainJobSources.jsx";
 import { BackupSettings } from "./SecondBrainBackups.jsx";
@@ -26,7 +27,7 @@ export function InboxView({ brain }) {
       <TypeIcon type={doc.type} size={16} />
       <div className="sb-row-main">
         <button type="button" className="sb-row-title" onClick={() => openDocument(doc.id, { preview: false })}>{doc.title}</button>
-        <p>{doc.source?.url ? <span className="sb-mono">{doc.source.url}</span> : <span>{doc.path}</span>}<span>Captured {doc.dates.captured ? formatTime(doc.dates.captured) : formatDay(doc.dates.added)}</span>{doc.extraction !== "ready" ? <Pill tone="warning">{extractionLabel(doc.extraction)}</Pill> : null}</p>
+        <p>{doc.source?.url ? <span className="sb-mono">{doc.source.url}</span> : <span>{doc.path}</span>}<span>Captured {doc.dates.captured ? dateTime(doc.dates.captured) : libraryDay(doc.dates.added)}</span>{doc.extraction !== "ready" ? <Pill tone="warning">{extractionLabel(doc.extraction)}</Pill> : null}</p>
         {missing.length ? <p className="sb-hint">Missing {missing.join(", ")}. <button type="button" className="sb-link" onClick={() => openDialog("edit-metadata", { docId: doc.id })}>Add metadata</button></p> : null}
         <div className="sb-row-tags"><Tags size={13} aria-hidden="true" /><DraftInput label={`Tags for ${doc.title}`} className="sb-tags-input" placeholder="Add tags, separated by commas" value={doc.tags.join(", ")} onCommit={value => updateDocument(doc.id, { tags: value.split(",").map(tag => tag.trim().toLowerCase()).filter(Boolean) })} /></div>
       </div>
@@ -154,7 +155,7 @@ export function HealthView({ brain }) {
     {kind === "link" && visible.length ? <DeadLinkList key={brain.id} issues={visible} documents={documents} selected={selectedIds} onSelect={id => setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])} onFix={fix} /> : visible.length ? <HealthProblemList key={`${brain.id}:${kind}`} issues={visible} documents={documents} selected={selectedIds} onSelect={id => setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])} onFix={fix} /> : <Empty icon={CircleCheck} title={kind ? "Nothing to fix here" : "Your library looks healthy"}>Links resolve, documents are searchable and citations point to one passage.</Empty>}
     <SeriesPanel series={(store.series || []).filter(group => group.brainId === brain.id)} documents={documents} />
     <section className="sb-index-panel"><h4>Search index</h4><dl className="sb-facts">
-      {[["State", brain.index.state === "updating" ? `Updating · ${brain.index.progress}%` : "Up to date"], ["Documents", brain.index.documents.toLocaleString()], ["Passages", brain.index.passages.toLocaleString()], ["Waiting for extraction", brain.index.pending], ["Extraction failed", brain.index.failed], ["Generation", `#${brain.index.generation} · as of ${new Date(brain.index.asOf).toLocaleTimeString()}`]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}
+      {[["State", brain.index.state === "updating" ? `Updating · ${brain.index.progress}%` : "Up to date"], ["Documents", brain.index.documents.toLocaleString()], ["Passages", brain.index.passages.toLocaleString()], ["Waiting for extraction", brain.index.pending], ["Extraction failed", brain.index.failed], ["Generation", `#${brain.index.generation} · as of ${clockTime(brain.index.asOf)}`]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}
     </dl>{brain.index.state === "updating" ? <ProgressBar value={brain.index.progress} label="Index progress" /> : null}<p className="sb-hint">Search keeps answering from the last published generation while new documents are processed.</p></section>
   </div>;
 }
@@ -173,7 +174,7 @@ function JobEditor({ job, brain, store, onDone }) {
   const triggers = [["manual", "Only when run manually"], ["schedule", "On a schedule"], ["added", "When a document is added"], ["changed", "When a cited source changes"]];
   const [day, setDay] = useState(job?.trigger.day || "Mondays");
   const [time, setTime] = useState(job?.trigger.time || "09:00");
-  return <form className="sb-job-editor" onSubmit={event => { event.preventDefault(); if (sourceError) return; const trigger = draft.trigger.kind === "schedule" ? { kind: "schedule", day, time, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, label: `${day} at ${time}` } : draft.trigger; saveJob({ ...draft, scope: jobScopeLabel(draft.sourceRules, collections, searches), provider, name: draft.name.trim() || RECIPES.find(([id]) => id === draft.recipe)[1], trigger }); notify(job ? "Job saved." : "Job created."); onDone(); }}>
+  return <form className="sb-job-editor" onSubmit={event => { event.preventDefault(); if (sourceError) return; const trigger = draft.trigger.kind === "schedule" ? { kind: "schedule", day, time, timezone: localTimeZone(), label: `${day} at ${time}` } : draft.trigger; saveJob({ ...draft, scope: jobScopeLabel(draft.sourceRules, collections, searches), provider, name: draft.name.trim() || RECIPES.find(([id]) => id === draft.recipe)[1], trigger }); notify(job ? "Job saved." : "Job created."); onDone(); }}>
     <h4>{job ? "Edit research job" : "New research job"}</h4>
     <div className="sb-form-grid">
       <label className="sb-field"><span>Name</span><input value={draft.name} placeholder={RECIPES.find(([id]) => id === draft.recipe)[1]} onChange={event => set({ name: event.target.value })} /></label>
@@ -206,7 +207,7 @@ export function JobsView({ brain }) {
       <div className="sb-job-head"><Repeat size={16} aria-hidden="true" /><strong>{job.name}</strong>
         <label className="sb-switch"><input type="checkbox" role="switch" checked={job.enabled} onChange={() => saveJob({ ...job, enabled: !job.enabled })} /><span>{job.enabled ? "On" : "Off"}</span></label></div>
       <dl className="sb-job-facts"><div><dt>Reads</dt><dd>{describeJobSources(jobSourceRules(job, store.collections.filter(item => item.brainId === brain.id), store.savedSearches.filter(item => item.brainId === brain.id)), store.collections, store.savedSearches)}</dd></div><div><dt>Runs</dt><dd><CalendarClock size={12} aria-hidden="true" />{job.trigger.label}</dd></div><div><dt>Writes to</dt><dd className="sb-mono">{job.destination}</dd></div><div><dt>Limits</dt><dd>{job.limits.documents} documents · {job.limits.turns} Rem turns</dd></div></dl>
-      <div className="sb-job-foot">{job.lastRun ? <span>Last run {formatDay(job.lastRun.at, { relative: true }).toLowerCase()} · <Pill tone={job.lastRun.status === "done" ? "success" : "warning"}>{job.lastRun.status === "done" ? "Completed" : "Needs review"}</Pill> {job.lastRun.detail}</span> : <span className="sb-muted">Never run</span>}
+      <div className="sb-job-foot">{job.lastRun ? <span>Last run {libraryDay(job.lastRun.at, { relative: true }).toLowerCase()} · <Pill tone={job.lastRun.status === "done" ? "success" : "warning"}>{job.lastRun.status === "done" ? "Completed" : "Needs review"}</Pill> {job.lastRun.detail}</span> : <span className="sb-muted">Never run</span>}
         {job.lastRun?.remainingCount ? <span className="sb-muted">{job.lastRun.remainingCount} sources waiting for a later run.</span> : null}
         <div className="sb-actions"><small>{job.provider?.profile || job.provider?.id || "Choose a provider before enabling"}</small><button type="button" className="sb-mini-button" onClick={() => runNow(job)}><Play size={12} />Run now</button><button type="button" className="sb-mini-button" onClick={() => setEditing(job.id)}><Pencil size={12} />Edit</button><button type="button" className="sb-icon-button" aria-label={`Delete ${job.name}`} title="Delete job" onClick={() => removeJob(job.id)}><Trash2 size={14} /></button></div></div>
     </li>)}</ul> : !editing ? <Empty icon={Repeat} title="No research jobs" actions={<button type="button" className="sb-button sb-primary" onClick={() => setEditing("new")}>New job</button>}>Summarize new documents, prepare a weekly digest or refresh a comparison when its sources change.</Empty> : null}
@@ -269,8 +270,8 @@ export function BrainSettingsView({ brain }) {
       <div className="sb-actions"><button type="button" className="sb-button" onClick={() => openDialog("bibliography")}><Link2 size={14} />Import bibliography…</button><button type="button" className="sb-button" onClick={() => openDialog("bibliography", { exporting: true })}>Export bibliography…</button></div>
     </section>
     <section><h4>Index</h4>
-      <dl className="sb-facts">{[["Documents", brain.index.documents.toLocaleString()], ["Passages", brain.index.passages.toLocaleString()], ["Generation", `#${brain.index.generation}`], ["As of", formatTime(brain.index.asOf)]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl>
-      <div className="sb-actions"><button type="button" className="sb-button" onClick={() => startTask({ kind: "index", label: `Rebuilding the ${brain.name} index`, steps: ["Scanning folder", "Extracting text", "Building passages", "Publishing generation"],  })}><RefreshCw size={14} />Rebuild index</button><button type="button" className="sb-button" onClick={() => navigate("health")}><FileWarning size={14} />Library health</button></div>
+      <dl className="sb-facts">{[["Documents", brain.index.documents.toLocaleString()], ["Passages", brain.index.passages.toLocaleString()], ["Generation", `#${brain.index.generation}`], ["As of", dateTime(brain.index.asOf) || "Unknown"]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl>
+      <div className="sb-actions"><button type="button" className="sb-button" onClick={() => rebuildIndex(brain)}><RefreshCw size={14} />Rebuild index</button><button type="button" className="sb-button" onClick={() => navigate("health")}><FileWarning size={14} />Library health</button></div>
       <p className="sb-hint">Rebuilding replaces only the cache. Documents, citations and report evidence are kept.</p>
     </section>
     <section className="sb-danger-zone"><h4>Remove brain</h4><p className="sb-hint">Removes {brain.name} from Raticode’s list. The folder and every file in it stay where they are.</p><button type="button" className="sb-button" data-danger onClick={() => openDialog("remove", { brainId: brain.id })}><HardDrive size={14} />Remove from list…</button></section>

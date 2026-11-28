@@ -176,7 +176,7 @@ def test_rem_cannot_create_a_company_with_auto_mode_already_on(manager, tmp_path
 
 def test_employees_cannot_turn_auto_mode_on(manager, tmp_path):
     org = company(manager, tmp_path, auto=False)
-    with pytest.raises(ValueError, match="Employees cannot configure"):
+    with pytest.raises(ValueError, match="Workers cannot configure"):
         manager.call(
             "",
             "employee:lead",

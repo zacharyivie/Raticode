@@ -84,4 +84,20 @@ class ChatLinksTest {
         assertEquals(emptyList<String>(), view.messages[1].fileMentions)
         assertEquals(ChatLink.File("/a/b c #2?.txt", "b c #2?.txt"), ChatLinks.mention("/a/b c #2?.txt"))
     }
+
+    @Test fun linkedFilesShowUnderRemsMessagesOnly() {
+        fun file(name: String, href: String) = JSONObject().put("name", name).put("size", 12).put("href", href)
+        val linked = org.json.JSONArray().put(file("after fix.png", "/shots/after fix.png")).put(file("site", "https://raticode.dev"))
+            .put(file("after fix.png", "/shots/after fix.png"))
+        (0 until 10).forEach { linked.put(file("$it.log", "/logs/$it.log")) }
+        val view = DesktopViews.parse("rem.home", JSONObject().put("messages", org.json.JSONArray()
+            .put(JSONObject().put("id", "r").put("role", "rem").put("body", "x").put("linked_files", linked))
+            .put(JSONObject().put("id", "u").put("role", "user").put("body", "x").put("linked_files", linked)))) as RemHome
+        val files = view.messages[0].linkedFiles
+        // File links only, once each, at most 8; each keeps the link the phone sends back with files.link.
+        assertEquals(8, files.size)
+        assertEquals(RemLinkedFile("after fix.png", 12, ChatLink.File("/shots/after fix.png", "after fix.png")), files[0])
+        assertEquals("/logs/6.log", files.last().link.destination)
+        assertEquals(emptyList<RemLinkedFile>(), view.messages[1].linkedFiles)
+    }
 }

@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { formatWhen } from "../lib/remHome.js";
-import { openRemThread } from "../lib/remHomeStore.js";
+import { relativeWhen } from "../lib/remHome.js";
+import { openRemThread, request as remRequest } from "../lib/remHomeStore.js";
+import { threadsLine } from "../lib/remObjectives.js";
 import { ALLOWANCE_MODES, activityLine, allowanceMode, allowancePaceLine, autoApproveHint, dailyAllowanceLine, hasAllowanceModes, paceRateWarning, autoApproveWarning, autoPullHint, boardOn, cancelSelfWorkWindow, cappedThreads, hasAutoApprove, modeLabel, remProjectChoices, saveParticipant, saveSelfWork, savedSwitchNote, saveSelfWorkStop, selfWorkAccountChange, selfWorkAccountRows, selfWorkLimitsLine, selfWorkLine, selfWorkStop, selfWorkWindows, lastStopLine, stopJudgmentLine, stopPayload, useKanban, windowDetail, withProject } from "../lib/remKanban.js";
 import { NumberControl, SwitchControl } from "./SettingControls.jsx";
 import SelfWorkReport from "./SelfWorkReport.jsx";
+import { ProjectObjectivesList } from "./RemObjectives.jsx";
 import { useRovingChoice } from "../lib/useRovingChoice.js";
 import "./Kanban.css";
 
 // Settings > Rem: self-work's switch, thread limit, backlog pulling and Rem's projects. They
 // live in Rem's backend, so they apply on every device and don't need the Kanban board.
 export default function SelfWorkSettings() {
-  const { board, selfWork: view, error, run } = useKanban(true, 5000);
+  const { board, selfWork: view, error, setError, refresh, run } = useKanban(true, 5000);
   if (!view) {
     return <section id="settings-self-work" aria-label="Self-work" className="space-y-2 pb-3">
       <h3 className="text-xs font-semibold">Self-work</h3>
@@ -25,6 +27,21 @@ export default function SelfWorkSettings() {
   const choices = remProjectChoices(board);
   const windows = selfWorkWindows(view);
   const switchNote = savedSwitchNote(view);
+  const shares = new Map((view.projects || []).map(row => [row.root, row]));
+  // A change to one project's objectives, with the revision this page shows; the page reads
+  // the list back from the next self-work view.
+  const changeObjectives = async change => {
+    try {
+      const listed = await remRequest("/objectives", { method: "POST", body: { ...change, expected_revision: view.objectives?.revision ?? 0 } });
+      await refresh();
+      return listed ?? true;
+    } catch (failure) { setError(failure.message); return null; }
+  };
+  // Ask Rem for one project's objectives; the next self-work view shows how it goes.
+  const askObjectives = async root => {
+    await remRequest("/objectives/ask", { method: "POST", body: { project: root } });
+    await refresh();
+  };
   return <section id="settings-self-work" aria-label="Self-work" className="space-y-3 pb-3" data-testid="self-work-settings">
     <div className="flex items-center justify-between gap-2">
       <h3 className="text-xs font-semibold">Self-work</h3>
@@ -67,8 +84,15 @@ export default function SelfWorkSettings() {
         <input type="checkbox" checked={choice.checked} disabled={!choice.checked && !choice.assignable}
           onChange={event => run(() => saveParticipant(rem, withProject(rem.projects, choice.root, event.target.checked)))} />
         <span className="min-w-0 truncate">{choice.name}</span>
+        {choice.checked && shares.get(choice.root) ? <span className="ml-auto shrink-0 text-[11px] text-muted" data-testid="self-work-project-share">{shares.get(choice.root).effort_percent}% · {threadsLine(shares.get(choice.root))}</span> : null}
         {choice.unavailable ? <span className="text-[11px] text-amber-700">Not available right now</span> : null}
       </label>) : <p className="text-[11px] text-muted">Open a project in Raticode to choose it here.</p>}
+    </fieldset> : null}
+    {view.projects?.length ? <fieldset className="space-y-1" data-testid="self-work-objectives">
+      <legend className="text-xs font-medium text-ink">Objectives</legend>
+      <p className="text-[11px] text-muted">Each project&rsquo;s own objectives steer only its tickets and research; the global ones in Rem&rsquo;s side pane steer every project. Its level of effort is its share of the threads, by threads held at once, not tasks finished. A project with nothing to start lends its threads to the others until it has work again.</p>
+      <ProjectObjectivesList objectives={view.objectives} projects={view.projects} onChange={changeObjectives} onAsk={askObjectives}
+        onEffort={(root, percent) => save({ project_effort: { [root]: percent } })} />
     </fieldset> : null}
     {state.activity?.length ? <ul className="kb-activity text-xs" aria-label="Now working on">{state.activity.map(item => <li key={item.thread_id || activityLine(item)}>
       {item.thread_id ? <button type="button" onClick={() => openRemThread(item.thread_id)}>{activityLine(item)}</button> : <span>{activityLine(item)}</span>}
@@ -194,7 +218,7 @@ function SelfWorkWindows({ windows, onCancel }) {
     </div>
     <button type="button" className="kb-open shrink-0 text-[11px]" title={current ? "Self-work stops now and Rem posts what it did" : "Drop this window"} onClick={() => onCancel(item.id)}>{current ? "End now" : "Cancel"}</button>
   </li>;
-  const ended = last ? formatWhen(last.ended_at, new Date(), { past: true }) : "";
+  const ended = last ? relativeWhen(last.ended_at, new Date(), { past: true }) : "";
   return <div className="space-y-2" data-testid="self-work-windows">
     {active || upcoming.length ? <ul className="space-y-2" aria-label="Self-work windows">
       {active ? row(active, true) : null}

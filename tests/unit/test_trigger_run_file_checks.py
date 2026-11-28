@@ -222,7 +222,7 @@ def test_an_earlier_step_that_rewrites_a_later_script_stops_it(
     assert error["details"]["role"] == "script"
     assert not (project / "ran.txt").exists()
     latest = engine.store.events(trigger_id=trigger_id)[0]
-    assert (latest.status, latest.message) == ("failed", CHANGED)
+    assert (latest.status, latest.message) == ("failed", f"Step second failed: {CHANGED}")
 
     record = engine.store.get(trigger_id)
     status = approval_status(engine.store, record)

@@ -534,7 +534,9 @@ def test_turn_environment_puts_wrappers_first(tmp_path: Path, monkeypatch: pytes
     assert turn_environment(tmp_path, None, thread_id="t", label="") == {}
 
 
-def test_scoped_command_uses_the_slice_only_when_asked() -> None:
+def test_scoped_command_uses_the_slice_only_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    # This computer's own bus may be out of reach (a sandboxed test run); stand in for one.
+    monkeypatch.setattr(command_slots, "_user_bus_reachable", lambda path: True)
     command = ["claude", "--print"]
     assert command_slots.scoped_command(command, {}) == command
     scoped = command_slots.scoped_command(command, {command_slots.SLICE_ENV: "raticode.slice"})
@@ -542,6 +544,108 @@ def test_scoped_command_uses_the_slice_only_when_asked() -> None:
     assert command_slots.scoped_command(scoped, {command_slots.SLICE_ENV: "raticode.slice"}) == (
         scoped
     )
+
+
+def test_sandboxed_commands_skip_the_scope_they_cannot_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(command_slots, "_user_bus_reachable", lambda path: True)
+    command = ["bash", "-c", "echo ready"]
+    env = {command_slots.SLICE_ENV: command_slots.SLICE, command_slots.SANDBOX_ENV: "1"}
+    assert command_slots.scoped_command(command, env) == command
+
+
+def test_commands_skip_the_scope_when_the_user_bus_is_out_of_reach(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    command_slots._user_bus_reachable.cache_clear()
+    created: list[object] = []
+
+    def no_sockets(*args: object, **kwargs: object) -> None:
+        created.append(args)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(command_slots.socket, "socket", no_sockets)
+    command = ["bash", "-c", "echo ready"]
+    env = {
+        command_slots.SLICE_ENV: command_slots.SLICE,
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={tmp_path / 'bus'}",
+    }
+    try:
+        assert command_slots.scoped_command(command, env) == command
+        assert command_slots.scoped_command(command, env) == command
+        # The check runs once per process, not once per command.
+        assert len(created) == 1
+    finally:
+        command_slots._user_bus_reachable.cache_clear()
+
+
+def test_commands_skip_the_scope_when_nothing_listens_on_the_bus(tmp_path: Path) -> None:
+    command_slots._user_bus_reachable.cache_clear()
+    command = ["bash", "-c", "echo ready"]
+    env = {command_slots.SLICE_ENV: command_slots.SLICE, "XDG_RUNTIME_DIR": str(tmp_path)}
+    try:
+        assert command_slots.scoped_command(command, env) == command
+    finally:
+        command_slots._user_bus_reachable.cache_clear()
+
+
+def test_user_bus_socket_follows_the_session_address() -> None:
+    socket_for = command_slots.user_bus_socket
+    assert socket_for({"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/7/bus"}) == (
+        "/run/user/7/bus"
+    )
+    assert socket_for({"DBUS_SESSION_BUS_ADDRESS": "unix:abstract=/tmp/dbus-x,guid=1"}) == (
+        "\0/tmp/dbus-x"
+    )
+    assert socket_for(
+        {"DBUS_SESSION_BUS_ADDRESS": "tcp:host=h;unix:path=/a%20b/bus", "XDG_RUNTIME_DIR": "/x"}
+    ) == ("/a b/bus")
+    assert socket_for({"XDG_RUNTIME_DIR": "/run/user/9"}) == "/run/user/9/bus"
+    assert socket_for({}) == f"/run/user/{os.getuid()}/bus"
+
+
+def test_sandboxed_workflow_step_runs_without_a_systemd_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from gofer.rattish.run_service import new_run_id
+    from gofer.rattish.trigger_service import TriggerRun, run_in_process
+    from gofer.rattish.workspaces import create_registered_workflow
+
+    # A systemd-run that can't reach the user bus, as inside a sandboxed turn.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemd_run = fake_bin / "systemd-run"
+    systemd_run.write_text("#!/bin/sh\necho 'Failed to connect to user bus' >&2\nexit 1\n")
+    systemd_run.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv(command_slots.SLICE_ENV, command_slots.SLICE)
+    monkeypatch.setenv(command_slots.SANDBOX_ENV, "1")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    data_dir = tmp_path / "app-data"
+    registered = create_registered_workflow(project, "Sandboxed step", registry_dir=data_dir)
+    registered.entrypoint.write_text(
+        "Rattish: 1\n\nWorkflow:\n  name: Sandboxed step\n\n"
+        'Node say:\n  type: bash-command\n  command: "printf ready"\n',
+        encoding="utf-8",
+    )
+    result = run_in_process(
+        TriggerRun(
+            source=registered.entrypoint,
+            workflow_id=registered.workflow_id,
+            inputs={},
+            events=[],
+            data_dir=data_dir,
+            run_id=new_run_id(),
+            cancel_event=threading.Event(),
+        )
+    )
+    assert result.ok, result.document.get("error")
+    [step] = result.document["runs"]
+    assert (step["node_id"], step["outcome"]) == ("say", "success")
+    assert step["output"]["stdout"] == "ready"
 
 
 def test_claude_settings_register_the_hook(tmp_path: Path) -> None:
@@ -662,6 +766,8 @@ def test_run_caps_commands_only_inside_raticodes_slice(
 
     monkeypatch.setattr(command_slots, "_run_child", run_child)
     monkeypatch.setattr(command_slots, "memory_total_bytes", lambda: 16 * 1024**3)
+    # This computer's own bus may be out of reach (a sandboxed test run); stand in for one.
+    monkeypatch.setattr(command_slots, "_user_bus_reachable", lambda path: True)
     monkeypatch.setenv(command_slots.ROOT_ENV, str(tmp_path))
     monkeypatch.delenv(command_slots.HELD_ENV, raising=False)
     monkeypatch.delenv(command_slots.SLICE_ENV, raising=False)
@@ -670,6 +776,29 @@ def test_run_caps_commands_only_inside_raticodes_slice(
     monkeypatch.setenv(command_slots.SLICE_ENV, command_slots.SLICE)
     assert command_slots.run("test", ["pytest"]) == 0
     assert calls == [None, int(16 * 1024**3 * command_slots.COMMAND_MEMORY_SHARE)]
+
+
+def test_a_queued_command_runs_without_its_own_scope_when_the_user_bus_is_out_of_reach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # systemd-run --user can't start a scope then, and the command would never run.
+    _no_memory_pressure(monkeypatch)
+    calls: list[int | None] = []
+
+    def run_child(argv, env, *, limit=None, notify=None):
+        calls.append(limit)
+        return 0
+
+    monkeypatch.setattr(command_slots, "_run_child", run_child)
+    monkeypatch.setattr(command_slots, "memory_total_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setattr(command_slots, "_user_bus_reachable", lambda path: False)
+    monkeypatch.setenv(command_slots.ROOT_ENV, str(tmp_path))
+    monkeypatch.delenv(command_slots.HELD_ENV, raising=False)
+    monkeypatch.setenv(command_slots.SLICE_ENV, command_slots.SLICE)
+    monkeypatch.delenv(command_slots.SANDBOX_ENV, raising=False)
+    monkeypatch.setattr(os, "nice", lambda _n: 0)
+    assert command_slots.run("test", ["pytest"]) == 0
+    assert calls == [None]
 
 
 def test_command_watch_stops_a_runaway_command_itself_and_says_why() -> None:

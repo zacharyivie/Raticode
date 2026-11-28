@@ -17,3 +17,10 @@ identity for wrong-pin tests.
 
 The schemas are in `src/gofer/devices/protocol/v2` at the repository root. No real messages, paid model
 calls, public relay traffic or workflow execution occurs in these probes.
+
+## Board rule cases
+
+`kanban-cases` holds tables of board rules that the desktop and the phone must answer the same
+way. `undo-move.json` lists when a move offers Undo. `frontend/src/lib/remKanban.test.mjs` checks the
+desktop's `canUndoMove` against every case, and the phone's `KanbanTest.kt` checks
+`Kanban.canUndoMove`, reading the folder as a test resource. Change a rule in both apps and here together.

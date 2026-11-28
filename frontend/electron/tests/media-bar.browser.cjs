@@ -12,6 +12,8 @@ const path = require("node:path");
 const { BrowserWindow, Menu, WebContentsView, app, clipboard, dialog, ipcMain, nativeImage, session, shell, webContents } = require("electron");
 const { createBrowserSessions } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 15_000, interval: 100 };
 
 const frontend = path.join(__dirname, "..", "..");
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-media-bar-test-"));
@@ -39,16 +41,6 @@ const PAGES = {
   "/muted": `<!doctype html><title>Muted page</title><body><script>${WAV} audio.muted = true;</script>`,
   "/quiet": "<!doctype html><title>Quiet page</title><body>Nothing playing</body>",
 };
-
-async function waitFor(check, message, timeout = 15000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
 
 async function compileBar(esbuild) {
   const { default: tailwind } = await import("@tailwindcss/postcss");
@@ -148,13 +140,13 @@ async function run() {
   }
   const load = async (route) => {
     await page(`window.goferBrowser.navigate(window.tab.id, ${JSON.stringify(`${base}${route}`)})`);
-    await waitFor(async () => guest()?.getURL() === `${base}${route}` && !guest().isLoading(), `${route} did not load`);
+    await waitFor(async () => guest()?.getURL() === `${base}${route}` && !guest().isLoading(), `${route} did not load`, WAIT);
   };
 
   // Nothing playing: no bar, and no space taken.
   await page(`window.openTab(${JSON.stringify(`${base}/player`)})`);
-  await waitFor(() => guest() && guest().getURL() === `${base}/player` && !guest().isLoading(), "the tab did not load");
-  await waitFor(() => page("window.tab && window.goferBrowser.mediaSessions().then(() => true)"), "the bridge did not answer");
+  await waitFor(() => guest() && guest().getURL() === `${base}/player` && !guest().isLoading(), "the tab did not load", WAIT);
+  await waitFor(() => page("window.tab && window.goferBrowser.mediaSessions().then(() => true)"), "the bridge did not answer", WAIT);
   await new Promise((resolve) => setTimeout(resolve, 800));
   assert.equal(await hasBar(), false, "a loaded page that plays nothing opened the bar");
   assert.equal(await page("document.getElementById('bar').offsetHeight"), 0);
@@ -163,20 +155,20 @@ async function run() {
   // It starts: title, artist, thumbnail and the page's own controls.
   await page("document.getElementById('typing').focus()");
   await play();
-  await waitFor(hasBar, "playback never opened the bar");
-  await waitFor(async () => /First song/.test(await barText()) && /The Band/.test(await barText()), "the bar did not show the track");
-  await waitFor(() => page(`${bar}.querySelector('img')?.naturalWidth > 0`), "the thumbnail did not load");
+  await waitFor(hasBar, "playback never opened the bar", WAIT);
+  await waitFor(async () => /First song/.test(await barText()) && /The Band/.test(await barText()), "the bar did not show the track", WAIT);
+  await waitFor(() => page(`${bar}.querySelector('img')?.naturalWidth > 0`), "the thumbnail did not load", WAIT);
   const height = await page(`${bar}.getBoundingClientRect().height`);
   assert.ok(height > 0 && height <= 30, `the bar is ${height}px tall`);
   assert.deepEqual(await disabledControls(), [false, false, false]);
 
   // Looking at the playing tab hides the bar, and looking away brings it back.
   await page("window.viewTabs(['tab']); true");
-  await waitFor(async () => !(await hasBar()), "the bar stayed over the tab that plays");
+  await waitFor(async () => !(await hasBar()), "the bar stayed over the tab that plays", WAIT);
   assert.equal(await page("document.getElementById('bar').offsetHeight"), 0, "the hidden bar still takes space");
   assert.equal(await inGuest("document.querySelector('audio').paused"), false, "hiding the bar stopped playback");
   await page("window.viewTabs(['some-other-tab']); true");
-  await waitFor(hasBar, "the bar didn't return on another tab");
+  await waitFor(hasBar, "the bar didn't return on another tab", WAIT);
   await page("window.viewTabs([]); true");
 
   if (process.env.RATICODE_MEDIA_BAR_SHOT) {
@@ -187,21 +179,21 @@ async function run() {
   // Controls work with real clicks while the tab is hidden, as in another area.
   await page("window.showTab(false).then(() => true)");
   await click("Next");
-  await waitFor(async () => (await inGuest("document.title")) === "next:1", "Next did not reach the page");
-  await waitFor(async () => /Song 1/.test(await barText()), "the bar did not follow the new track");
+  await waitFor(async () => (await inGuest("document.title")) === "next:1", "Next did not reach the page", WAIT);
+  await waitFor(async () => /Song 1/.test(await barText()), "the bar did not follow the new track", WAIT);
   await click("Previous");
-  await waitFor(async () => (await inGuest("document.title")) === "previous:0", "Previous did not reach the page");
+  await waitFor(async () => (await inGuest("document.title")) === "previous:0", "Previous did not reach the page", WAIT);
   assert.equal(await page("document.activeElement.id"), "typing", "a control took the keyboard");
   assert.equal(await inGuest("document.querySelector('audio').paused"), false, "playback stopped while the tab was hidden");
 
   // Pause keeps the bar with a Play button; Play resumes.
   await click("Pause");
-  await waitFor(() => inGuest("document.querySelector('audio').paused"), "Pause did not reach the page");
-  await waitFor(() => page(`Boolean(${button("Play")})`), "the toggle did not change to Play");
+  await waitFor(() => inGuest("document.querySelector('audio').paused"), "Pause did not reach the page", WAIT);
+  await waitFor(() => page(`Boolean(${button("Play")})`), "the toggle did not change to Play", WAIT);
   assert.equal(await hasBar(), true);
   await click("Play");
-  await waitFor(async () => !(await inGuest("document.querySelector('audio').paused")), "Play did not resume");
-  await waitFor(() => page(`Boolean(${button("Pause")})`), "the toggle did not change back");
+  await waitFor(async () => !(await inGuest("document.querySelector('audio').paused")), "Play did not resume", WAIT);
+  await waitFor(() => page(`Boolean(${button("Pause")})`), "the toggle did not change back", WAIT);
   await page("window.showTab(true).then(() => true)");
 
   // A same-page address change keeps playing and keeps the bar.
@@ -211,14 +203,14 @@ async function run() {
 
   // Leaving the page closes it, and a quiet page doesn't reopen it.
   await load("/quiet");
-  await waitFor(async () => !(await hasBar()), "the bar outlived the page");
+  await waitFor(async () => !(await hasBar()), "the bar outlived the page", WAIT);
   await new Promise((resolve) => setTimeout(resolve, 2500));
   assert.equal(await hasBar(), false, "a page with no media reopened the bar");
 
   // A page with no media session: its own title, and only play/pause works.
   await load("/plain");
   await play();
-  await waitFor(hasBar, "a plain player never opened the bar");
+  await waitFor(hasBar, "a plain player never opened the bar", WAIT);
   assert.match(await barText(), /Plain page/);
   assert.deepEqual(await disabledControls(), [true, false, true]);
   assert.equal(await page(`${bar}.querySelector('img')`), null, "no picture to show");
@@ -226,7 +218,7 @@ async function run() {
 
   // A muted element is not playing media.
   await load("/muted");
-  await waitFor(async () => !(await hasBar()), "the bar outlived the plain page");
+  await waitFor(async () => !(await hasBar()), "the bar outlived the plain page", WAIT);
   await play();
   await new Promise((resolve) => setTimeout(resolve, 2500));
   assert.equal(await hasBar(), false, "a muted element opened the bar");
@@ -234,9 +226,9 @@ async function run() {
   // Closing the tab closes the bar.
   await load("/plain");
   await play();
-  await waitFor(hasBar, "the plain player did not reopen the bar");
+  await waitFor(hasBar, "the plain player did not reopen the bar", WAIT);
   await page("window.goferBrowser.close(window.tab.id)");
-  await waitFor(async () => !(await hasBar()), "the bar outlived its tab");
+  await waitFor(async () => !(await hasBar()), "the bar outlived its tab", WAIT);
 
   server.close();
   console.log("Media bar checks passed.");

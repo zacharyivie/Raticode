@@ -366,3 +366,21 @@ def atomic_binary_output(
                 temporary_path.unlink(missing_ok=True)
             finally:
                 windows_handles.close()
+
+
+def replace_file(path: Path, data: bytes, *, mode: int = 0o600) -> None:
+    """Replace ``path`` with ``data`` all at once; only this account can read it by default.
+
+    The parent folder is created and its links resolved once, so a data folder or Second
+    Brain reached through a symlink keeps working. From there the write is pinned to that
+    folder: a random temporary name opened without following links, mode 0600 from the
+    moment it exists, flushed to disk, then renamed over ``path``. Any other ``mode`` is
+    set on the open file before it gets its name.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    destination = path.parent.resolve(strict=True) / path.name
+    with atomic_binary_output(destination) as output:
+        output.write(data)
+        if mode != 0o600 and hasattr(os, "fchmod"):
+            os.fchmod(output.fileno(), mode)

@@ -1,11 +1,12 @@
 """Social posts on a paired phone: the review list and the user's decisions.
 
 ``posts.list`` sends the posts the Posts dashboard shows, newest decisions first, with
-each platform's text, its "see more" fold, the flags and timing notes, and which
-decisions each post takes now. ``posts.decide`` applies one decision through
-``SocialService`` as the user, the same calls the dashboard makes, with ``via: phone`` in
-the audit log. A phone with Use Raticode from this phone on has the user's trust, so its
-tap is the user's approval; like every phone request it passes the phone guard first.
+each platform's text, its "see more" fold, the flags and timing notes, the platform
+copies Raticode couldn't delete, and which decisions each post takes now.
+``posts.decide`` applies one decision through ``SocialService`` as the user, the same
+calls the dashboard makes, with ``via: phone`` in the audit log. A phone with Use Raticode
+from this phone on has the user's trust, so its tap is the user's approval; like every
+phone request it passes the phone guard first.
 
 Approval stays pinned to what the phone was shown: the phone sends the post's
 ``content_hash`` from ``posts.list`` and a post that changed since is refused. Text longer
@@ -36,6 +37,8 @@ DECISIONS = frozenset(
         "cancel",
         "publish",
         "mark_posted",
+        "retry_copy",
+        "copy_deleted",
         "pause",
         "resume",
     }
@@ -57,7 +60,12 @@ LANES = (
 _CODES = {"not_found": "not_found", "conflict": "conflict", "forbidden": "unauthorized"}
 
 
-def _lane(state: str) -> str:
+def _lane(post: Mapping[str, Any]) -> str:
+    """The post's lane. A copy that couldn't be deleted puts it in problems, as on the computer."""
+    state = post["state"]
+    reviewing = state in {"proposed", "changes_requested", "draft"}
+    if not reviewing and any(c.get("error") for c in post.get("platform_copies") or []):
+        return "problems"
     return next((name for name, states in LANES if state in states), "done")
 
 
@@ -85,7 +93,7 @@ class PhonePosts:
         snapshot = data["snapshot"]
         posts = [post for post in snapshot["posts"] if post["state"] != "declined"]
         order = {name: index for index, (name, _) in enumerate(LANES)}
-        posts.sort(key=lambda post: order[_lane(post["state"])])
+        posts.sort(key=lambda post: order[_lane(post)])
         accounts = snapshot.get("accounts") or []
         return {
             "paused": bool(snapshot.get("paused")),
@@ -154,7 +162,7 @@ class PhonePosts:
             "id": post["id"],
             "title": _text(post.get("title"), 200),
             "state": state,
-            "lane": _lane(state),
+            "lane": _lane(post),
             "created_by": _text(post.get("created_by"), 100),
             "filled_in": bool(post.get("filled_in")),
             "scheduled_at": post.get("scheduled_at"),
@@ -173,6 +181,21 @@ class PhonePosts:
             ],
             "unseen": unseen,
             "variants": variants,
+            "copies": [
+                {
+                    "id": item["id"],
+                    "platform": item["platform"],
+                    "platform_label": item.get("platform_label") or item["platform"],
+                    "account_name": _text(item.get("account_name"), 120),
+                    "message": _text(item.get("error"), 500),
+                    "url": _text(item.get("url"), 2000),
+                    "next_try_at": item.get("next_try_at"),
+                    "waiting": bool(item.get("waiting")),
+                    "actions": ["retry_copy", "copy_deleted"],
+                }
+                for item in (post.get("platform_copies") or [])[:12]
+                if item.get("error")
+            ],
             "actions": actions,
         }
 
@@ -208,6 +231,14 @@ class PhonePosts:
             elif decision == "publish":
                 service.publish_variant(
                     "user", post_id, _text(params.get("variant_id"), 64), shown, via="phone"
+                )
+            elif decision in {"retry_copy", "copy_deleted"}:
+                service.platform_copy(
+                    "user",
+                    post_id,
+                    _text(params.get("copy_id"), 64),
+                    "retry" if decision == "retry_copy" else "deleted",
+                    via="phone",
                 )
             else:
                 service.mark_posted(

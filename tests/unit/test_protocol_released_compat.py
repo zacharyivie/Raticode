@@ -195,6 +195,11 @@ def _too_new(
         schema = stem if stem in NAMED_SCHEMAS else "event"
         if schema == "event" and record.get("type") not in known:
             continue  # A new type: the released phone app never asks for it.
+        if schema == "event" and record.get("type") in PHONE_SENDS:
+            # Only a newer phone sends it, such as a new desktop.action op; the released
+            # phone never receives it. What the released phone sends is checked against the
+            # desktop in test_a_released_phone_message_still_passes_the_desktop_validator.
+            continue
         candidate = _as_an_old_phone_gets_it(record, gated)
         error = next(iter(released[schema].iter_errors(candidate)), None)
         if error is not None:

@@ -88,4 +88,20 @@ class RemThreadRowsTest {
         assertEquals(listOf("rem", "user", "", ""), instructions.map { it.author })
         assertEquals(listOf("goal", "mine", "old", "odd"), instructions.map { it.id })
     }
+
+    @Test fun aWorkersReplyKeepsTheFilesItLinksForTiles() {
+        fun file(name: String, href: String) = JSONObject().put("name", name).put("size", 4).put("href", href)
+        val linked = JSONArray().put(file("after.png", "/shots/after.png")).put(file("site", "https://raticode.dev"))
+        val rows = RemThreadRows.build(thread(false,
+            message("ask", "user", "Fix it").put("linked_files", linked),
+            message("done", "assistant", "Fixed. [Screenshot](</shots/after.png>)", "final").put("linked_files", linked),
+            message("plain", "assistant", "No files.", "final")))
+        // File links only, each with the link the phone sends back with files.link from this thread.
+        assertEquals(listOf(RemLinkedFile("after.png", 4, ChatLink.File("/shots/after.png", "after.png"))), (rows[1] as Reply).linkedFiles)
+        assertEquals(emptyList<RemLinkedFile>(), (rows[2] as Reply).linkedFiles)
+        // An instruction never carries tiles, even if the desktop sent some.
+        val parsed = DesktopViews.parse("rem.thread:w", JSONObject().put("thread_id", "w").put("messages", JSONArray()
+            .put(message("ask", "user", "Fix it").put("linked_files", linked)))) as RemThread
+        assertEquals(emptyList<RemLinkedFile>(), parsed.messages[0].linkedFiles)
+    }
 }

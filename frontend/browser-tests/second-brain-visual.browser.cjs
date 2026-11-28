@@ -51,7 +51,7 @@ createRoot(document.getElementById("root")).render(<App />);`;
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ cacheDir: testViteCacheDir(), root, logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", cacheDir: testViteCacheDir(), root, logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "second-brain-capture",
     resolveId(id) { if (id === "/second-brain-entry.jsx") return id; },
     load(id) { if (id === "/second-brain-entry.jsx") return entry; },
@@ -77,7 +77,7 @@ async function main() {
     assert.ok(overflow === false || (Array.isArray(overflow) && overflow.length === 0), `Overflow in ${name}: ${JSON.stringify(overflow)}`);
     fs.writeFileSync(path.join(out, `${name}.png`), (await win.webContents.capturePage()).toPNG());
   }
-  const scenes = (process.env.CAPTURE_SCENES || "search,reader,filters,details,original,collection,compare,report,builder,import,export,health,inbox,jobs,settings,switcher,empty,toast,projects,project,map,topic").split(",");
+  const scenes = (process.env.CAPTURE_SCENES || "search,reader,filters,details,original,collection,compare,report,builder,import,export,health,inbox,jobs,settings,switcher,empty,toast,projects,project,map,topic,index-warning").split(",");
   for (const theme of (process.env.CAPTURE_THEMES || "light,dark").split(",")) {
     for (const width of (process.env.CAPTURE_WIDTHS || "1440,980").split(",").map(Number)) {
       for (const scene of scenes) {
@@ -111,6 +111,12 @@ async function main() {
         if (scene === "topic") { await evaluate("__sb.navigate('map', { mapTopicId: 'topic-brain' })"); await sleep(300); await shot(tag); }
         if (scene === "inbox") { await evaluate("__sb.navigate('inbox')"); await shot(tag); }
         if (scene === "jobs") { await evaluate("__sb.navigate('jobs')"); await clickText("New job"); await shot(tag); }
+        if (scene === "index-warning") {
+          await evaluate("__sb.updateBrain(__sb.getState().activeBrainId, brain => ({ index: { ...brain.index, state: 'failed', error: 'OSError: [Errno 28] No space left on device: /home/user/Research/.raticode/index/generation-42.sqlite3' } }))");
+          await clickText("Index needs attention");
+          assert.equal(await evaluate("document.activeElement.classList.contains('sb-index-warning') && getComputedStyle(document.activeElement).outlineStyle"), "none", `The open warning panel should hold focus without a ring in ${tag}`);
+          await shot(tag);
+        }
         if (scene === "settings") { await evaluate("__sb.navigate('settings')"); await shot(tag); }
         if (scene === "switcher") { await evaluate("document.querySelector('.sb-switcher-trigger').click()"); await shot(tag); }
         if (scene === "toast") { await evaluate("__sb.navigate('reports', { reportId: 'rep-citations' }); __sb.notify('Added passage to “Second Brain launch evidence”.')"); await shot(tag); }

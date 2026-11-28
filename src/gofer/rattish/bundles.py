@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
+from gofer.rattish.path_globs import match_path_parts
 from gofer.rattish.workspaces import (
     DEFAULT_RATICODE_IGNORE,
     SAFE_FILE_MODE_MASK,
@@ -33,6 +34,7 @@ from gofer.utils.brand_compat import (
     LEGACY_BUNDLE_FORMATS,
     LEGACY_WORKFLOW_IGNORES,
 )
+from gofer.utils.paths import chosen_destination
 
 BUNDLE_EXTENSION = ".raticode"
 BUNDLE_MANIFEST = "raticode.bundle.json"
@@ -73,10 +75,11 @@ def export_rattish_bundle(
     registry_dir: Path,
 ) -> RattishBundlePreview:
     workflow = find_registered_workflow(workflow_id, registry_dir=registry_dir)
-    output_path = output_path.expanduser().absolute()
+    output_path = chosen_destination(output_path)
     if output_path.suffix.lower() != BUNDLE_EXTENSION:
         output_path = output_path.with_name(f"{output_path.name}{BUNDLE_EXTENSION}")
-    if output_path == workflow.workflow_root or workflow.workflow_root in output_path.parents:
+    workflow_root = workflow.workflow_root.resolve()
+    if output_path == workflow_root or workflow_root in output_path.parents:
         raise RattishBundleError("Export the bundle outside the workflow folder")
 
     files = _portable_workspace_files(workflow)
@@ -306,7 +309,7 @@ def _is_ignored(relative: str, is_directory: bool, patterns: tuple[tuple[str, bo
                 if not is_directory:
                     path_candidates = path_candidates[:-1]
             matched = any(
-                _match_path_parts(candidate, pattern_parts) for candidate in path_candidates
+                match_path_parts(candidate, pattern_parts) for candidate in path_candidates
             )
         else:
             segment_candidates = (
@@ -316,20 +319,6 @@ def _is_ignored(relative: str, is_directory: bool, patterns: tuple[tuple[str, bo
         if matched:
             ignored = not negated
     return ignored
-
-
-def _match_path_parts(path: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
-    if not pattern:
-        return not path
-    if pattern[0] == "**":
-        return _match_path_parts(path, pattern[1:]) or bool(
-            path and _match_path_parts(path[1:], pattern)
-        )
-    return bool(
-        path
-        and fnmatch.fnmatchcase(path[0], pattern[0])
-        and _match_path_parts(path[1:], pattern[1:])
-    )
 
 
 def _validate_bundle_path(name: str) -> None:

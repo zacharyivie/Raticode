@@ -19,7 +19,7 @@ export const SIDEBAR_PLUGINS = Object.freeze([
   { id: "second-brain", label: "Second Brain", description: "Notes, reports, and knowledge collections.", experimental: true },
 ].map(Object.freeze));
 
-export const FALLBACK_PLUGIN_ID = "files";
+const FALLBACK_PLUGIN_ID = "files";
 
 const PLUGIN_IDS = SIDEBAR_PLUGINS.map((plugin) => plugin.id);
 
@@ -120,7 +120,7 @@ export function listedPlugins(pluginSettings) {
   return orderedPlugins(pluginSettings).filter((plugin) => pluginAvailable(pluginSettings, plugin.id));
 }
 
-export function orderedPlugins(pluginSettings) {
+function orderedPlugins(pluginSettings) {
   return normalizePluginOrder(pluginSettings?.order).map(sidebarPlugin);
 }
 

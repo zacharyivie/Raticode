@@ -174,9 +174,12 @@ private fun WorkerReply(row: Reply, threadId: String, newest: Boolean) {
         Surface(Modifier.fillMaxWidth().testTag("remThreadReply"), shape = MaterialTheme.shapes.small, color = LocalStudioColors.current.reply,
             contentColor = LocalStudioColors.current.onChat, border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
             Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp)) {
+                val source = LinkSource.of("rem_thread", threadId, row.id)
                 FoldableText(startOpen = newest, toggleColor = MaterialTheme.colorScheme.primary) {
-                    SelectionContainer { ChatMarkdown(row.body, source = LinkSource.of("rem_thread", threadId, row.id)) }
+                    SelectionContainer { ChatMarkdown(row.body, source = source) }
                 }
+                // Files the reply links to stay in reach while the reply is folded; a tap asks for one like its link.
+                if (row.linkedFiles.isNotEmpty()) Box(Modifier.padding(top = 6.dp)) { LinkedFileTiles(row.linkedFiles, source) }
                 HorizontalDivider(Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .7f))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { CopyButton(row.body, "Copy Markdown", "Copy reply as Markdown") }
             }

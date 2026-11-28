@@ -1,0 +1,4412 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 2
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "thread_id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "request_id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "type": {
+      "enum": [
+        "chat.submit",
+        "chat.accepted",
+        "chat.message",
+        "request.cancel",
+        "request.status",
+        "thread.snapshot",
+        "swarm.snapshot",
+        "approval.required",
+        "approval.resolve",
+        "file.offer",
+        "file.request",
+        "error",
+        "catalog.request",
+        "catalog.snapshot",
+        "thread.create",
+        "thread.context.update",
+        "sync.request",
+        "sync.snapshot",
+        "fleet.request",
+        "fleet.snapshot",
+        "job.submit",
+        "job.status",
+        "job.cancel",
+        "job.get",
+        "file.chunk",
+        "file.status",
+        "file.cancel",
+        "thread.history.request",
+        "thread.history.snapshot",
+        "thread.search.request",
+        "thread.search.snapshot",
+        "thread.manage",
+        "swarm.request",
+        "swarm.control",
+        "swarm.message",
+        "approval.request",
+        "approval.snapshot",
+        "desktop.read",
+        "desktop.action",
+        "desktop.result"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "version",
+    "id",
+    "thread_id",
+    "request_id",
+    "sequence",
+    "type",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:raticode:devices:application:v2",
+  "title": "Decrypted device application event v2",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "chat.submit"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "attachment_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "maxItems": 1
+              }
+            },
+            "required": [
+              "text",
+              "attachment_ids"
+            ],
+            "additionalProperties": false
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "chat.accepted"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "message_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            },
+            "required": [
+              "message_id"
+            ],
+            "additionalProperties": false
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "chat.message"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "message_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "attachment_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "maxItems": 1
+              },
+              "final": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "message_id",
+              "text",
+              "attachment_ids",
+              "final"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "request.cancel"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "maxLength": 300
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "request.status"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "accepted",
+                  "running",
+                  "awaiting_approval",
+                  "completed",
+                  "failed",
+                  "cancelled",
+                  "cancel_requested",
+                  "outcome_unknown"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            },
+            "required": [
+              "status",
+              "detail"
+            ],
+            "additionalProperties": false
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thread.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "maxLength": 160
+              },
+              "project_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "resource_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "maxItems": 100
+              },
+              "provider": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "model": {
+                "type": "string",
+                "maxLength": 160
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 80
+              },
+              "running": {
+                "type": "boolean"
+              },
+              "group": {
+                "enum": [
+                  "pinned",
+                  "active",
+                  "archived"
+                ]
+              },
+              "updated_at": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "permission_mode": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "can_manage": {
+                "type": "boolean"
+              },
+              "delete_pending": {
+                "type": "boolean"
+              },
+              "resources": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 160,
+                      "minLength": 1
+                    },
+                    "kind": {
+                      "enum": [
+                        "builtin",
+                        "skill",
+                        "mcp"
+                      ]
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "kind",
+                    "enabled"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "title",
+              "project_id",
+              "resource_ids",
+              "provider",
+              "model",
+              "revision"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "swarm.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "swarms": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "swarm_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 160
+                    },
+                    "status": {
+                      "enum": [
+                        "queued",
+                        "running",
+                        "awaiting_approval",
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "paused",
+                        "idle"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "project_name": {
+                      "type": "string",
+                      "maxLength": 160
+                    },
+                    "progress": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "agents": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "maxLength": 80
+                          },
+                          "state": {
+                            "type": "string",
+                            "maxLength": 40
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "state"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "messages": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sender": {
+                            "type": "string",
+                            "maxLength": 80
+                          },
+                          "body": {
+                            "type": "string",
+                            "maxLength": 1000
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "maxLength": 80
+                          }
+                        },
+                        "required": [
+                          "sender",
+                          "body",
+                          "created_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "swarm_id",
+                    "title",
+                    "status",
+                    "detail"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 100
+              },
+              "remote_allowed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "revision",
+              "swarms"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "approval.required"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "approval_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "action_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "summary": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "expires_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "remote_allowed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "approval_id",
+              "action_digest",
+              "summary",
+              "expires_at",
+              "remote_allowed"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "approval.resolve"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "approval_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "action_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "decision": {
+                "enum": [
+                  "approve",
+                  "deny"
+                ]
+              },
+              "instruction": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "choice": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 60
+              }
+            },
+            "required": [
+              "approval_id",
+              "action_digest",
+              "decision"
+            ],
+            "additionalProperties": false
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "thread_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "file.offer"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "file_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 160
+              },
+              "mime": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10485760
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expires_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "file_id",
+              "name",
+              "mime",
+              "size",
+              "sha256",
+              "expires_at"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "file.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "file_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            },
+            "required": [
+              "file_id"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "error"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unsupported",
+                  "unsupported_version",
+                  "invalid_request",
+                  "unauthorized",
+                  "revoked",
+                  "expired",
+                  "rate_limited",
+                  "too_large",
+                  "not_found",
+                  "conflict",
+                  "internal"
+                ]
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            },
+            "required": [
+              "code",
+              "retryable",
+              "detail"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "catalog.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "catalog.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "projects": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 100,
+                "uniqueItems": true
+              },
+              "resources": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "project_id": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "project_id"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 100,
+                "uniqueItems": true
+              },
+              "providers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80
+                    },
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 160
+                      },
+                      "maxItems": 100,
+                      "uniqueItems": true
+                    },
+                    "efforts": {
+                      "type": "object",
+                      "maxProperties": 100,
+                      "additionalProperties": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 80
+                        }
+                      }
+                    },
+                    "permission_modes": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 80
+                      }
+                    },
+                    "default_permission": {
+                      "type": "string",
+                      "maxLength": 80
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "models"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "revision",
+              "projects",
+              "resources",
+              "providers"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thread.create"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "project_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "resource_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "template_thread_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 80
+              },
+              "permission_mode": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "account": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^(|@default|[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$",
+                "$comment": "The thread's account of this payload's provider: empty follows Rem's setting on the desktop, @default is the provider's default sign-in, anything else names one of the desktop's accounts. Phones send it only to desktops whose overview has thread_accounts."
+              }
+            },
+            "required": [
+              "title",
+              "project_id",
+              "resource_ids",
+              "provider",
+              "model"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thread.context.update"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "project_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "resource_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 80
+              },
+              "permission_mode": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "set_resources": {
+                "type": "boolean"
+              },
+              "account": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^(|@default|[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$",
+                "$comment": "The thread's account of this payload's provider: empty follows Rem's setting on the desktop, @default is the provider's default sign-in, anything else names one of the desktop's accounts. Phones send it only to desktops whose overview has thread_accounts."
+              }
+            },
+            "required": [
+              "expected_revision",
+              "project_id",
+              "resource_ids",
+              "provider",
+              "model"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "sync.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "after_sequence": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              },
+              "include_connection": {
+                "type": "boolean"
+              },
+              "threads_offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "include_thread_details": {
+                "type": "boolean"
+              },
+              "include_activity": {
+                "type": "boolean"
+              },
+              "include_tailnet_endpoint": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "after_sequence",
+              "limit"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "sync.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "through_sequence": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "threads": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "thread_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "project_id": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "resource_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                      },
+                      "maxItems": 32,
+                      "uniqueItems": true
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80
+                    },
+                    "model": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "can_create": {
+                      "type": "boolean"
+                    },
+                    "effort": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 80
+                    },
+                    "running": {
+                      "type": "boolean"
+                    },
+                    "group": {
+                      "enum": [
+                        "pinned",
+                        "active",
+                        "archived"
+                      ]
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "permission_mode": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "can_manage": {
+                      "type": "boolean"
+                    },
+                    "delete_pending": {
+                      "type": "boolean"
+                    },
+                    "unread": {
+                      "type": "boolean"
+                    },
+                    "read_at": {
+                      "type": "string",
+                      "maxLength": 80
+                    }
+                  },
+                  "required": [
+                    "thread_id",
+                    "revision",
+                    "title",
+                    "project_id",
+                    "resource_ids",
+                    "provider",
+                    "model"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 100,
+                "uniqueItems": true
+              },
+              "connection": {
+                "type": "object",
+                "properties": {
+                  "lan_endpoint": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 253
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "rem_ready": {
+                    "type": "boolean"
+                  },
+                  "remote_control": {
+                    "type": "boolean"
+                  },
+                  "desktop_control": {
+                    "type": "boolean"
+                  },
+                  "tailnet_endpoint": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 253
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "lan_endpoint",
+                  "rem_ready"
+                ],
+                "additionalProperties": false
+              },
+              "threads_offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "next_threads_offset": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "revision",
+              "through_sequence",
+              "threads"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "fleet.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "fleet.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "observed_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "devices": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "device_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80
+                    },
+                    "role": {
+                      "enum": [
+                        "controller",
+                        "desktop"
+                      ]
+                    },
+                    "status": {
+                      "enum": [
+                        "reachable",
+                        "offline",
+                        "unknown"
+                      ]
+                    },
+                    "last_seen": {
+                      "oneOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "observed_at": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "fresh_until": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "running_jobs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                      },
+                      "maxItems": 100,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "name",
+                    "role",
+                    "status",
+                    "last_seen",
+                    "observed_at",
+                    "fresh_until",
+                    "running_jobs"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 100,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "revision",
+              "observed_at",
+              "devices"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "job.submit"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "target_device_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "project_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "resource_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "intent": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              },
+              "expected_policy_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "job_id",
+              "target_device_id",
+              "project_id",
+              "resource_ids",
+              "intent",
+              "expected_policy_revision"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "job.status"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "state": {
+                "enum": [
+                  "accepted",
+                  "running",
+                  "completed",
+                  "failed",
+                  "cancel_requested",
+                  "cancelled",
+                  "outcome_unknown",
+                  "rejected"
+                ]
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            },
+            "required": [
+              "job_id",
+              "state",
+              "revision",
+              "detail"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "job.cancel"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "job.get"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "file.chunk"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "file_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10485760
+              },
+              "data": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]*$",
+                "maxLength": 21846
+              },
+              "eof": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "file_id",
+              "offset",
+              "data",
+              "eof"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "file.status"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "file_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "state": {
+                "enum": [
+                  "receiving",
+                  "available",
+                  "cancelled",
+                  "failed"
+                ]
+              },
+              "received_size": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10485760
+              }
+            },
+            "required": [
+              "file_id",
+              "state",
+              "received_size"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "file.cancel"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "file_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            },
+            "required": [
+              "file_id"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thread.history.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "before": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 40
+              },
+              "message_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 180
+              },
+              "include_presentation": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "before"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thread.history.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "before": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "has_more": {
+                "type": "boolean"
+              },
+              "messages": {
+                "type": "array",
+                "maxItems": 40,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 180
+                    },
+                    "role": {
+                      "enum": [
+                        "user",
+                        "assistant",
+                        "system"
+                      ]
+                    },
+                    "text": {
+                      "type": "string",
+                      "maxLength": 4000
+                    },
+                    "source_id": {
+                      "type": "string",
+                      "maxLength": 180
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "attachments": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "id",
+                          "name",
+                          "size",
+                          "mime"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "maxLength": 180
+                          },
+                          "name": {
+                            "type": "string",
+                            "maxLength": 160
+                          },
+                          "mime": {
+                            "type": "string",
+                            "maxLength": 120
+                          },
+                          "size": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10485760
+                          }
+                        }
+                      }
+                    },
+                    "presentation": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "thought",
+                            "turn-summary",
+                            "error",
+                            "final",
+                            "system"
+                          ]
+                        },
+                        "groupId": {
+                          "type": "string",
+                          "maxLength": 180
+                        },
+                        "running": {
+                          "type": "boolean"
+                        },
+                        "truncated": {
+                          "type": "boolean"
+                        },
+                        "completedAt": {
+                          "type": "string",
+                          "maxLength": 80
+                        },
+                        "startedAt": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "durationMs": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "trace": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "kind": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "title": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "detail": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "body": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "input": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "output": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "category": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "shell": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "command": {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            "status": {
+                              "type": "string",
+                              "maxLength": 4000
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "role",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "resources": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 160,
+                      "minLength": 1
+                    },
+                    "kind": {
+                      "enum": [
+                        "builtin",
+                        "skill",
+                        "mcp"
+                      ]
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "kind",
+                    "enabled"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "resource_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "before",
+              "has_more",
+              "messages"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thread.search.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thread.search.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "has_more": {
+                "type": "boolean"
+              },
+              "results": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "thread_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 160
+                    },
+                    "snippet": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "message_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 180
+                    }
+                  },
+                  "required": [
+                    "thread_id",
+                    "title",
+                    "snippet",
+                    "message_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "query",
+              "offset",
+              "has_more",
+              "results"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thread.manage"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "action": {
+                "enum": [
+                  "pin",
+                  "unpin",
+                  "archive",
+                  "restore",
+                  "delete",
+                  "delete_permanently",
+                  "read",
+                  "unread"
+                ]
+              }
+            },
+            "required": [
+              "expected_revision",
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "swarm.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "swarm_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "swarm_id"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "swarm.control"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "swarm_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "action": {
+                "enum": [
+                  "pause",
+                  "resume",
+                  "stop"
+                ]
+              }
+            },
+            "required": [
+              "swarm_id",
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "swarm.message"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "swarm_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "body": {
+                "type": "string",
+                "maxLength": 4000,
+                "minLength": 1
+              }
+            },
+            "required": [
+              "swarm_id",
+              "body"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "approval.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "include_choices": {
+                "type": "boolean"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "approval.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "remote_allowed": {
+                "type": "boolean"
+              },
+              "approvals": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "approval_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "action_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "source": {
+                      "enum": [
+                        "workflow",
+                        "swarm"
+                      ]
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 160
+                    },
+                    "summary": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "requested_at": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "instruction_required": {
+                      "type": "boolean"
+                    },
+                    "options": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 8,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 60
+                      }
+                    },
+                    "reply": {
+                      "enum": [
+                        "optional",
+                        "required"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "approval_id",
+                    "action_digest",
+                    "source",
+                    "title",
+                    "summary",
+                    "requested_at",
+                    "instruction_required"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "remote_allowed",
+              "approvals"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "desktop.read"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "enum": [
+                  "browser.tabs",
+                  "computers.list",
+                  "computers.placement",
+                  "developer.log",
+                  "files.list",
+                  "files.text",
+                  "kanban.board",
+                  "kanban.timeline",
+                  "media.image",
+                  "media.preview",
+                  "organizations.list",
+                  "organizations.note",
+                  "organizations.read",
+                  "overview",
+                  "posts.list",
+                  "provider.accounts",
+                  "rem.decisions",
+                  "rem.draft",
+                  "rem.history",
+                  "rem.home",
+                  "rem.memories",
+                  "rem.notices",
+                  "rem.search",
+                  "rem.task",
+                  "rem.thread",
+                  "selfwork.read",
+                  "settings.get",
+                  "source_control.commit",
+                  "source_control.diff",
+                  "source_control.history",
+                  "source_control.list",
+                  "source_control.read",
+                  "usage.overview",
+                  "workflows.failure",
+                  "workflows.list",
+                  "workflows.read",
+                  "workflows.runs",
+                  "workflows.tests",
+                  "workflows.tests.estimate",
+                  "workflows.trigger.changes"
+                ]
+              },
+              "params": {
+                "type": "object",
+                "maxProperties": 24
+              }
+            },
+            "required": [
+              "op",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "allOf": [
+          {
+            "$comment": "rem.notices names the alert switches that are on in include, and the desktop's opaque position in mark. workflow is the notices notification nodes with channel: phone stored for the phone; phones send it only to desktops whose overview has rem_notices_workflow. The answer (fixture desktop.result.rem-notices-workflow) gives each workflow notice workflow_id, workflow_name, run_id and more_from_run, which is N on a run's one 'And N more from this run' notice past the desktop's per-run cap; a read with include also returns dropped, the workflow messages removed from the desktop's store before this phone read them. A question of Rem's that waits for the user while no task is stopped for it (auto mode) is one needs_you notice of kind decision (fixture desktop.result.rem-notices-decision) with project_name and decision: id, question, recommended and fallback; one per decision ID.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "rem.notices"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "include": {
+                          "type": "array",
+                          "items": {
+                            "enum": [
+                              "needs_you",
+                              "finished",
+                              "proposals",
+                              "workflow"
+                            ]
+                          },
+                          "minItems": 1,
+                          "maxItems": 4,
+                          "uniqueItems": true
+                        },
+                        "mark": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.failure reads what Ask Rem about this failure attaches for one run: name, a file name for the attachment, and text, a compact summary marked as untrusted run output (workflow file, run, node and type, error, the end of the node's output, preflight problems, input names with password inputs masked). node_id names the node; without it, the node that failed. Project and data folders in the text are replaced by names. Phones send it only to desktops whose overview has workflow_failures.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.failure"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "node_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "run_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.trigger.changes reads what changed in a workflow, and the files it runs as code, since the version a trigger runs was approved: the approval state, a fingerprint of the workflow as it is now, and each changed file with its own unified diff. Each file's unseen is cut or unreadable when the phone can't show all of its change, or unpinned for an MCP server whose package has no exact version (its warning says so), and open_path is its path inside the project_id project for files.text. Phones send it only to desktops whose overview has workflow_trigger_approval.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.trigger.changes"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "trigger_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "trigger_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.tests reads one workflow's test set for Try another model: exists, cases (a count), error, model_nodes (each step that calls a model with the provider and model it uses now), providers (the desktop's enabled providers by Rattish ID with their models), running, revision, and result, the newest result. A try's result names tried and models and has comparison: rows of case_id, name, change and current and candidate sides with status, cost and time as display text, totals for both sides, sentence and baseline_reused; use says whether Use this model is allowed now and why not. Phones send it only to desktops whose overview has workflow_tests.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.tests"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        }
+                      },
+                      "required": [
+                        "workflow_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.tests.estimate reads the expected cost of trying models on the test set, before anything runs: current (summary, reused when an earlier result of this revision covers the cases and costs nothing), candidate (label, summary) and total. expected_revision is the revision workflows.tests showed; a workflow that changed since is refused as a conflict. models names each step and the provider and model to try on it. Nothing runs and nothing is saved.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.tests.estimate"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "expected_revision": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80
+                        },
+                        "models": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 20,
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "node": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,127}$"
+                              },
+                              "provider": {
+                                "type": "string",
+                                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+                              },
+                              "model": {
+                                "type": "string",
+                                "pattern": "^[^\\s\"'\\\\]{1,200}$"
+                              }
+                            },
+                            "required": [
+                              "node",
+                              "provider",
+                              "model"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "expected_revision",
+                        "models"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "rem.decisions reads Rem's decisions: the questions Rem or a worker brought the user, each with one recommended answer and its checked evidence, and the answers Rem reuses. The answer has revision (sent back as expected_revision), the waiting, provisional and confirmed counts, queued (requests past a project's three waiting cards, shown as N more queued until one of those is settled), more (entries left out to fit) and decisions, waiting first: id, topic, question, answer, recommended, why, evidence (kind, ref, excerpt), alternatives (answer, why_not), status (queued, pending, provisional, confirmed, superseded or rejected), tried, supersedes, superseded_by, reopened, asked_again (true for the card the user's Ask again filed; the decision it supersedes stays in force until it is answered), current_answer (that decision's answer, empty unless asked_again), fresh (true when a fresh project scan gave the card its recommendation), project (a name, never a path), decided_by, decided_at, created_at, updated_at, reversible, history (at, actor, action, note), last_check (Raticode's own last run of a decided check command: passed, exit_code, ran_at, seconds; null when it never ran), carried_over (true for a decision Raticode carried over from what it did before decisions existed, such as landing on dev), read_from (null unless a record file Raticode read in from the repository rather than wrote, and the user hasn't decided on it in Raticode since: commit, the short hash of the commit that added the file on the landing branch, and author, that commit's author's name, never an email; either may be empty for a file read in before commits were kept; decided_at is then that commit's date), asked (null unless the question waits, pending or queued: by (run, chat, plan, scan, you or rem), label (who asked: a ticket key, a task's title, Self-work, Rem's chat, Project scan, you (the user's Ask again) or Rem), ticket, task_id, task_title, at (when it was asked), waiting and went_on (the runs that asked it, each run_id, task_id, ticket and label: those stopped for this question now, and those that went on without it) and opens (the task whose sheet the asked line opens, empty for none)), remember_as (fact, how Rem works in a project; record, a design decision Raticode writes as a Markdown file in the project's repository; or memory, about the user), record (null unless remember_as is record: context, options, consequences and check, text of up to 1500 characters (check 600), and applies_to, forbids and signals, lists of up to 10 path globs or words of up to 200 characters), path_counts (null unless the record is waiting or in force and its project has a landing branch: branch, and applies_to and forbids, each path glob to how many files tracked on that branch's tip it matches; an applies_to path at 0 matches no files, a forbids path above 0 matches files that exist now), record_path (the record's file relative to the repository, empty until it is written), record_error (why it isn't in the repository yet), edited_outside (true when the user changed the file outside Raticode), record_restore (true when a Rem run changed the file and Raticode puts the approved text back once the checkout is clean; record_error then says why it hasn't yet), supersedes_all (a conflict's fix: up to 5 decision IDs it replaces when used), conflict (why those decisions conflict) and plan (the ID, P-n, of the Plan with me plan the question belongs to, empty otherwise). plans lists those plans so questions show grouped under their title: id, title, goal (up to 300 characters), project (a name), status (asking, ready once every question is settled, or handed_back once Rem got the answers back), answered, total, waiting and queued (how many of its questions are settled, how many wait with a card and how many are queued). rem.home says decisions, decisions_revision and decisions_waiting (pending and provisional entries). A Rem task update's work may carry decision, the same card without the answer and history, with live_status, its status now (status withdrawn means the user forgot the question while it waited); a fallback card has fallback, title, question, found and candidate and no id. Phones read it only from desktops whose overview has rem_decisions or whose rem.home has decisions.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "rem.decisions"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "known": {
+                          "type": "string",
+                          "maxLength": 128
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "provider.accounts reads the thread model picker's Account menus: for each provider with accounts, Rem's setting and every account's name, sign-in state and last usage reading (week_used and five_hour_used percentages with observed_at). With thread_id it also returns that shared thread's own choice per provider. Phones read it only from desktops whose overview has thread_accounts.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "provider.accounts"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "thread_id": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "known": {
+                          "type": "string",
+                          "maxLength": 128
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "computers.list reads the computers Raticode can run work on: this computer and each paired desktop. Each has id, name, this_computer, state (online or offline), max_threads (its worker limit; null for a paired desktop that doesn't report it, such as an older version), running_threads, cpu_pressure and memory_pressure (0 to 100, or null), effective_threads (max_threads lowered by pressure, never above it), capacity (new workers it can take now: 0 when offline or short of memory, at most 1 while rejoining, null when its limit is unknown), memory_hold (why it starts no new worker for want of memory while one runs, such as 0.9 GB available, or null). running_by_kind counts the running workers by kind (rem, phone, organizations, swarms; a swarm turn of an organization's run counts as organizations), or null for a paired desktop that doesn't report it, such as an older version, which then shows only its total; running_work lists what each worker on this computer is, oldest first, as kind and label (a Rem task's title, an organization and worker name, a swarm's name, phone turn, or work from another desktop by name; at most 80 characters), at most 20 of them, and is null for a paired desktop, which shares counts only. A paired desktop's max_threads, running_threads, running_by_kind, pressure and memory_hold come from its own reading, which desktops exchange among themselves in their fleet status, rejoining, checked_at and last_seen; this computer also has max_threads_setting (0 is automatic) and default_max_threads. Phones send it only to desktops whose overview has computers. It takes no params.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "computers.list"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "maxProperties": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "computers.placement reads where Rem and each organization run their workers. The answer has strategies (overflow, balanced, manual), default_strategy, order (the user's order of computer IDs, which overflow fills in turn; every computer is in it), computers (id, name, state, this_computer, in that order) and consumers: one for Rem (consumer rem, kind rem) and one per organization (consumer org:<organization ID>, kind organization), each with name, strategy, saved (false until a placement is saved for it), computers (the assigned computer IDs, for manual), shared (the assigned computers others may also be assigned) and missing_computers (assigned computers no longer paired). Phones send it only to desktops whose overview has computer_placement. It takes no params.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "computers.placement"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "maxProperties": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "desktop.action"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "enum": [
+                  "browser.open",
+                  "computers.place",
+                  "computers.run_there",
+                  "computers.set",
+                  "files.link",
+                  "files.open",
+                  "kanban.participant",
+                  "kanban.ticket",
+                  "organizations.auto_mode",
+                  "organizations.backlog_pull",
+                  "organizations.control",
+                  "organizations.knowledge",
+                  "organizations.requests",
+                  "organizations.schedule",
+                  "organizations.task",
+                  "organizations.worker",
+                  "posts.decide",
+                  "provider.account.sign_in",
+                  "rem.attachment",
+                  "rem.decision.change",
+                  "rem.instruct",
+                  "rem.memory.add",
+                  "rem.memory.edit",
+                  "rem.memory.forget",
+                  "rem.memory.mode",
+                  "rem.memory.undo",
+                  "rem.message",
+                  "rem.run.acknowledge",
+                  "rem.run.acknowledge_all",
+                  "rem.run.cancel",
+                  "rem.run.pause",
+                  "rem.run.resume",
+                  "rem.run.retry_review",
+                  "rem.run.wake",
+                  "rem.task.create",
+                  "rem.task.delete",
+                  "rem.task.pause",
+                  "rem.task.resume",
+                  "rem.task.run",
+                  "rem.tidy",
+                  "selfwork.report.seen",
+                  "selfwork.settings",
+                  "selfwork.stop",
+                  "settings.update",
+                  "swarms.start",
+                  "workflows.rerun",
+                  "workflows.resume",
+                  "workflows.run",
+                  "workflows.stop",
+                  "workflows.tests.try",
+                  "workflows.tests.use_model",
+                  "workflows.trigger",
+                  "workflows.trigger.approve",
+                  "workflows.triggers.pause"
+                ]
+              },
+              "params": {
+                "type": "object",
+                "maxProperties": 24
+              }
+            },
+            "required": [
+              "op",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "allOf": [
+          {
+            "$comment": "workflows.run names the workflow, the saved revision the phone was shown, and typed run inputs from the phone's Run form. The desktop checks the inputs against the workflow's input schema. file_ids maps a file input to a file the phone already uploaded on its Rem file channel, as Share to Rem does; the desktop copies it into the run.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.run"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "expected_revision": {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        "inputs": {
+                          "type": "object",
+                          "maxProperties": 64
+                        },
+                        "file_ids": {
+                          "type": "object",
+                          "maxProperties": 1,
+                          "additionalProperties": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                          }
+                        }
+                      },
+                      "required": [
+                        "workflow_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.rerun runs a workflow again with one run's inputs and trigger events as the desktop saved them. The phone names the run and sends no values.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.rerun"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "run_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.trigger turns one of a workflow's triggers on or off. Turning one on starts unattended work, so the phone asks first and sends confirmed; the desktop refuses it without.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.trigger"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "trigger_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "confirmed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "trigger_id",
+                        "enabled"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.triggers.pause pauses or resumes every trigger on the desktop at once. Each trigger keeps its own on/off setting. Resuming starts unattended work again, so it carries confirmed.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.triggers.pause"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "paused": {
+                          "type": "boolean"
+                        },
+                        "confirmed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "paused"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.trigger.approve approves the workflow version a trigger runs. fingerprint is the one workflows.trigger.changes showed; when the workflow changed again since, the desktop refuses it as a conflict. When the answer to workflows.trigger.changes marked any file unseen (its diff was cut or can't be shown), or counted unseen_hidden files, the phone asks a second time and sends unseen_confirmed: true; without it the desktop refuses and names those files. Like every phone request it passes the phone guard first.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.trigger.approve"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "trigger_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "fingerprint": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80
+                        },
+                        "unseen_confirmed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "trigger_id",
+                        "fingerprint"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "posts.decide is the user's decision on a social post from the phone's Posts screen: approve (approve_now also sets the time to now), decline, request_changes, cancel, publish or mark_posted for one variant, and pause or resume all publishing. content_hash is the one posts.list showed; a post that changed since is refused as a conflict. When posts.list marked the post unseen (text cut for the phone, or media the phone can't show), approving also needs unseen_confirmed, sent after the phone asked a second time. Phones send it only to desktops whose overview has posts. Like every phone request it passes the phone guard first.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "posts.decide"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "decision": {
+                          "enum": [
+                            "approve",
+                            "approve_now",
+                            "decline",
+                            "request_changes",
+                            "cancel",
+                            "publish",
+                            "mark_posted",
+                            "pause",
+                            "resume"
+                          ]
+                        },
+                        "post_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "content_hash": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80
+                        },
+                        "variant_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "note": {
+                          "type": "string",
+                          "maxLength": 2000
+                        },
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2000
+                        },
+                        "unseen_confirmed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "decision"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "provider.account.sign_in starts an account's device sign-in on the desktop, for an account whose provider has one (Codex: codex login --device-auth with that account's CODEX_HOME), or with cancel stops it. The answer names the account and carries its sign_in state; the verification link and one-time code follow in provider.accounts (each account's sign_in) once the CLI prints them, and the state turns signed_in when the CLI exits 0. A refused sign-in carries the CLI's own message as reason, refused true and help saying where to turn it on. Phones send it only to desktops whose overview has account_sign_in.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "provider.account.sign_in"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_]{0,39}$"
+                        },
+                        "cancel": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "organizations.worker holds a worker or releases its hold (paused), or chooses the provider account its turns run as (account: one of the account IDs the organization read lists in accounts for the worker's provider, or an empty string for the provider's default sign-in). It carries one of the two, never both. The desktop refuses an account that isn't the worker's provider's. A turn whose account was removed or signed out since runs on the default sign-in and records why. Phones offer the account choice only when the organization read has accounts.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "organizations.worker"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "organization_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "employee_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "paused": {
+                          "type": "boolean"
+                        },
+                        "account": {
+                          "type": "string",
+                          "pattern": "^([0-9a-f]{16})?$"
+                        }
+                      },
+                      "required": [
+                        "organization_id",
+                        "employee_id"
+                      ],
+                      "oneOf": [
+                        {
+                          "required": [
+                            "paused"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "account"
+                          ]
+                        }
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.tests.try runs the test set with the named models beside the current ones, for this test run only: the workflow source, its triggers and their approvals don't change, and judge checks keep their own model. The phone sends it only after showing workflows.tests.estimate, with confirmed: true; the desktop refuses it without. A resent request starts nothing new. The answer is the workflows.tests view with message; the phone polls workflows.tests for the side-by-side result. Like every phone request it passes the phone guard first.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.tests.try"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "expected_revision": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80
+                        },
+                        "models": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 20,
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "node": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,127}$"
+                              },
+                              "provider": {
+                                "type": "string",
+                                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+                              },
+                              "model": {
+                                "type": "string",
+                                "pattern": "^[^\\s\"'\\\\]{1,200}$"
+                              }
+                            },
+                            "required": [
+                              "node",
+                              "provider",
+                              "model"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "confirmed": {
+                          "const": true
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "expected_revision",
+                        "models",
+                        "confirmed"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.tests.use_model writes provider: and model: for each named step into the workflow through the desktop's editor, as a graph edit: a change that would stop the workflow compiling is refused, and every trigger on the workflow asks for approval again. expected_revision is the revision the try tested; a workflow that changed since is refused as a conflict. The answer is the workflows.tests view with message. Like every phone request it passes the phone guard first.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.tests.use_model"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "expected_revision": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80
+                        },
+                        "models": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 20,
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "node": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,127}$"
+                              },
+                              "provider": {
+                                "type": "string",
+                                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+                              },
+                              "model": {
+                                "type": "string",
+                                "pattern": "^[^\\s\"'\\\\]{1,200}$"
+                              }
+                            },
+                            "required": [
+                              "node",
+                              "provider",
+                              "model"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "expected_revision",
+                        "models"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "rem.decision.change is the user's change to one of Rem's decisions, as in the desktop's panel: use takes Rem's recommended answer, change records answer instead, edit rewrites answer, question or why of a decision and, for a decision record, its context, options, consequences, check, applies_to, forbids and signals, replace makes the user's new decision (answer, with question, why and the same record parts) in place of one in force, use on a conflict's fix replaces every decision in its supersedes_all, reject turns a request down with an optional reason, note says why for edit and replace, reopen asks a decision in force again, forget removes the entry, and scan looks for answers again in the project of decision id (the check command, landing branch and decision folder, read from the project's own files with no model call; what it finds becomes requests and never changes a decision). expected_revision is the revision rem.decisions or rem.home (decisions_revision) showed; a change made elsewhere since is refused as a conflict, and the phone reads the list again. confirm_edit and cancel_edit press OK or Cancel on a change the user asked Rem for in chat (the decision_edits cards under Rem's reply in rem.home, also listed as edits in rem.decisions); id is the change's ID (E-n), and the desktop applies it only while the decision is as the card showed it, whatever the revision. Adding a decision stays on the desktop and the CLI, which name projects by folder. The answer is the rem.decisions view. Like every phone request it passes the phone guard first.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "rem.decision.change"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "action": {
+                          "enum": [
+                            "use",
+                            "change",
+                            "edit",
+                            "replace",
+                            "reject",
+                            "reopen",
+                            "forget",
+                            "retire",
+                            "scan",
+                            "confirm_edit",
+                            "cancel_edit"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+                        },
+                        "expected_revision": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "answer": {
+                          "type": "string",
+                          "maxLength": 1000
+                        },
+                        "question": {
+                          "type": "string",
+                          "maxLength": 500
+                        },
+                        "why": {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        "reason": {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        "note": {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        "context": {
+                          "type": "string",
+                          "maxLength": 1500
+                        },
+                        "options": {
+                          "type": "string",
+                          "maxLength": 1500
+                        },
+                        "consequences": {
+                          "type": "string",
+                          "maxLength": 1500
+                        },
+                        "check": {
+                          "type": "string",
+                          "maxLength": 600
+                        },
+                        "applies_to": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "maxItems": 10
+                        },
+                        "forbids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "maxItems": 10
+                        },
+                        "signals": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "maxItems": 10
+                        }
+                      },
+                      "required": [
+                        "action",
+                        "id",
+                        "expected_revision"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "selfwork.stop sets, changes or clears when the self-work running now stops, as Settings > Rem does: condition is the user's stop condition in their words (\"\" clears it), judged by Rem's model against the board and task records after each self-work task finishes; no_later_than is the time it stops by at the latest, {time:'HH:MM', day?:today|tonight|tomorrow, date?:'YYYY-MM-DD', timezone?:IANA name} or {at: an instant with its offset}, or null to clear it; clear is condition, no_later_than or both. The desktop resolves the time in the user's zone and refuses one that has passed, that a clock change skips or repeats, or that is more than 7 days away (invalid), and refuses a new stop while self-work is off or a stale expected_revision (conflict). The answer is the selfwork.read view, whose stop field shows the condition, the time, the last judgment and the last stop; a desktop without that field doesn't take this op.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "selfwork.stop"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "condition": {
+                          "type": "string",
+                          "maxLength": 500
+                        },
+                        "no_later_than": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "at": {
+                              "type": "string",
+                              "maxLength": 64
+                            },
+                            "time": {
+                              "type": "string",
+                              "pattern": "^([01]?\\d|2[0-3]):[0-5]\\d$"
+                            },
+                            "day": {
+                              "enum": [
+                                "today",
+                                "tonight",
+                                "tomorrow"
+                              ]
+                            },
+                            "date": {
+                              "type": "string",
+                              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                            },
+                            "timezone": {
+                              "type": "string",
+                              "maxLength": 80
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "clear": {
+                          "enum": [
+                            "condition",
+                            "no_later_than",
+                            "both"
+                          ]
+                        },
+                        "expected_revision": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "selfwork.settings changes Settings > Rem > Self-work. provider_accounts names the account the runs self-work starts use with each provider: \"\" for Rem's setting, \"@default\" for the provider's default sign-in, \"auto\" to choose by usage, or an account name. It holds only the providers that change. The desktop refuses an unknown provider.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "selfwork.settings"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "provider_accounts": {
+                          "type": "object",
+                          "maxProperties": 16,
+                          "propertyNames": {
+                            "pattern": "^[a-z][a-z0-9_]{0,39}$"
+                          },
+                          "additionalProperties": {
+                            "type": "string",
+                            "maxLength": 128,
+                            "pattern": "^(|@default|auto|[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "computers.set changes this computer's worker limit (max_threads), the same number as Settings > Computers > Worker limit: 0 picks one from the computer's cores and memory. computer_id is this computer's id from computers.list, or omitted for this computer; a paired desktop's limit is changed on that desktop, so the desktop refuses it (invalid). The answer is the computers.list view. Phones send it only to desktops whose overview has computers.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "computers.set"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "computer_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "pattern": "^[A-Za-z0-9-]+$"
+                        },
+                        "max_threads": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16
+                        }
+                      },
+                      "required": [
+                        "max_threads"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "computers.run_there is Run there: the user's pick of the paired desktop that a waiting Rem run (the suggestion on its run in rem.home) or organization ticket (the suggestion on its ticket in organizations.read) names while this computer is full. run_id names the Rem run; organization_id with task_id names the ticket instead. computer_id is the suggestion's computer_id. The desktop checks the pick against the suggestion it holds now: a Rem run, only a research or conversation task, is pinned to that desktop with chosen_by user and counts as the user's own start; a ticket only gets the fleet execution target the owner already made there for its worker, and a suggestion without one (pick false, with grant saying what to grant) is refused. A suggestion that is gone or names another computer is refused as a conflict. Nothing starts on a paired desktop without this pick. The answer is the rem.home view for a run, or the organizations.read view for a ticket. Phones send it only to desktops whose overview has run_there.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "computers.run_there"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "run_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9_-]+$"
+                        },
+                        "organization_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100,
+                          "pattern": "^[A-Za-z0-9_-]+$"
+                        },
+                        "task_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100,
+                          "pattern": "^[A-Za-z0-9_-]+$"
+                        },
+                        "computer_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "pattern": "^[A-Za-z0-9-]+$"
+                        }
+                      },
+                      "required": [
+                        "computer_id"
+                      ],
+                      "oneOf": [
+                        {
+                          "required": [
+                            "run_id"
+                          ],
+                          "not": {
+                            "anyOf": [
+                              {
+                                "required": [
+                                  "organization_id"
+                                ]
+                              },
+                              {
+                                "required": [
+                                  "task_id"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "required": [
+                            "organization_id",
+                            "task_id"
+                          ],
+                          "not": {
+                            "required": [
+                              "run_id"
+                            ]
+                          }
+                        }
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "computers.place saves one consumer's placement: consumer is rem or org:<organization ID> from computers.placement, strategy is overflow (fill one computer, then the next), balanced (spread evenly) or manual (only the computers listed in computers). Only manual takes computers, at least one, each from computers.placement; shared lists the computers others may also be assigned, and a computer in two manual placements must be shared in both. The desktop refuses an unknown consumer or computer, or a computer assigned elsewhere without sharing (invalid, with the reason). The answer is the computers.placement view. Phones send it only to desktops whose overview has computer_placement.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "computers.place"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "consumer": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 110,
+                          "pattern": "^(rem|org:[A-Za-z0-9_-]+)$"
+                        },
+                        "strategy": {
+                          "enum": [
+                            "overflow",
+                            "balanced",
+                            "manual"
+                          ]
+                        },
+                        "computers": {
+                          "type": "array",
+                          "maxItems": 64,
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64,
+                            "pattern": "^[A-Za-z0-9-]+$"
+                          }
+                        },
+                        "shared": {
+                          "type": "array",
+                          "maxItems": 64,
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64,
+                            "pattern": "^[A-Za-z0-9-]+$"
+                          }
+                        }
+                      },
+                      "required": [
+                        "consumer",
+                        "strategy"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "desktop.result"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "enum": [
+                  "browser.open",
+                  "browser.tabs",
+                  "computers.list",
+                  "computers.place",
+                  "computers.run_there",
+                  "computers.placement",
+                  "computers.set",
+                  "developer.log",
+                  "files.link",
+                  "files.list",
+                  "files.open",
+                  "files.text",
+                  "kanban.board",
+                  "kanban.participant",
+                  "kanban.ticket",
+                  "kanban.timeline",
+                  "media.image",
+                  "media.preview",
+                  "organizations.auto_mode",
+                  "organizations.backlog_pull",
+                  "organizations.control",
+                  "organizations.knowledge",
+                  "organizations.list",
+                  "organizations.note",
+                  "organizations.read",
+                  "organizations.requests",
+                  "organizations.schedule",
+                  "organizations.task",
+                  "organizations.worker",
+                  "overview",
+                  "posts.decide",
+                  "posts.list",
+                  "provider.account.sign_in",
+                  "provider.accounts",
+                  "rem.attachment",
+                  "rem.decision.change",
+                  "rem.decisions",
+                  "rem.draft",
+                  "rem.history",
+                  "rem.home",
+                  "rem.instruct",
+                  "rem.memories",
+                  "rem.memory.add",
+                  "rem.memory.edit",
+                  "rem.memory.forget",
+                  "rem.memory.mode",
+                  "rem.memory.undo",
+                  "rem.message",
+                  "rem.notices",
+                  "rem.run.acknowledge",
+                  "rem.run.acknowledge_all",
+                  "rem.run.cancel",
+                  "rem.run.pause",
+                  "rem.run.resume",
+                  "rem.run.retry_review",
+                  "rem.run.wake",
+                  "rem.search",
+                  "rem.task",
+                  "rem.task.create",
+                  "rem.task.delete",
+                  "rem.task.pause",
+                  "rem.task.resume",
+                  "rem.task.run",
+                  "rem.thread",
+                  "rem.tidy",
+                  "selfwork.read",
+                  "selfwork.report.seen",
+                  "selfwork.settings",
+                  "selfwork.stop",
+                  "settings.get",
+                  "settings.update",
+                  "source_control.commit",
+                  "source_control.diff",
+                  "source_control.history",
+                  "source_control.list",
+                  "source_control.read",
+                  "swarms.start",
+                  "usage.overview",
+                  "workflows.failure",
+                  "workflows.list",
+                  "workflows.read",
+                  "workflows.rerun",
+                  "workflows.resume",
+                  "workflows.run",
+                  "workflows.runs",
+                  "workflows.stop",
+                  "workflows.tests",
+                  "workflows.tests.estimate",
+                  "workflows.tests.try",
+                  "workflows.tests.use_model",
+                  "workflows.trigger",
+                  "workflows.trigger.approve",
+                  "workflows.trigger.changes",
+                  "workflows.triggers.pause"
+                ]
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "part": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 47
+              },
+              "parts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 48
+              },
+              "body": {
+                "type": "string",
+                "maxLength": 24000
+              },
+              "code": {
+                "enum": [
+                  "unauthorized",
+                  "unavailable",
+                  "invalid",
+                  "conflict",
+                  "not_found"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            },
+            "required": [
+              "op",
+              "ok",
+              "part",
+              "parts",
+              "body"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    }
+  ]
+}

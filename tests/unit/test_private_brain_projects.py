@@ -37,6 +37,7 @@ def data_dir(tmp_path: Path) -> Path:
     return folder
 
 
+# Uses the isolated data folder, where these tests register projects.
 @pytest.fixture
 def library(data_dir: Path) -> Iterator[BrainLibrary]:
     service = BrainLibrary(data_dir, start=False)
@@ -339,6 +340,99 @@ async def test_a_project_holding_a_private_brain_hides_it_from_the_sandboxed_tur
     # A turn that can't be sandboxed has no way to hide it.
     with pytest.raises(ChatProviderError, match="journal.*Allow cloud processing.*localhost"):
         await _turn(monkeypatch, tmp_path, project, sandboxed=False)
+
+
+@pytest.mark.asyncio
+async def test_a_sandboxed_turn_hides_a_private_brain_outside_its_project(
+    monkeypatch, library, data_dir, tmp_path
+) -> None:
+    # Claude Code's sandbox reads the whole computer except what it denies, so a private
+    # brain beside the project, such as ~/Notes/Private, must be denied too.
+    project = tmp_path / "project"
+    project.mkdir()
+    beside = tmp_path / "Notes" / "Private"
+    register(library, beside, cloud=False)
+    memory = tmp_path / "Memory"
+    register(library, memory, cloud=False)
+    register(library, tmp_path / "Shared", cloud=True)
+    store = sqlite3.connect(data_dir / "rem-home.sqlite3")
+    store.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, body TEXT NOT NULL)")
+    store.execute(
+        "INSERT INTO settings VALUES('config', ?)",
+        (json.dumps({"brain": {"enabled": True, "root": str(memory)}}),),
+    )
+    store.commit()
+    store.close()
+    settings = await _turn(monkeypatch, tmp_path, project, sandboxed=True)
+    files = settings["sandbox"]["filesystem"]
+    rules = settings["permissions"]["deny"]
+    hidden = str(beside.resolve())
+    assert hidden in files["denyRead"] and hidden in files["denyWrite"]
+    for tool in ("Read", "Edit", "Grep", "Glob"):
+        assert f"{tool}(/{hidden}/**)" in rules
+    # The approved Settings > Memory folder and a brain allowing cloud processing stay.
+    for kept in (memory, tmp_path / "Shared"):
+        assert str(kept.resolve()) not in files["denyRead"]
+        assert f"Read(/{kept.resolve()}/**)" not in rules
+    # An unsandboxed turn in the project is unchanged: it isn't refused for that brain.
+    plain = await _turn(monkeypatch, tmp_path, project, sandboxed=False)
+    assert f"Read(/{hidden}/**)" not in plain.get("permissions", {}).get("deny", [])
+
+
+def test_a_sandboxed_agent_step_hides_a_private_brain_outside_its_folder(
+    monkeypatch, library, data_dir, tmp_path
+) -> None:
+    from gofer.core.provider_profiles import ResolvedProviderSettings
+    from gofer.rattish.agent_sandbox import SandboxError, prepare_step
+
+    work = tmp_path / "work"
+    work.mkdir()
+    beside = tmp_path / "Notes" / "Private"
+    register(library, beside, cloud=False)
+    kwargs: dict[str, Any] = {
+        "extra_paths": [],
+        "data_dir": data_dir,
+        "run_id": "run-1",
+        "triggered": False,
+        "platform": "linux",
+    }
+    monkeypatch.setattr(claude_sandbox, "unavailable_reason", lambda platform=None: None)
+    prepared = prepare_step(
+        "claude_code",
+        {},
+        ResolvedProviderSettings(subscription="claude_code"),
+        working_dir=work,
+        **kwargs,
+    )
+    args = prepared.settings.extra_args
+    settings = json.loads(args[args.index("--settings") + 1])
+    hidden = str(beside.resolve())
+    assert hidden in settings["sandbox"]["filesystem"]["denyRead"]
+    assert hidden in settings["sandbox"]["filesystem"]["denyWrite"]
+    for tool in ("Read", "Edit", "Grep", "Glob"):
+        assert f"{tool}(/{hidden}/**)" in settings["permissions"]["deny"]
+    # A step whose folder is inside a private brain is refused, as Rem's turns are.
+    inside = beside / "drafts"
+    inside.mkdir()
+    with pytest.raises(SandboxError) as refused:
+        prepare_step(
+            "claude_code",
+            {},
+            ResolvedProviderSettings(subscription="claude_code"),
+            working_dir=inside,
+            **kwargs,
+        )
+    assert refused.value.code == "RATTISH_SANDBOX_PRIVATE_BRAIN"
+    assert "Private" in refused.value.message
+    # So is one given an extra folder that holds a private brain to write in.
+    with pytest.raises(SandboxError, match="can't hide"):
+        prepare_step(
+            "claude_code",
+            {},
+            ResolvedProviderSettings(subscription="claude_code"),
+            working_dir=work,
+            **{**kwargs, "extra_paths": [tmp_path / "Notes"]},
+        )
 
 
 @pytest.mark.asyncio

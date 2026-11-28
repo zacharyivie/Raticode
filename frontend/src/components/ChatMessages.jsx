@@ -7,6 +7,7 @@ import { buildThoughtTrace } from "../lib/chatThreads.js";
 import { isForkableMessage } from "../lib/forkThread.js";
 import { MessageAttachments } from "./ChatComposer.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
+import { clockTime, runLength } from "../lib/timeText.js";
 
 const ChatSources = lazy(() => import("./ChatSources.jsx"));
 
@@ -197,6 +198,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = fal
                   : <>{message.interrupted ? <span className="mb-2 block text-xs text-muted">Partial response. Rem was interrupted.</span> : null}<MarkdownMessage inverse={isUser && !fromRem} loadWebImages={Boolean(message.sources?.length)} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} /></>}
                 {!isUser && message.kind !== "streaming" && (message.sources?.length || /youtu\.?be/.test(message.body))
                   ? <Suspense fallback={null}><ChatSources body={message.body} sources={message.sources} /></Suspense> : null}
+                {/* Files a worker's reply links to, shown like the user's attachments, as in Rem's chat. */}
+                {!isUser && message.linked_files?.length ? <div role="group" aria-label="Linked files"><MessageAttachments attachments={message.linked_files} onOpenLink={onOpenLink} /></div> : null}
                 {!isUser && message.kind !== "streaming" ? (
                   <div className="mt-1 flex justify-end border-t border-line/70 pt-1">
                     <button
@@ -228,7 +231,7 @@ function TurnSummaryCard({ message, onUndo }) {
   const visibleFiles = showAllFiles ? files : files.slice(0, 3);
   const liveDurationMs = useLiveDuration(message.startedAt, message.running);
   const timing = message.running
-    ? `Running for ${formatAssistantDuration(liveDurationMs)}`
+    ? `Running for ${runLength(Math.floor(liveDurationMs / 1000))}`
     : formatAssistantTurnTiming(message.completedAt, message.durationMs);
 
   if (!changes) {
@@ -350,7 +353,7 @@ function AssistantDiffPreview({ file }) {
   );
 }
 
-export function assistantChangeLabel(files) {
+function assistantChangeLabel(files) {
   const count = files.length;
   const noun = count === 1 ? "file" : "files";
   if (count && files.every((file) => file.status === "added")) return `Created ${count} ${noun}`;
@@ -382,23 +385,10 @@ function useLiveDuration(startedAt, running) {
   return durationMs;
 }
 
-export function formatAssistantDuration(durationMs) {
+function formatAssistantTurnTiming(completedAt, durationMs) {
+  const completed = clockTime(completedAt) || "Completed";
   const milliseconds = Math.max(0, Number(durationMs) || 0);
-  const seconds = Math.floor(milliseconds / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-}
-
-export function formatAssistantTurnTiming(completedAt, durationMs) {
-  const date = new Date(completedAt);
-  const completed = Number.isNaN(date.getTime())
-    ? "Completed"
-    : date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const milliseconds = Math.max(0, Number(durationMs) || 0);
-  const seconds = Math.round(milliseconds / 1000);
-  const duration = milliseconds < 1000
-    ? "<1s"
-    : formatAssistantDuration(seconds * 1000);
+  const duration = milliseconds < 1000 ? "<1s" : runLength(milliseconds / 1000);
   return `${completed} · Ran for ${duration}`;
 }
 
@@ -618,7 +608,7 @@ function EditDisclosure({ entry, onOpenFile, initiallyExpanded = false }) {
   );
 }
 
-export function editTraceDetails(entry) {
+function editTraceDetails(entry) {
   if (!entry || entry.kind !== "tool" || String(entry.title || "").trim().toLowerCase() !== "edit") {
     return null;
   }

@@ -396,7 +396,9 @@ show its reason under Settings > Devices.
 
 1. Bump versions before preparation, move the website to the new version
    (`npm run set-release -- X.Y.Z` in `website/`, then `npm run check`), and commit the
-   release notes and code. Bump the phone version in the same commit when the phone app
+   release notes and code. Rename `CHANGELOG.md`'s `## Unreleased` heading to
+   `## X.Y.Z - YYYY-MM-DD`: the app's What's new shows only version sections, and
+   `release-candidate.py versions` refuses a version without one. Bump the phone version in the same commit when the phone app
    ships with this release (see `mobile/android/docs/releasing.md`), and run `set-release`
    after it so the site names that version. The desktop candidate ignores a later
    website-only push, and its same-files check would then refuse the tag. Push to `origin/stage`. Every stage push prepares the current package version, even if you

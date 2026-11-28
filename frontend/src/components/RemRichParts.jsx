@@ -207,9 +207,10 @@ export function ProgressSteps({ status, now }) {
 }
 
 // Shown when new messages arrive while you're reading further up.
-export function NewMessagesPill({ count, onClick }) {
+// Thread chats pass their own className: the default style uses Rem home's colors.
+export function NewMessagesPill({ count, onClick, className = "rem-new-pill" }) {
   if (!count) return null;
-  return <button type="button" className="rem-new-pill" onClick={onClick}>
+  return <button type="button" className={className} onClick={onClick}>
     <ArrowDown size={13} aria-hidden="true" />{count === 1 ? "1 new message" : `${count} new messages`}
   </button>;
 }

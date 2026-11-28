@@ -27,6 +27,7 @@ from gofer.ui.organization_store import (
     ticket_prefix,
 )
 from gofer.utils.atomic_output import open_binary_input
+from gofer.utils.cron_times import next_cron_time
 from gofer.utils.instants import aware_instant
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ def next_occurrence(routine: dict[str, Any], at: datetime) -> str | None:
                 "Routine %s has a schedule that can't be read: %s", routine.get("id"), exc
             )
             return None
-        result = schedule.get_next_fire_time(None, at + timedelta(seconds=1))
+        result = next_cron_time(schedule, at)
         return result.astimezone(UTC).isoformat() if result else None
     if routine.get("intervalSeconds"):
         return (at + timedelta(seconds=routine["intervalSeconds"])).isoformat()
@@ -186,7 +187,7 @@ def _read_evidence(
     if employee_id:
         employee = next((e for e in org["config"]["employees"] if e["id"] == employee_id), None)
         if employee is None:
-            raise ValueError("Evidence owner is no longer an employee")
+            raise ValueError("Evidence owner is no longer a worker")
         if employee.get("workspacePaths") is not None:
             roots = [root for root in roots if str(root) in employee["workspacePaths"]]
     allowed = {project_identity(str(root))[0] for root in roots}
@@ -296,7 +297,7 @@ def task_reason(org: dict[str, Any], task: dict[str, Any], at: datetime | None =
     if task["dueAt"] and datetime.fromisoformat(task["dueAt"]) > at:
         return "Scheduled for " + str(task["dueAt"])
     if task["turns"] >= config["maxTaskTurns"]:
-        return "Task turn limit reached"
+        return "Ticket run limit reached"
     root = workspace(org, task)
     if not root:
         return "Assign an owned workspace"
@@ -399,8 +400,8 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
     if not isolated:
         effective = min(effective, max(1, len(roots)))
     note = (
-        f"Up to {effective} at once: each worker runs one task at a time"
-        + ("" if isolated else ", and tasks in the same project folder take turns")
+        f"Up to {effective} at once: each worker runs one ticket at a time"
+        + ("" if isolated else ", and tickets in the same project folder take turns")
         + (f"; {available} workers are available" if available < config["maxConcurrency"] else "")
         + ". Each start also needs a free worker under its computer's Worker limit"
         " (Settings › Computers)."
@@ -460,15 +461,15 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
             )
         ],
         "delegation": (
-            "Employee and delegated tasks share turn reservations and cancellation lineage. "
+            "Worker and delegated tickets share run reservations and cancellation lineage. "
             "Use owner-granted destinations for swarm, paired desktop or HTTPS gateway work."
         ),
         "isolationNote": (
-            "Each task runs in its own git worktree and branch; the project folder is not edited."
+            "Each ticket runs in its own git worktree and branch; the project folder is not edited."
             if isolated
-            else "Employees edit the project folder directly and need a clean checkout to start."
+            else "Workers edit the project folder directly and need a clean checkout to start."
         )
-        + (" git push is blocked in employee runs." if config.get("blockGitPush", True) else ""),
+        + (" git push is blocked in worker runs." if config.get("blockGitPush", True) else ""),
     }
 
 
@@ -609,7 +610,7 @@ def outcomes(org: dict[str, Any]) -> dict[str, Any]:
         "employees": rows,
         "goals": goals,
         "routingAdvice": (
-            "Compare reviewed work of similar difficulty. Cost and task counts alone "
+            "Compare reviewed work of similar difficulty. Cost and ticket counts alone "
             "do not measure quality; changes require a human-selected cohort."
         ),
     }
@@ -881,7 +882,7 @@ def operation(
         raise ValueError("Only the user or Rem can change organization operating policy")
     if action == "resume_all":
         if params.get("expectedRevision") != org["revision"]:
-            raise ValueError("Configuration changed. Reload before resuming employees")
+            raise ValueError("Configuration changed. Reload before resuming workers")
         config = copy.deepcopy(org["config"])
         for employee in config["employees"]:
             employee["paused"] = False
@@ -919,9 +920,9 @@ def operation(
     def mutate(current: dict[str, Any]) -> dict[str, Any]:
         runtime = current["runtime"]
         if run_id is not None and not any(t["claim"] == run_id for t in runtime["tasks"]):
-            raise ValueError("Employee turn was revoked")
+            raise ValueError("Worker turn was revoked")
         if employee_id and current["runtime"]["generation"] != org["runtime"]["generation"]:
-            raise ValueError("Employee turn was revoked")
+            raise ValueError("Worker turn was revoked")
         if action == "routine_save":
             previous = runtime["routines"].get(prepared["id"])
             if previous and previous["revision"] != params.get("expectedRevision"):
@@ -940,7 +941,7 @@ def operation(
         elif action == "memory_save":
             owner = employee_id or params.get("employeeId")
             if owner not in {e["id"] for e in current["config"]["employees"]}:
-                raise ValueError("Choose an employee")
+                raise ValueError("Choose a worker")
             body = params.get("body")
             if not isinstance(body, str) or not body.strip() or len(body) > 100_000:
                 raise ValueError("Memory needs bounded text")
@@ -1148,7 +1149,7 @@ def resolve_secrets(
             record = org["runtime"].get("secrets", {}).get(reference)
             if reference not in employee.get("secretRefs", []) or not record or record["revoked"]:
                 raise ValueError(
-                    "MCP secret reference is missing, revoked or outside employee grants"
+                    "MCP secret reference is missing, revoked or outside the worker's grants"
                 )
             account = record["account"]
             # A headless backend without a keychain reads its secrets folder instead.

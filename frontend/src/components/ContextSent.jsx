@@ -4,7 +4,7 @@ import "./ContextSent.css";
 
 // One turn's prompt, part by part: how many characters each part was and roughly how
 // many tokens. Sizes only; Raticode never keeps the text itself.
-export function ContextSentBreakdown({ turn }) {
+function ContextSentBreakdown({ turn }) {
   const rows = contextRows(turn);
   if (!rows.length) return null;
   return <div className="context-sent-turn">

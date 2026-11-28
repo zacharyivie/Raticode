@@ -25,6 +25,9 @@ const { PAGE_AGENT } = require("./agent-browser.cjs");
 const { ChromiumContents, isInternalPage: isChromiumInternalPage } = require("./chromium-contents.cjs");
 const { addonSlugFromUrl, createFirefoxManager } = require("./firefox-manager.cjs");
 const { watchMedia } = require("./browser-media.cjs");
+const { createBrowserContextMenu } = require("./browser-context-menu.cjs");
+const { createPreviewGuard } = require("./browser-preview-guard.cjs");
+const { createBrowserDownloads } = require("./browser-downloads.cjs");
 const {
   acceptLanguageList,
   createClientHints,
@@ -41,7 +44,6 @@ const {
   cookieMatchesSite,
   hostOf,
   isCertificateErrorCode,
-  isDangerousDownload,
   nextZoomLevel,
   permissionDecision,
   permissionKeys,
@@ -49,22 +51,15 @@ const {
   popupDecision,
   remSiteAllowed,
   sanitizeBrowserPolicy,
-  sanitizeFilename,
   securityState,
   siteKey,
-  uniqueDownloadPath,
   userAgentWithoutEmbedderTokens,
   externalProtocolOf,
 } = policyRules;
 
 const PROMPT_TIMEOUT_MS = 2 * 60 * 1000;
-// What the preview profile's request guard decides: local files, and anything
-// that would reach the network (ws: and wss: included).
-const PREVIEW_GUARDED_URLS = ["file://*/*", "http://*/*", "https://*/*", "ws://*/*", "wss://*/*"];
 // Google's "Couldn't sign you in · This browser or app may not be secure" page.
 const GOOGLE_REJECTED = /^https:\/\/accounts\.google\.com\/(?:v\d+\/)?signin\/rejected/i;
-const PDF_TIMEOUT_MS = 60 * 1000;
-const SAVE_AS_TIMEOUT_MS = 30 * 1000;
 const PAGE_CONTEXT_WORLD_ID = 1918;
 const UA_SAMPLE_WORLD_ID = 1919;
 // Where a file from another app (scripts off) notes the link the user clicked.
@@ -174,13 +169,11 @@ function createBrowserSessions({
   const sessions = new Map();
   const ownersWithCleanup = new WeakSet();
   const prompts = new Map();
-  const downloads = new Map();
   const certificateExceptions = new Set();
   const verifiedCertificates = new Map();
   const clientCertificateChoices = new Map();
   const childWindows = new Map();
   const clientHints = new Map();
-  const firefoxDownloads = new Map();
   const lastMedia = new WeakMap();
   let policy = sanitizeBrowserPolicy({});
   // Browsers that run without a window and stream their tabs, by engine name.
@@ -213,6 +206,26 @@ function createBrowserSessions({
   let installedIdentity = null;
   let privateProfileInstalled = false;
   let privateCleanupTimer = null;
+  const {
+    showContextMenu, print, savePage, saveAsPdf, toggleBookmark, showMessage, takePendingSaveAs,
+  } = createBrowserContextMenu({
+    Menu, app, clipboard, dialog, shell, getMainWindow, log, store,
+    getPolicy: () => policy,
+    liveContents, isStreamed, engineLabel, openPageLink, reload, emitCommand, emitState, emitLibraryChanged,
+  });
+  const {
+    installPreviewRequestGuard, remoteBlockedCount, remoteContentAllowed, previewBelongsOnline, setPreviewRemote, previewMayRead,
+  } = createPreviewGuard({
+    profile, sessions, store, liveContents, emitState, reload, moveToProfile, sessionState, localFilePath, resolvePreviewPath,
+  });
+  // After the menu: it takes takePendingSaveAs from there.
+  const {
+    handleDownload, forgetPrivateDownloads, removeStrayQuarantine, downloadAction, downloadApps, firefoxDownloadBegan, firefoxDownloadEnded,
+  } = createBrowserDownloads({
+    getPolicy: () => policy,
+    sessions, store, log, app, shell, getMainWindow, openWith, quarantineDir,
+    recordAgentActivity, sessionForContents, liveContents, takePendingSaveAs, engineLabel,
+  });
 
   // ---------------------------------------------------------------------------
   // Profiles
@@ -282,71 +295,6 @@ function createBrowserSessions({
     });
   }
 
-  // Local HTML previews run as file:// pages, and Electron lets those read any other
-  // file:// URL (grantFileProtocolExtraPrivileges). Without a check a previewed page
-  // could fetch ~/.ssh or list folders and send the result to a website (CWE-552).
-  // Every file:// request in the preview profile, the page itself included, must be
-  // inside the grant or folder of the preview that made it. Another open preview's
-  // folder doesn't count, and a request no open preview made is refused.
-  //
-  // Previews are also offline: a page can't send what it read from its own folder
-  // anywhere, or tell a website it was opened. A project file loads web content
-  // only after the user chose "Load remote content" for that file; a file another
-  // app handed to Raticode never does. Electron keeps one listener per profile,
-  // so this one decides both.
-  function installPreviewRequestGuard(kind) {
-    const webRequest = profile(kind)?.webRequest;
-    if (typeof webRequest?.onBeforeRequest !== "function") return;
-    webRequest.onBeforeRequest({ urls: PREVIEW_GUARDED_URLS }, (details, callback) => {
-      if (/^file:/i.test(String(details?.url ?? ""))) {
-        callback({ cancel: !previewFileAllowed(details || {}) });
-        return;
-      }
-      callback({ cancel: !previewRemoteRequestAllowed(details || {}) });
-    });
-  }
-
-  // The open preview whose page made a request, if any.
-  function previewForRequest(details) {
-    const id = details?.webContentsId;
-    if (typeof id !== "number") return null;
-    return [...sessions.values()].find((item) => item.kind === "preview" && liveContents(item)?.id === id) || null;
-  }
-
-  function previewRemoteRequestAllowed(details) {
-    const session = previewForRequest(details);
-    if (!session) return false;
-    if (remoteContentAllowed(session)) return true;
-    // Counted for the page on screen; the bar appears with the first one.
-    const url = liveContents(session)?.getURL() || "";
-    if (session.remoteBlocked?.url !== url) session.remoteBlocked = { url, count: 0 };
-    session.remoteBlocked.count += 1;
-    if (session.remoteBlocked.count === 1) emitState(session);
-    return false;
-  }
-
-  function remoteBlockedCount(session) {
-    const url = liveContents(session)?.getURL() || "";
-    return session.remoteBlocked?.url === url ? session.remoteBlocked.count : 0;
-  }
-
-  // The local file a preview shows, while it shows one.
-  function previewFilePath(session) {
-    const url = liveContents(session)?.getURL() || "";
-    return localFilePath(url);
-  }
-
-  function remoteContentAllowed(session) {
-    if (session.kind !== "preview" || session.external || session.online !== true) return false;
-    const file = previewFilePath(session);
-    return Boolean(file) && store.previewRemoteAllowed?.(file) === true;
-  }
-
-  // Whether a preview showing this file belongs in the online profile.
-  function previewBelongsOnline(session, file) {
-    return session.kind === "preview" && !session.external && Boolean(file) && store.previewRemoteAllowed?.(file) === true;
-  }
-
   // The offline preview profile reaches nothing, even by routes its request
   // guard never sees. Previews wait for this before loading their file.
   let offlineProxyReady = null;
@@ -358,25 +306,6 @@ function createBrowserSessions({
     try { setting = offline.setProxy(OFFLINE_PROXY); } catch (error) { failed(error); return; }
     if (typeof setting?.then !== "function") return;
     offlineProxyReady = Promise.resolve(setting).catch(failed).finally(() => { offlineProxyReady = null; });
-  }
-
-  // "Load remote content" for the file a project preview shows, remembered by
-  // its path. Every open preview of that file moves to the profile that
-  // matches the new choice and loads the file again.
-  function setPreviewRemote(session, allowed) {
-    if (session.kind !== "preview") throw new Error("Only local HTML previews block remote content.");
-    if (session.external) throw new Error("Files opened from another app never load remote content.");
-    const file = previewFilePath(session);
-    if (!file) throw new Error("This tab isn't showing a local file.");
-    store.setPreviewRemote(file, allowed);
-    for (const other of sessions.values()) {
-      if (other.kind !== "preview" || other.external || previewFilePath(other) !== file) continue;
-      other.remoteBlocked = null;
-      if ((other.online === true) !== previewBelongsOnline(other, file)) moveToProfile(other, previewBelongsOnline(other, file));
-      else reload(other, false);
-      emitState(other);
-    }
-    return sessionState(session);
   }
 
   // A preview's profile is fixed when its view is made, so changing between
@@ -394,29 +323,6 @@ function createBrowserSessions({
     session.pendingSrc = target;
     createView(session);
     if (session.lastPlace) placeView(session, session.lastPlace);
-  }
-
-  // A preview may read a local file only inside its folder grant or, without one, the
-  // folder of the file it opened with. The real path counts, so links can't lead out.
-  function previewMayRead(session, target) {
-    if (session.grantId) {
-      try {
-        resolvePreviewPath(target, { grantId: session.grantId, mustExist: true });
-        return true;
-      } catch { /* Not inside this preview's grant. */ }
-    }
-    if (!session.previewFolder) return false;
-    let real;
-    try { real = fs.realpathSync(target); } catch { return false; }
-    const relative = path.relative(session.previewFolder, real);
-    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-  }
-
-  function previewFileAllowed(details) {
-    const session = previewForRequest(details);
-    if (!session) return false;
-    const target = localFilePath(details.url);
-    return Boolean(target) && previewMayRead(session, target);
   }
 
   // ---------------------------------------------------------------------------
@@ -453,36 +359,6 @@ function createBrowserSessions({
     else delete permissions[key];
     updateSiteOf(session, origin, { permissions });
     return undefined;
-  }
-
-  // Nothing lists a private download after this, so an unfinished one stops
-  // and a dangerous one still waiting for review doesn't stay on disk.
-  function forgetPrivateDownloads() {
-    for (const [id, live] of downloads) {
-      if (!live.entry.private) continue;
-      live.entry.forgotten = true;
-      downloads.delete(id);
-      if (live.entry.state === "progressing") {
-        try { live.item.cancel(); } catch { /* It has just finished. */ }
-      }
-    }
-    for (const entry of store.listDownloads()) {
-      if (entry.private && entry.quarantinePath) fs.rmSync(entry.quarantinePath, { force: true });
-    }
-    store.forgetPrivateDownloads();
-    emitDownloads();
-  }
-
-  // A private download left waiting for review when Raticode last stopped has
-  // no list entry to review it from.
-  function removeStrayQuarantine() {
-    try {
-      const listed = new Set(store.listDownloads().map((item) => item.quarantinePath).filter(Boolean));
-      for (const name of fs.readdirSync(quarantineDir)) {
-        const file = path.join(quarantineDir, name);
-        if (name.endsWith(".download") && !listed.has(file)) fs.rmSync(file, { force: true });
-      }
-    } catch { /* No quarantine folder yet. */ }
   }
 
   // A tab that is moved between panes closes and reopens at once, so the data
@@ -535,11 +411,6 @@ function createBrowserSessions({
       const responseHeaders = Object.fromEntries(Object.entries(details.responseHeaders || {}).filter(([key]) => key.toLowerCase() !== "location"));
       callback({ statusLine: "HTTP/1.1 307 Temporary Redirect", responseHeaders: { ...responseHeaders, Location: [details.url] } });
     });
-  }
-
-  // Electron 44 made clipboard writes asynchronous.
-  function copyText(text) {
-    void Promise.resolve(clipboard.writeText(text)).catch((error) => log("warn", `Copy failed: ${error.message}`));
   }
 
   function firstPartyUrl(details) {
@@ -779,11 +650,6 @@ function createBrowserSessions({
     const offset = Math.max(0, value.entries.length - MAX_RESTORED_ENTRIES);
     const index = Math.min(Math.max(Number(value.index) - offset || 0, 0), entries.length - 1);
     return { entries, index };
-  }
-
-  // Raticode creates every tab's view itself; nothing else may attach a <webview>.
-  function isPendingAttach() {
-    return false;
   }
 
   // Until a view is set up it may not open anything.
@@ -1263,65 +1129,6 @@ function createBrowserSessions({
     else contents.openDevTools({ mode: "detach" });
   }
 
-  // Chromium's print dialog fails, and can crash, when the system has no
-  // printers (no CUPS on Linux). Check first and offer a PDF instead.
-  async function print(session) {
-    const contents = liveContents(session);
-    if (!contents) return;
-    // A headless Firefox or Chrome cannot show a print dialog; a PDF is the closest.
-    if (isStreamed(contents)) {
-      await saveAsPdf(session);
-      return;
-    }
-    let printers = [];
-    try {
-      printers = typeof contents.getPrintersAsync === "function" ? await contents.getPrintersAsync() : [];
-    } catch (error) {
-      log("warn", `Could not list printers: ${error.message}`);
-    }
-    if (!printers.length) {
-      const choice = await showMessage({
-        type: "info",
-        message: "No printers are set up",
-        detail: "Raticode could not find a printer on this computer. Set one up in your system settings (CUPS on Linux), or save the page as a PDF.",
-        buttons: ["Save as PDF…", "Cancel"],
-        defaultId: 0,
-        cancelId: 1,
-      });
-      if (choice === 0) await saveAsPdf(session);
-      return;
-    }
-    if (!liveContents(session)) return;
-    try {
-      contents.print({ printBackground: true }, (success, reason) => {
-        if (!success && reason && !/cancel/i.test(reason)) {
-          log("warn", `Print failed: ${reason}`);
-          void showMessage({ type: "error", message: "Could not print this page", detail: `${reason}. You can save the page as a PDF instead.`, buttons: ["OK"] });
-        }
-      });
-    } catch (error) {
-      log("warn", `Print failed: ${error.message}`);
-      await showMessage({ type: "error", message: "Could not print this page", detail: error.message, buttons: ["OK"] });
-    }
-  }
-
-  async function showMessage(options) {
-    const owner = getMainWindow();
-    try {
-      const result = owner && !owner.isDestroyed() ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
-      return result?.response ?? -1;
-    } catch (error) {
-      log("warn", `Could not show a message: ${error.message}`);
-      return -1;
-    }
-  }
-
-  async function chooseSavePath(options) {
-    const owner = getMainWindow();
-    const result = owner && !owner.isDestroyed() ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
-    return result.canceled || !result.filePath ? "" : result.filePath;
-  }
-
   function isAllowedNavigation(session, value) {
     let url;
     try { url = new URL(value); } catch { return false; }
@@ -1746,351 +1553,6 @@ function createBrowserSessions({
   }
 
   // ---------------------------------------------------------------------------
-  // Downloads
-
-  function handleDownload(event, item, contents, kind) {
-    const session = sessionForContents(contents);
-    const byRem = kind === "rem" || Boolean(session?.agent && !session.agent.shared);
-    const filename = sanitizeFilename(item.getFilename());
-    if (byRem && policy.remDownloads !== "allow") {
-      event.preventDefault();
-      if (session) {
-        session.lastBlockedDownload = filename;
-        recordAgentActivity(session, { action: "download blocked", detail: filename, at: Date.now() });
-      }
-      return;
-    }
-    const id = crypto.randomUUID();
-    const dangerous = isDangerousDownload(filename);
-    const directory = app.getPath("downloads");
-    const saveAs = takePendingSaveAs(session, item);
-    const askWhere = !dangerous && !byRem && (policy.askWhereToSave || Boolean(saveAs));
-    let finalPath = "";
-    if (dangerous) {
-      fs.mkdirSync(quarantineDir, { recursive: true, mode: 0o700 });
-      item.setSavePath(path.join(quarantineDir, `${id}.download`));
-    } else if (askWhere) {
-      item.setSaveDialogOptions({ defaultPath: path.join(directory, filename), title: saveAs || "Save download" });
-    } else {
-      finalPath = uniqueDownloadPath(directory, filename, (candidate) => fs.existsSync(candidate) || [...downloads.values()].some((value) => value.entry.path === candidate));
-      item.setSavePath(finalPath);
-    }
-    const entry = {
-      id,
-      url: String(item.getURL()).slice(0, 4096),
-      filename,
-      path: finalPath,
-      mimeType: item.getMimeType(),
-      state: "progressing",
-      paused: false,
-      receivedBytes: 0,
-      totalBytes: item.getTotalBytes(),
-      startedAt: Date.now(),
-      dangerous,
-      byRem,
-      ...(session?.privateBrowsing ? { private: true } : {}),
-    };
-    downloads.set(id, { item, entry });
-    store.upsertDownload(entry);
-    emitDownloads();
-    let lastEmit = 0;
-    item.on("updated", (_event, state) => {
-      if (entry.forgotten) return;
-      entry.state = state === "interrupted" ? "interrupted" : "progressing";
-      entry.paused = item.isPaused();
-      entry.receivedBytes = item.getReceivedBytes();
-      entry.totalBytes = item.getTotalBytes();
-      if (!entry.path && !dangerous) entry.path = item.getSavePath();
-      const time = Date.now();
-      if (time - lastEmit > 250) {
-        lastEmit = time;
-        store.upsertDownload(entry);
-        emitDownloads();
-      }
-    });
-    item.once("done", (_event, state) => {
-      if (entry.forgotten) return;
-      // Cancelling the save dialog is not a download worth listing.
-      if (askWhere && state === "cancelled" && !item.getSavePath()) {
-        downloads.delete(id);
-        store.removeDownload(id);
-        emitDownloads();
-        return;
-      }
-      entry.receivedBytes = item.getReceivedBytes();
-      entry.paused = false;
-      if (!entry.path && !dangerous) entry.path = item.getSavePath();
-      entry.state = state === "completed" ? (dangerous ? "quarantined" : "completed") : state;
-      entry.finishedAt = Date.now();
-      if (dangerous && state === "completed") entry.quarantinePath = item.getSavePath();
-      store.upsertDownload(entry);
-      emitDownloads();
-    });
-  }
-
-  function finishedDownloadPath(entry) {
-    if (entry?.state !== "completed" || !entry.path) throw new Error("Only finished downloads can be opened.");
-    if (!fs.existsSync(entry.path)) throw new Error("The file was moved or deleted.");
-    return entry.path;
-  }
-
-  async function downloadApps(id) {
-    const entry = store.listDownloads().find((item) => item.id === id);
-    if (!entry) throw new Error("That download is no longer listed.");
-    const filePath = finishedDownloadPath(entry);
-    try {
-      return { apps: openWith ? await openWith.listApps(filePath) : [] };
-    } catch (error) {
-      log("warn", `Listing apps for a download failed: ${error.message}`);
-      return { apps: [] };
-    }
-  }
-
-  async function openDownloadWith(entry, appId) {
-    const filePath = finishedDownloadPath(entry);
-    if (!openWith) throw new Error("Open with is not supported on this system.");
-    await openWith.openWith(filePath, appId);
-    return { downloads: store.listDownloads() };
-  }
-
-  function downloadAction(action, id, options = {}) {
-    const live = downloads.get(id);
-    const entry = live?.entry || store.listDownloads().find((item) => item.id === id);
-    if (!entry && action !== "clear") throw new Error("That download is no longer listed.");
-    switch (action) {
-      case "pause": live?.item.pause(); break;
-      case "resume": if (live?.item.canResume()) live.item.resume(); break;
-      case "cancel": live?.item.cancel(); break;
-      case "open":
-        if (entry.state !== "completed" || !entry.path) throw new Error("Only finished downloads can be opened.");
-        void shell.openPath(entry.path);
-        break;
-      case "open-with":
-        return openDownloadWith(entry, String(options.appId || ""));
-      case "show":
-        if (entry.path && fs.existsSync(entry.path)) shell.showItemInFolder(entry.path);
-        else throw new Error("The file was moved or deleted.");
-        break;
-      case "keep": {
-        if (entry.state !== "quarantined" || !entry.quarantinePath) throw new Error("This download is not waiting for review.");
-        const target = uniqueDownloadPath(app.getPath("downloads"), entry.filename, fs.existsSync);
-        moveFile(entry.quarantinePath, target);
-        Object.assign(entry, { state: "completed", path: target, quarantinePath: "", dangerous: false, kept: true });
-        store.upsertDownload(entry);
-        break;
-      }
-      case "discard":
-        if (entry.quarantinePath) fs.rmSync(entry.quarantinePath, { force: true });
-        Object.assign(entry, { state: "cancelled", quarantinePath: "" });
-        store.upsertDownload(entry);
-        break;
-      case "retry": {
-        const owner = getMainWindow();
-        if (!/^https?:/i.test(entry.url) || !owner) throw new Error("This download cannot be retried.");
-        const userTab = [...sessions.values()].find((item) => item.kind === "user" && Boolean(item.privateBrowsing) === Boolean(entry.private) && liveContents(item));
-        if (!userTab) throw new Error("Open a browser tab to retry this download.");
-        liveContents(userTab).downloadURL(entry.url);
-        store.removeDownload(id);
-        break;
-      }
-      case "remove":
-        if (entry.state === "progressing") live?.item.cancel();
-        if (entry.quarantinePath) fs.rmSync(entry.quarantinePath, { force: true });
-        downloads.delete(id);
-        store.removeDownload(id);
-        break;
-      case "clear":
-        for (const item of store.listDownloads()) {
-          if (item.state === "progressing" || item.state === "quarantined") continue;
-          downloads.delete(item.id);
-        }
-        store.clearDownloads();
-        break;
-      default:
-        throw new Error(`Unknown download action: ${action}`);
-    }
-    emitDownloads();
-    return { downloads: store.listDownloads() };
-  }
-
-  function emitDownloads() {
-    const owner = getMainWindow();
-    if (owner && !owner.isDestroyed()) owner.webContents.send("gofer:browser-downloads", { downloads: store.listDownloads() });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Context menu
-
-  function showContextMenu(session, params) {
-    const contents = liveContents(session);
-    if (!contents) return;
-    // Frames other than the main one do not report the element they show.
-    if (params.frame && params.frame !== contents.mainFrame) session.contextElement = null;
-    const element = session.contextElement || null;
-    // Chrome and Edge tabs report the right-click themselves; their page,
-    // clipboard and editing live in a browser without a window.
-    const streamed = isStreamed(contents);
-    const edit = (command) => () => {
-      const text = command === "paste" ? clipboard.readText() : "";
-      void contents.editCommand(command, text).catch((error) => log("warn", `${engineLabel(contents.engine)} could not ${command}: ${error.message}`));
-    };
-    const template = [];
-    const separator = () => { if (template.length && template.at(-1).type !== "separator") template.push({ type: "separator" }); };
-    if (params.misspelledWord) {
-      for (const suggestion of (params.dictionarySuggestions || []).slice(0, 5)) {
-        template.push({ label: suggestion, click: () => contents.replaceMisspelling(suggestion) });
-      }
-      if (!params.dictionarySuggestions?.length) template.push({ label: "No spelling suggestions", enabled: false });
-      template.push({ label: "Add to dictionary", click: () => contents.session.addWordToSpellCheckerDictionary(params.misspelledWord) });
-      separator();
-    }
-    if (params.linkURL && /^https?:/i.test(params.linkURL)) {
-      template.push(
-        { label: "Open link in new tab", click: () => openPageLink(session, params.linkURL, { background: true }) },
-        { label: "Open link in default browser", click: () => void shell.openExternal(params.linkURL) },
-        ...(streamed ? [] : [{ label: "Save link as…", click: () => saveLinkAs(session, params.linkURL) }]),
-        { label: "Copy link address", click: () => copyText(params.linkURL) },
-      );
-      separator();
-    } else if (!streamed && params.linkURL && /^(?:blob|data):/i.test(params.linkURL)) {
-      // A file the page built itself, such as an exported chat. It only
-      // exists inside this page, so it can be saved but not opened elsewhere.
-      template.push({ label: "Save link as…", click: () => saveLinkAs(session, params.linkURL) });
-      separator();
-    }
-    if (streamed && params.mediaType === "image" && params.srcURL) {
-      template.push(
-        { label: "Open image in new tab", click: () => openPageLink(session, params.srcURL, { background: true }) },
-        { label: "Copy image address", click: () => copyText(params.srcURL) },
-      );
-      separator();
-    } else if (params.mediaType === "image" && params.srcURL) {
-      template.push(
-        { label: "Save image as…", click: () => saveImageAs(session, params.srcURL) },
-        { label: "Copy image", click: () => contents.copyImageAt(params.x, params.y) },
-        { label: "Copy image address", click: () => copyText(params.srcURL) },
-      );
-      separator();
-    }
-    if (streamed && params.isEditable) {
-      template.push(
-        { label: "Undo", click: edit("undo") },
-        { label: "Redo", click: edit("redo") },
-        { type: "separator" },
-        { label: "Cut", enabled: Boolean(params.selectionText), click: edit("cut") },
-        { label: "Copy", enabled: Boolean(params.selectionText), click: edit("copy") },
-        { label: "Paste", click: edit("paste") },
-        { label: "Select all", click: edit("selectAll") },
-      );
-      separator();
-    } else if (params.isEditable) {
-      template.push({ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }, { role: "selectAll" });
-      separator();
-    } else if (params.selectionText) {
-      const text = params.selectionText.trim().replace(/\s+/g, " ");
-      template.push(
-        streamed ? { label: "Copy", click: edit("copy") } : { role: "copy" },
-        { label: `Search for “${text.length > 30 ? `${text.slice(0, 29)}…` : text}”`, click: () => openPageLink(session, policy.searchUrl.replace("{query}", encodeURIComponent(text.slice(0, 500))), { background: false }) },
-      );
-      separator();
-    }
-    // Local files ask about the open page only; Rem gets no further file access.
-    if (!session.privateBrowsing && (session.kind !== "preview" || /^file:/i.test(contents.getURL()))) {
-      template.push({ label: "Ask Rem about this", click: () => emitCommand(session, "ask-rem", { selection: String(params.selectionText || "").slice(0, 20000), element }) });
-      separator();
-    }
-    template.push(
-      { label: "Back", enabled: contents.navigationHistory.canGoBack(), click: () => contents.navigationHistory.goBack() },
-      { label: "Forward", enabled: contents.navigationHistory.canGoForward(), click: () => contents.navigationHistory.goForward() },
-      { label: "Reload", click: () => reload(session, false) },
-      { type: "separator" },
-      ...(session.kind === "user" ? [{ label: store.bookmarkFor(contents.getURL()) ? "Remove bookmark" : "Bookmark this page", click: () => toggleBookmark(session) }] : []),
-      ...(!streamed || contents.savePageFormat ? [{ label: "Save page as…", click: () => void savePage(session) }] : []),
-      // A browser without a window prints only to PDF.
-      ...(streamed ? [] : [{ label: "Print…", click: () => void print(session) }]),
-      { label: "Save as PDF…", click: () => void saveAsPdf(session) },
-      ...(streamed ? [] : [{ type: "separator" }, { label: "Inspect", click: () => contents.inspectElement(params.x, params.y) }]),
-    );
-    // The menu opens in the window the tab is in.
-    const owner = session.viewWindow && !session.viewWindow.isDestroyed() ? session.viewWindow : getMainWindow();
-    Menu.buildFromTemplate(template).popup(owner && !owner.isDestroyed() ? { window: owner } : {});
-  }
-
-  // The download that follows asks where to save, like Save page as….
-  function saveImageAs(session, url) {
-    startSaveAs(session, url, "Save image");
-  }
-
-  function saveLinkAs(session, url) {
-    startSaveAs(session, url, "Save link");
-  }
-
-  function startSaveAs(session, url, title) {
-    const contents = liveContents(session);
-    if (!contents) return;
-    session.pendingSaveAs = { url, title, at: Date.now() };
-    contents.downloadURL(url);
-  }
-
-  // The save dialog's title when this download is the one Save … as asked for.
-  function takePendingSaveAs(session, item) {
-    const pending = session?.pendingSaveAs;
-    if (!pending) return "";
-    session.pendingSaveAs = null;
-    const original = item.getURLChain?.()[0] || item.getURL();
-    return pending.url === original && Date.now() - pending.at < SAVE_AS_TIMEOUT_MS ? pending.title || "Save download" : "";
-  }
-
-  async function savePage(session) {
-    const contents = liveContents(session);
-    if (!contents) return;
-    try {
-      // Chrome and Edge tabs save the page as one file with its pictures.
-      const single = contents.savePageFormat === "mhtml";
-      const filePath = await chooseSavePath({
-        title: "Save page",
-        defaultPath: path.join(app.getPath("downloads"), `${sanitizeFilename(contents.getTitle() || "page")}.${single ? "mhtml" : "html"}`),
-        filters: single ? [{ name: "Web page, single file", extensions: ["mhtml", "mht"] }] : [{ name: "Web page", extensions: ["html", "htm"] }],
-      });
-      if (!filePath || !liveContents(session)) return;
-      await contents.savePage(filePath, "HTMLComplete");
-    } catch (error) {
-      log("warn", `Save page failed: ${error.message}`);
-      await showMessage({ type: "error", message: "Could not save this page", detail: error.message, buttons: ["OK"] });
-    }
-  }
-
-  async function saveAsPdf(session) {
-    const contents = liveContents(session);
-    if (!contents) return;
-    try {
-      const filePath = await chooseSavePath({
-        title: "Save as PDF",
-        defaultPath: path.join(app.getPath("downloads"), `${sanitizeFilename(contents.getTitle() || "page")}.pdf`),
-        filters: [{ name: "PDF", extensions: ["pdf"] }],
-      });
-      if (!filePath || !liveContents(session)) return;
-      const data = await withTimeout(contents.printToPDF({ printBackground: true, preferCSSPageSize: true }), PDF_TIMEOUT_MS, "The page did not finish rendering a PDF within a minute.");
-      await fs.promises.writeFile(filePath, data);
-      shell.showItemInFolder(filePath);
-    } catch (error) {
-      log("warn", `Save as PDF failed: ${error.message}`);
-      await showMessage({ type: "error", message: "Could not save this page as a PDF", detail: error.message, buttons: ["OK"] });
-    }
-  }
-
-  function toggleBookmark(session) {
-    const contents = liveContents(session);
-    if (!contents || session.kind !== "user") return null;
-    const existing = store.bookmarkFor(contents.getURL());
-    if (existing) store.removeBookmark(existing.id);
-    else store.addBookmark({ url: contents.getURL(), title: contents.getTitle() });
-    emitLibraryChanged("bookmarks");
-    emitState(session);
-    return !existing;
-  }
-
-  // ---------------------------------------------------------------------------
   // Rem
 
   // The browser Rem asked for, or the default from Settings > Browser. Rem
@@ -2466,66 +1928,6 @@ function createBrowserSessions({
     } catch (error) {
       log("warn", `Could not attach files in ${/^[aeiou]/i.test(engineLabel(session.engine)) ? "an" : "a"} ${engineLabel(session.engine)} tab: ${error.message}`);
     }
-  }
-
-  // Firefox and Chrome save into Raticode's staging folders. Finished files
-  // move to Downloads, or to quarantine when their type can run code.
-  function firefoxDownloadBegan(session, details) {
-    const byRem = Boolean(session.agent && !session.agent.shared);
-    const filename = sanitizeFilename(details.filename || "download");
-    if (byRem && policy.remDownloads !== "allow") {
-      session.lastBlockedDownload = filename;
-      recordAgentActivity(session, { action: "download blocked", detail: filename, at: Date.now() });
-      return;
-    }
-    const entry = {
-      id: crypto.randomUUID(),
-      url: String(details.url || "").slice(0, 4096),
-      filename,
-      path: "",
-      mimeType: "",
-      state: "progressing",
-      paused: false,
-      receivedBytes: 0,
-      totalBytes: 0,
-      startedAt: Date.now(),
-      dangerous: isDangerousDownload(filename),
-      byRem,
-    };
-    firefoxDownloads.set(details.navigation || entry.id, entry);
-    store.upsertDownload(entry);
-    emitDownloads();
-  }
-
-  function firefoxDownloadEnded(details, session = null) {
-    const key = details.navigation || "";
-    const entry = firefoxDownloads.get(key);
-    if (!entry) {
-      if (details.filepath) fs.rmSync(details.filepath, { force: true });
-      return;
-    }
-    firefoxDownloads.delete(key);
-    entry.finishedAt = Date.now();
-    try {
-      if (details.status !== "complete" || !details.filepath) {
-        entry.state = "cancelled";
-      } else if (entry.dangerous) {
-        fs.mkdirSync(quarantineDir, { recursive: true, mode: 0o700 });
-        const target = path.join(quarantineDir, `${entry.id}.download`);
-        moveFile(details.filepath, target);
-        Object.assign(entry, { state: "quarantined", quarantinePath: target, receivedBytes: fs.statSync(target).size });
-      } else {
-        const target = uniqueDownloadPath(app.getPath("downloads"), entry.filename, (candidate) => fs.existsSync(candidate));
-        moveFile(details.filepath, target);
-        Object.assign(entry, { state: "completed", path: target, receivedBytes: fs.statSync(target).size });
-      }
-      entry.totalBytes = entry.receivedBytes;
-    } catch (error) {
-      entry.state = "interrupted";
-      log("warn", `Could not finish a download from ${/^[aeiou]/i.test(engineLabel(session?.engine)) ? "an" : "a"} ${engineLabel(session?.engine)} tab: ${error.message}`);
-    }
-    store.upsertDownload(entry);
-    emitDownloads();
   }
 
   // Firefox or Chrome stopped. Its tabs stay open and start it again when reloaded.
@@ -3159,10 +2561,8 @@ function createBrowserSessions({
     handleCertificateError,
     handleLogin,
     handleSelectClientCertificate,
-    hardenGuest,
     returnViews,
     install,
-    isPendingAttach,
     normalizeUrl: (value) => normalizeBrowserUrl(value, policy.searchUrl),
     openAgentTab,
     ownerZoom,
@@ -3170,7 +2570,6 @@ function createBrowserSessions({
     recordAgentActivity,
     setPolicy,
     setViewportListener: (listener) => { onViewportChanged = listener; },
-    emitState,
     firefoxStopped,
     reviveFirefoxTabs,
     reviveStreamTabs,
@@ -3180,14 +2579,6 @@ function createBrowserSessions({
 
 // Electron reuses one Session object per partition; the storage path also
 // identifies persistent profiles if a different wrapper is ever returned.
-function withTimeout(promise, ms, message) {
-  let timer;
-  return Promise.race([
-    promise,
-    new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); }),
-  ]).finally(() => clearTimeout(timer));
-}
-
 function sameProfile(actual, expected) {
   if (!actual || !expected) return false;
   if (actual === expected) return true;
@@ -3222,16 +2613,6 @@ function certificateSummary(certificate) {
 function cookieUrl(cookie) {
   const host = String(cookie.domain || "").replace(/^\./, "");
   return `${cookie.secure ? "https" : "http"}://${host}${cookie.path || "/"}`;
-}
-
-function moveFile(source, target) {
-  try {
-    fs.renameSync(source, target);
-  } catch (error) {
-    if (error.code !== "EXDEV") throw error;
-    fs.copyFileSync(source, target);
-    fs.rmSync(source, { force: true });
-  }
 }
 
 function sanitizeBrowserKeybindings(value) {

@@ -136,3 +136,35 @@ def test_the_phone_declines_asks_for_changes_and_pauses(posts):
     # The schema already refuses unknown decisions; the desktop checks again.
     with pytest.raises(Refused):
         PhonePosts().act({"decision": "pause"})
+
+
+def test_the_phone_shows_a_copy_that_couldnt_be_deleted_and_takes_its_choices(posts):
+    from datetime import timedelta
+
+    from gofer.social.publisher import Publisher
+    from tests.unit.test_social_posts import START, FakeHttp, _held_on_facebook
+
+    service, send = posts
+    http = FakeHttp()
+    publisher = Publisher(service, http=http)
+    _account, post = _held_on_facebook(service, publisher, http)
+    service.decide("user", post["id"], "cancel")
+    http.reply(403, {"error": {"message": "Permissions error", "code": 200}})
+    publisher.tick(START + timedelta(minutes=1))
+    shown = send("desktop.read", "posts.list")["value"]["posts"][0]
+    assert shown["lane"] == "problems"
+    (copy,) = shown["copies"]
+    assert copy["message"] == "Permissions error" and copy["waiting"] is True
+    assert copy["url"] == "https://www.facebook.com/12345_678"
+    assert copy["actions"] == ["retry_copy", "copy_deleted"]
+    params = {"post_id": post["id"], "content_hash": shown["content_hash"], "copy_id": copy["id"]}
+    retried = send("desktop.action", "posts.decide", {"decision": "retry_copy", **params})
+    assert retried["ok"]
+    events = service.get(post["id"], events=True)["events"]
+    retry = next(e for e in events if e["kind"] == "platform_copy_retry")
+    assert retry["actor"] == "user" and retry["detail"]["via"] == "phone"
+    done = send("desktop.action", "posts.decide", {"decision": "copy_deleted", **params})
+    assert done["ok"] and done["value"]["posts"][0]["copies"] == []
+    assert done["value"]["posts"][0]["lane"] == "done"
+    gone = send("desktop.action", "posts.decide", {"decision": "copy_deleted", **params})
+    assert gone["code"] == "not_found"

@@ -2,6 +2,8 @@
 // The backend owns task authority, scheduling and completion; these helpers only
 // describe server state in plain words and shape editor drafts into requests.
 
+import { clockTime, localTimeZone, longDate, shortDate, timeAgo, weekdayName } from "./timeText.js";
+
 export const TASK_TYPES = Object.freeze({
   research: { label: "Research", blurb: "Reads and searches the web, then saves a report." },
   maintain: { label: "Maintain", blurb: "Keeps a project working. Can edit that project." },
@@ -59,8 +61,8 @@ export function runControls(task) {
 // A worker that parked itself while it waits for something outside Raticode, such as a
 // CI run (rem_home_sleep). It holds no worker and wakes in the same thread on its own.
 export const runSleep = run => (run?.state === "queued" && run.sleep?.asleep ? run.sleep : null);
-export function sleepLabel(sleep, now = new Date()) {
-  const next = formatWhen(sleep.until, now);
+function sleepLabel(sleep, now = new Date()) {
+  const next = relativeWhen(sleep.until, now);
   return `Sleeping · waiting for ${sleep.waiting_for || "an outside event"}${next ? `, next check ${next}` : ""}`;
 }
 // "Woke 2 times · 25 min of 12 h wait budget used", for the task sheet.
@@ -101,8 +103,8 @@ export function taskActivity(task, now = new Date()) {
     return { kind: "paused", label: by === "priority" ? PAUSED_FOR_YOU : "Paused", spinning: false, tone: "neutral", pausedRun: true, pausedBy: by };
   }
   if (task?.state === "paused") return { kind: "paused", label: "Schedule paused", spinning: false, tone: "neutral" };
-  if (task?.next_occurrence_at) return { kind: "scheduled", label: `Next ${formatWhen(task.next_occurrence_at, now)}`, spinning: false, tone: "neutral" };
-  if (last?.state === "succeeded") return { kind: "done", label: `Done ${formatWhen(last.finished_at, now, { past: true })}`, spinning: false, tone: "success" };
+  if (task?.next_occurrence_at) return { kind: "scheduled", label: `Next ${relativeWhen(task.next_occurrence_at, now)}`, spinning: false, tone: "neutral" };
+  if (last?.state === "succeeded") return { kind: "done", label: `Done ${relativeWhen(last.finished_at, now, { past: true })}`, spinning: false, tone: "success" };
   if (last) {
     const info = runState(last.state, last.needs_user);
     return { kind: "done", label: info.label, spinning: false, tone: info.tone };
@@ -166,9 +168,10 @@ export function formatClock(value) {
   return `${hour % 12 || 12}${minute === "00" ? "" : `:${minute}`} ${hour < 12 ? "AM" : "PM"}`;
 }
 
-export function describeSchedule(schedule) {
+// `cronSummary` is a Custom schedule in words from the preview route; "" keeps the expression.
+export function describeSchedule(schedule, cronSummary = "") {
   if (!schedule || schedule.kind === "once" || schedule.kind === "now") {
-    if (schedule?.at) return `Once, ${formatWhen(schedule.at)}`;
+    if (schedule?.at) return `Once, ${relativeWhen(schedule.at)}`;
     return "Once, right away";
   }
   const at = formatClock(schedule.local_time);
@@ -189,37 +192,36 @@ export function describeSchedule(schedule) {
     if (minutes && minutes % 60 === 0) return minutes === 60 ? "Every hour" : `Every ${minutes / 60} hours`;
     return minutes ? `Every ${minutes} minutes` : "On an interval";
   }
-  if (schedule.kind === "cron") return schedule.cron ? `Custom (${schedule.cron})` : "Custom schedule";
+  if (schedule.kind === "cron") return cronSummary || (schedule.cron ? `Custom (${schedule.cron})` : "Custom schedule");
   return "Custom schedule";
 }
 const listJoin = items => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
 
 function startOfDay(date) { const copy = new Date(date); copy.setHours(0, 0, 0, 0); return copy; }
 const dayDiff = (date, now) => Math.round((startOfDay(date) - startOfDay(now)) / 86400000);
-const timeOf = date => formatClock(`${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`);
 
-// Short, human time for task cards: "in 20 min", "tomorrow 9 AM", "Mon 9 AM".
-export function formatWhen(iso, now = new Date(), { past = false } = {}) {
+// Short, human time for task cards: "in 20 min", "today 3:00 PM", "tomorrow 9:00 AM", "Mon 9:00 AM".
+export function relativeWhen(iso, now = new Date(), { past = false } = {}) {
   const date = new Date(iso);
   if (!iso || Number.isNaN(date.getTime())) return "";
   const minutes = Math.round((date - now) / 60000);
   if (!past && minutes >= 0 && minutes < 60) return minutes <= 1 ? "in a minute" : `in ${minutes} min`;
-  if (past && minutes <= 0 && minutes > -60) return minutes >= -1 ? "just now" : `${-minutes} min ago`;
+  if (past && minutes <= 0 && minutes > -60) return timeAgo(date, now);
   const days = dayDiff(date, now);
-  if (days === 0) return `today ${timeOf(date)}`;
-  if (days === 1) return `tomorrow ${timeOf(date)}`;
-  if (days === -1) return `yesterday ${timeOf(date)}`;
-  if (days > 1 && days < 7) return `${WEEKDAY_SHORT[WEEKDAYS[(date.getDay() + 6) % 7]]} ${timeOf(date)}`;
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}) });
+  if (days === 0) return `today ${clockTime(date)}`;
+  if (days === 1) return `tomorrow ${clockTime(date)}`;
+  if (days === -1) return `yesterday ${clockTime(date)}`;
+  if (days > 1 && days < 7) return `${weekdayName(date)} ${clockTime(date)}`;
+  return shortDate(date, { now });
 }
 
-export function dayLabel(iso, now = new Date()) {
+function dayLabel(iso, now = new Date()) {
   const date = iso ? new Date(iso) : null;
   if (!date || Number.isNaN(date.getTime())) return "";
   const days = dayDiff(date, now);
   if (days === 0) return "Today";
   if (days === -1) return "Yesterday";
-  return date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}) });
+  return longDate(date);
 }
 
 // The stamp under each message: the time for today's messages, the day and time for
@@ -227,14 +229,13 @@ export function dayLabel(iso, now = new Date()) {
 export function messageStamp(iso, now = new Date()) {
   const date = iso ? new Date(iso) : null;
   if (!date || Number.isNaN(date.getTime())) return null;
-  const time = `${date.getHours() % 12 || 12}:${String(date.getMinutes()).padStart(2, "0")} ${date.getHours() < 12 ? "AM" : "PM"}`;
+  const time = clockTime(date);
   const days = dayDiff(date, now);
-  const year = date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {};
-  const day = days === 0 ? "" : days === -1 ? "Yesterday" : date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...year });
+  const day = days === 0 ? "" : days === -1 ? "Yesterday" : shortDate(date, { now });
   return {
     iso: date.toISOString(),
     label: day ? `${day}, ${time}` : time,
-    full: `${date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}, ${time}`,
+    full: `${longDate(date)}, ${time}`,
   };
 }
 
@@ -293,7 +294,7 @@ export function messagesByDay(messages = [], now = new Date()) {
 // clock time ("time"), nothing else running ("idle") or the self-work window ending
 // ("self_work"). Only entries with a task can be opened, and only named tasks retried.
 const CONDITION_MET = Object.freeze({ run: "Finished", time: "Time reached", idle: "Nothing running", self_work: "Ended" });
-export const prerequisiteKind = item => item?.kind || "task";
+const prerequisiteKind = item => item?.kind || "task";
 export const canRetryPrerequisite = item => Boolean(item?.retryable && item.task_id) && prerequisiteKind(item) === "task";
 export function prerequisites(task) {
   return (task?.dependency?.prerequisites || []).map((item, index) => {
@@ -493,7 +494,7 @@ export function finishedRunNotifications(previous, tasks) {
 }
 
 // Editor drafts keep raw strings; they only become a request on save.
-export function newTaskDraft({ type = "research", project_dir = "", timezone = localTimezone() } = {}) {
+export function newTaskDraft({ type = "research", project_dir = "", timezone = localTimeZone() } = {}) {
   return { title: "", type, prompt: "", project_dir, schedule: { kind: "once", local_time: "09:00", weekdays: ["monday"], cron: "", timezone }, criteria: [], after: [] };
 }
 export function taskToDraft(task) {
@@ -503,7 +504,7 @@ export function taskToDraft(task) {
     type: task.type || "research",
     prompt: task.prompt || "",
     project_dir: task.project_dir || "",
-    schedule: { local_time: "09:00", weekdays: ["monday"], cron: "", timezone: localTimezone(), ...schedule },
+    schedule: { local_time: "09:00", weekdays: ["monday"], cron: "", timezone: localTimeZone(), ...schedule },
     criteria: (task.acceptance_criteria || []).map(item => ({ id: item.id, description: item.description, authored_by: item.authored_by })),
     after: [...(task.after || [])],
     // Set by Rem from the user's words; the form shows them but doesn't edit them.
@@ -578,10 +579,6 @@ export function startsWhen(draft, isNew) {
 }
 
 export function changesActiveWork(patch) { return ["type", "prompt", "project_dir", "acceptance_criteria"].some(key => key in patch); }
-
-export function localTimezone() {
-  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; }
-}
 
 export function projectLabel(path) {
   if (!path) return "";

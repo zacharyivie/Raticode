@@ -117,6 +117,7 @@ def private_brain_folders(
     brains: Iterable[dict[str, Any]],
     *,
     approved: Iterable[Path | str | None] = (),
+    everywhere: bool = False,
 ) -> list[tuple[str, Path]]:
     """Private brains inside the given folders, as (name, folder), to hide from the turn.
 
@@ -124,6 +125,10 @@ def private_brain_folders(
     as the Settings > Memory folder, were approved when the user chose them and never
     count. Raises PrivateBrainError, naming the brain and both fixes, when a folder is
     a private brain or sits inside one.
+
+    ``everywhere`` adds every other private brain whose folder exists, wherever it is,
+    after those inside the folders. A sandbox that reads the whole computer except
+    what it denies needs them all.
     """
     allowed = {_canonical(path) for path in approved if path}
     private: list[tuple[str, Path]] = []
@@ -145,6 +150,10 @@ def private_brain_folders(
                     "or use a provider on localhost."
                 )
             if root.is_relative_to(folder) and all(root != seen for _n, seen in hidden):
+                hidden.append((name, root))
+    if everywhere:
+        for name, root in private:
+            if root.is_dir() and all(root != seen for _n, seen in hidden):
                 hidden.append((name, root))
     return hidden
 
@@ -413,14 +422,17 @@ def turn_private_brains(
     provider: dict[str, Any],
     data_dir: Path,
     approved: Iterable[Path | str | None] = (),
+    everywhere: bool = False,
 ) -> list[tuple[str, Path]]:
     """Private brains a turn with ``provider`` must not see in its folders.
 
     ``data_dir`` holds the library, Rem's settings and the provider profiles. A provider
     on localhost may read every brain. Others are refused a folder that is or sits
     inside a private brain (PrivateBrainError) and get back the private brains inside
-    their folders, which the turn must hide or refuse. Read again for every turn, so
-    turning the setting off stops a running thread at its next turn.
+    their folders, which the turn must hide or refuse. With ``everywhere`` they get
+    every other private brain on this computer too, for Claude Code's sandbox, whose
+    shell reads everything it isn't denied. Read again for every turn, so turning the
+    setting off stops a running thread at its next turn.
     """
     if provider_is_local(provider, data_dir):
         return []
@@ -428,4 +440,5 @@ def turn_private_brains(
         folders,
         registered_brains(data_dir),
         approved=[*approved, memory_folder(data_dir)],
+        everywhere=everywhere,
     )

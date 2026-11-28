@@ -8,9 +8,11 @@ import os
 import re
 import shutil
 import stat
+import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +34,9 @@ from gofer.utils.paths import get_data_dir
 
 REGISTRY_VERSION = 1
 REGISTRY_FILE = "workspace-registry.json"
+# Held while the registry is read, changed and saved, by the app's request threads and
+# by the CLI's own process alike (see _registry_transaction).
+REGISTRY_LOCK_FILE = "workspace-registry.lock"
 # Request handlers look workflows up many times a second, and reading and
 # validating the registry takes about 11 ms with 80 workflows. A parsed copy is
 # reused while the file is unchanged, for at most this long, so a workspace moved
@@ -39,6 +44,8 @@ REGISTRY_FILE = "workspace-registry.json"
 REGISTRY_CACHE_SECONDS = 2.0
 _registry_cache: dict[Path, tuple[tuple[int, int, int], float, dict[str, Any]]] = {}
 _registry_cache_lock = threading.Lock()
+# The registry each thread is changing, so a nested transaction joins it.
+_open_registry_transactions = threading.local()
 WORKSPACE_DIRECTORY = ".raticode"
 WORKFLOW_ENTRYPOINT = "workflow.rattish"
 WORKFLOW_METADATA = "workflow.metadata.json"
@@ -134,41 +141,33 @@ def create_registered_workflow(
         raise RattishWorkspaceError("Workflow name is required")
 
     registry_root = (registry_dir or get_data_dir()).expanduser().resolve()
-    document = _read_registry(registry_root)
-    workflow_id = _allocate_workflow_id(_slugify(workflow_name), document, project_root)
-    workflow_root = project_root / WORKSPACE_DIRECTORY / workflow_id
-    workspace_created = False
+    workflow_root: Path | None = None
     try:
-        from gofer.rattish.artifacts import compile_rattish_file
+        # The ID is picked, its folder made and the workflow registered under one
+        # lock, so two projects creating the same name at once get different IDs.
+        with _registry_transaction(registry_root) as document:
+            workflow_id = _allocate_workflow_id(_slugify(workflow_name), document, project_root)
+            new_root = project_root / WORKSPACE_DIRECTORY / workflow_id
+            mkdir_without_links(new_root, exclusive=True)
+            workflow_root = new_root
+            entrypoint = workflow_root / WORKFLOW_ENTRYPOINT
+            _write_text_atomic(entrypoint, _initial_source(workflow_name))
+            _write_json_atomic(workflow_root / WORKFLOW_METADATA, _initial_metadata())
+            _write_text_atomic(workflow_root / WORKFLOW_IGNORE, DEFAULT_RATICODE_IGNORE)
+            from gofer.rattish.artifacts import compile_rattish_file
 
-        mkdir_without_links(workflow_root, exclusive=True)
-        workspace_created = True
-        entrypoint = workflow_root / WORKFLOW_ENTRYPOINT
-        _write_text_atomic(entrypoint, _initial_source(workflow_name))
-        _write_json_atomic(workflow_root / WORKFLOW_METADATA, _initial_metadata())
-        _write_text_atomic(workflow_root / WORKFLOW_IGNORE, DEFAULT_RATICODE_IGNORE)
-        compile_rattish_file(
-            entrypoint,
-            data_dir=registry_root,
-            workflow_id=workflow_id,
-        )
-        created_at = datetime.now(UTC).isoformat()
-        registered = RegisteredWorkflow(
-            workflow_id=workflow_id,
-            name=workflow_name,
-            project_root=project_root,
-            workflow_root=workflow_root,
-            entrypoint=entrypoint,
-            created_at=created_at,
-        )
-        _register(document, registered)
-        _write_registry(registry_root, document)
+            compile_rattish_file(entrypoint, data_dir=registry_root, workflow_id=workflow_id)
+            registered = RegisteredWorkflow(
+                workflow_id=workflow_id,
+                name=workflow_name,
+                project_root=project_root,
+                workflow_root=workflow_root,
+                entrypoint=entrypoint,
+                created_at=datetime.now(UTC).isoformat(),
+            )
+            _register(document, registered)
     except Exception:
-        if workspace_created:
-            try:
-                remove_tree_without_links(workflow_root)
-            except OSError:
-                pass
+        _remove_unregistered_workspace(workflow_root)
         raise
     return registered
 
@@ -195,69 +194,78 @@ def install_registered_workflow(
         raise RattishWorkspaceError("Imported workflow name is required")
 
     registry_root = (registry_dir or get_data_dir()).expanduser().resolve()
-    document = _read_registry(registry_root)
-    workflow_id = _allocate_workflow_id(
-        _slugify(requested_id or workflow_name),
-        document,
-        project_root,
-    )
-    workflow_root = project_root / WORKSPACE_DIRECTORY / workflow_id
-    mkdir_without_links(workflow_root.parent)
-    installed = False
+    workflow_root: Path | None = None
     try:
-        mkdir_without_links(workflow_root, exclusive=True)
-        installed = True
-        # Copy only validated regular files. Each destination is independently
-        # opened below no-follow parents, including directories created mid-copy.
-        for directory, folders, files in os.walk(staged_root, followlinks=False):
-            relative = Path(directory).relative_to(staged_root)
-            for folder in folders:
-                if (Path(directory) / folder).is_symlink():
-                    raise RattishWorkspaceError("Imported workflow contains a directory link")
-                mkdir_without_links(workflow_root / relative / folder)
-            for filename in files:
-                source = Path(directory) / filename
-                if source.is_symlink() or not source.is_file():
-                    raise RattishWorkspaceError("Imported workflow contains a non-regular file")
-                with (
-                    source.open("rb") as input_file,
-                    atomic_binary_output(workflow_root / relative / filename) as output,
-                ):
-                    shutil.copyfileobj(input_file, output, 1024 * 1024)
-                    if os.name != "nt":
-                        os.fchmod(output.fileno(), source.stat().st_mode & SAFE_FILE_MODE_MASK)
-        shutil.rmtree(staged_root)
-        entrypoint = workflow_root / WORKFLOW_ENTRYPOINT
-        if not (workflow_root / WORKFLOW_METADATA).is_file():
-            _write_json_atomic(workflow_root / WORKFLOW_METADATA, _initial_metadata())
-        for ignore_name in LEGACY_WORKFLOW_IGNORES:
-            legacy_ignore = workflow_root / ignore_name
-            if legacy_ignore.is_file() and not (workflow_root / WORKFLOW_IGNORE).exists():
-                legacy_ignore.rename(workflow_root / WORKFLOW_IGNORE)
-        if not (workflow_root / WORKFLOW_IGNORE).is_file():
-            _write_text_atomic(workflow_root / WORKFLOW_IGNORE, DEFAULT_RATICODE_IGNORE)
+        with _registry_transaction(registry_root) as document:
+            workflow_id = _allocate_workflow_id(
+                _slugify(requested_id or workflow_name),
+                document,
+                project_root,
+            )
+            new_root = project_root / WORKSPACE_DIRECTORY / workflow_id
+            mkdir_without_links(new_root.parent)
+            mkdir_without_links(new_root, exclusive=True)
+            workflow_root = new_root
+            _copy_staged_workflow(staged_root, workflow_root)
+            entrypoint = workflow_root / WORKFLOW_ENTRYPOINT
+            from gofer.rattish.artifacts import compile_rattish_file
 
-        from gofer.rattish.artifacts import compile_rattish_file
-
-        compile_rattish_file(entrypoint, data_dir=registry_root, workflow_id=workflow_id)
-        registered = RegisteredWorkflow(
-            workflow_id=workflow_id,
-            name=workflow_name,
-            project_root=project_root,
-            workflow_root=workflow_root,
-            entrypoint=entrypoint,
-            created_at=datetime.now(UTC).isoformat(),
-        )
-        _register(document, registered)
-        _write_registry(registry_root, document)
-        return registered
+            compile_rattish_file(entrypoint, data_dir=registry_root, workflow_id=workflow_id)
+            registered = RegisteredWorkflow(
+                workflow_id=workflow_id,
+                name=workflow_name,
+                project_root=project_root,
+                workflow_root=workflow_root,
+                entrypoint=entrypoint,
+                created_at=datetime.now(UTC).isoformat(),
+            )
+            _register(document, registered)
     except Exception:
-        if installed:
-            try:
-                remove_tree_without_links(workflow_root)
-            except OSError:
-                pass
+        _remove_unregistered_workspace(workflow_root)
         raise
+    return registered
+
+
+def _copy_staged_workflow(staged_root: Path, workflow_root: Path) -> None:
+    """Move an imported workflow's regular files into its new, empty folder."""
+    # Copy only validated regular files. Each destination is independently
+    # opened below no-follow parents, including directories created mid-copy.
+    for directory, folders, files in os.walk(staged_root, followlinks=False):
+        relative = Path(directory).relative_to(staged_root)
+        for folder in folders:
+            if (Path(directory) / folder).is_symlink():
+                raise RattishWorkspaceError("Imported workflow contains a directory link")
+            mkdir_without_links(workflow_root / relative / folder)
+        for filename in files:
+            source = Path(directory) / filename
+            if source.is_symlink() or not source.is_file():
+                raise RattishWorkspaceError("Imported workflow contains a non-regular file")
+            with (
+                source.open("rb") as input_file,
+                atomic_binary_output(workflow_root / relative / filename) as output,
+            ):
+                shutil.copyfileobj(input_file, output, 1024 * 1024)
+                if os.name != "nt":
+                    os.fchmod(output.fileno(), source.stat().st_mode & SAFE_FILE_MODE_MASK)
+    shutil.rmtree(staged_root)
+    if not (workflow_root / WORKFLOW_METADATA).is_file():
+        _write_json_atomic(workflow_root / WORKFLOW_METADATA, _initial_metadata())
+    for ignore_name in LEGACY_WORKFLOW_IGNORES:
+        legacy_ignore = workflow_root / ignore_name
+        if legacy_ignore.is_file() and not (workflow_root / WORKFLOW_IGNORE).exists():
+            legacy_ignore.rename(workflow_root / WORKFLOW_IGNORE)
+    if not (workflow_root / WORKFLOW_IGNORE).is_file():
+        _write_text_atomic(workflow_root / WORKFLOW_IGNORE, DEFAULT_RATICODE_IGNORE)
+
+
+def _remove_unregistered_workspace(workflow_root: Path | None) -> None:
+    """Remove the folder a failed create or install made, so its ID stays free."""
+    if workflow_root is None:
+        return
+    try:
+        remove_tree_without_links(workflow_root)
+    except OSError:
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,54 +316,53 @@ def discover_project_workflows(
     )
     project_candidates = [path for path in scan.entrypoints if path not in managed_candidates]
 
+    # The walk above can take seconds, so it runs before the lock. Forgetting,
+    # registering and saving run under it, so a project discovered at the same time
+    # keeps its own registrations.
     check_cancelled()
-    document = _read_registry(registry_root)
-    existing = [_registered_workflow(item) for item in document["workflows"]]
-    existing_by_source = {workflow.entrypoint.resolve(): workflow for workflow in existing}
-    discovered: list[RegisteredWorkflow] = []
-    changed = _forget_missing_project_workflows(document, project_root, set(project_candidates))
+    with _registry_transaction(registry_root) as document:
+        existing = [_registered_workflow(item) for item in document["workflows"]]
+        existing_by_source = {workflow.entrypoint.resolve(): workflow for workflow in existing}
+        discovered: list[RegisteredWorkflow] = []
+        _forget_missing_project_workflows(document, project_root, set(project_candidates))
 
-    # Managed workflows go first so their folder names keep the plain IDs.
-    for entrypoint in [*sorted(managed_candidates), *project_candidates]:
-        check_cancelled()
-        workflow_root = entrypoint.parent
-        registered = existing_by_source.get(entrypoint)
-        if registered is not None:
-            discovered.append(registered)
-            continue
-        managed = entrypoint in managed_candidates
-        workflow_name = workflow_root.name or project_root.name or "workflow"
-        if managed:
-            workflow_id = _allocate_workflow_id(
-                _slugify(workflow_name),
-                document,
-                project_root,
-                existing_workspace=workflow_root,
+        # Managed workflows go first so their folder names keep the plain IDs.
+        for entrypoint in [*sorted(managed_candidates), *project_candidates]:
+            check_cancelled()
+            workflow_root = entrypoint.parent
+            registered = existing_by_source.get(entrypoint)
+            if registered is not None:
+                discovered.append(registered)
+                continue
+            managed = entrypoint in managed_candidates
+            workflow_name = workflow_root.name or project_root.name or "workflow"
+            if managed:
+                workflow_id = _allocate_workflow_id(
+                    _slugify(workflow_name),
+                    document,
+                    project_root,
+                    existing_workspace=workflow_root,
+                )
+            else:
+                workflow_id = _allocate_project_workflow_id(document, project_root, workflow_root)
+            registered = RegisteredWorkflow(
+                workflow_id=workflow_id,
+                name=workflow_name,
+                project_root=project_root,
+                workflow_root=workflow_root,
+                entrypoint=entrypoint,
+                created_at=datetime.now(UTC).isoformat(),
             )
-        else:
-            workflow_id = _allocate_project_workflow_id(document, project_root, workflow_root)
-        registered = RegisteredWorkflow(
-            workflow_id=workflow_id,
-            name=workflow_name,
-            project_root=project_root,
-            workflow_root=workflow_root,
-            entrypoint=entrypoint,
-            created_at=datetime.now(UTC).isoformat(),
-        )
-        _register(document, registered)
-        existing_by_source[entrypoint] = registered
-        discovered.append(registered)
-        changed = True
-
-    check_cancelled()
-    if changed:
-        _write_registry(registry_root, document)
+            _register(document, registered)
+            existing_by_source[entrypoint] = registered
+            discovered.append(registered)
+        check_cancelled()
     return ProjectDiscovery(tuple(discovered), scan.limited)
 
 
 def _forget_missing_project_workflows(
     document: dict[str, Any], project_root: Path, found: set[Path]
-) -> bool:
+) -> None:
     """Drop this project's registrations outside .raticode whose file no longer exists.
 
     Only a missing file counts: a registration the walk skipped, for example past a
@@ -373,10 +380,7 @@ def _forget_missing_project_workflows(
         ):
             continue
         kept.append(item)
-    if len(kept) == len(document["workflows"]):
-        return False
     document["workflows"] = kept
-    return True
 
 
 def list_registered_workflows(
@@ -416,28 +420,27 @@ def delete_registered_workflow(
 ) -> RegisteredWorkflow:
     """Delete a managed workspace or standalone source and remove its registration."""
     registry_root = (registry_dir or get_data_dir()).expanduser().resolve()
-    document = _read_registry(registry_root)
-    matches = [
-        (index, item)
-        for index, item in enumerate(document["workflows"])
-        if str(item["id"]).lower() == workflow_id.lower()
-    ]
-    if len(matches) != 1:
-        raise RattishWorkspaceError(f"Registered workflow not found: {workflow_id}")
-    index, item = matches[0]
-    workflow = _registered_workflow(item)
-    if not _registered_workflow_is_in_workspace(workflow):
-        raise RattishWorkspaceError(
-            f"Refusing to delete workflow outside its project: {workflow.entrypoint}"
-        )
-    if _is_managed_workspace(workflow):
-        if workflow.workflow_root.exists():
-            remove_tree_without_links(workflow.workflow_root, onerror=_remove_readonly_file)
-    else:
-        workflow.entrypoint.unlink(missing_ok=True)
-        _workflow_metadata_path(workflow).unlink(missing_ok=True)
-    document["workflows"].pop(index)
-    _write_registry(registry_root, document)
+    with _registry_transaction(registry_root) as document:
+        matches = [
+            (index, item)
+            for index, item in enumerate(document["workflows"])
+            if str(item["id"]).lower() == workflow_id.lower()
+        ]
+        if len(matches) != 1:
+            raise RattishWorkspaceError(f"Registered workflow not found: {workflow_id}")
+        index, item = matches[0]
+        workflow = _registered_workflow(item)
+        if not _registered_workflow_is_in_workspace(workflow):
+            raise RattishWorkspaceError(
+                f"Refusing to delete workflow outside its project: {workflow.entrypoint}"
+            )
+        if _is_managed_workspace(workflow):
+            if workflow.workflow_root.exists():
+                remove_tree_without_links(workflow.workflow_root, onerror=_remove_readonly_file)
+        else:
+            workflow.entrypoint.unlink(missing_ok=True)
+            _workflow_metadata_path(workflow).unlink(missing_ok=True)
+        document["workflows"].pop(index)
     return workflow
 
 
@@ -487,14 +490,13 @@ def update_registered_workflow_name(
     if not workflow_name:
         raise RattishWorkspaceError("Workflow name is required")
     registry_root = (registry_dir or get_data_dir()).expanduser().resolve()
-    document = _read_registry(registry_root)
-    matches = [
-        item for item in document["workflows"] if str(item["id"]).lower() == workflow_id.lower()
-    ]
-    if len(matches) != 1:
-        raise RattishWorkspaceError(f"Registered workflow not found: {workflow_id}")
-    matches[0]["name"] = workflow_name
-    _write_registry(registry_root, document)
+    with _registry_transaction(registry_root) as document:
+        matches = [
+            item for item in document["workflows"] if str(item["id"]).lower() == workflow_id.lower()
+        ]
+        if len(matches) != 1:
+            raise RattishWorkspaceError(f"Registered workflow not found: {workflow_id}")
+        matches[0]["name"] = workflow_name
 
 
 def _registry_schema() -> dict[str, Any]:
@@ -551,6 +553,16 @@ def _read_registry(registry_dir: Path) -> dict[str, Any]:
 
 
 def _load_registry(registry_dir: Path, path: Path) -> dict[str, Any]:
+    document = _parse_registry(path)
+    if not _migrate_legacy_paths(document):
+        return document
+    # Save the moved paths from a fresh read under the lock, so a registration
+    # another process added meanwhile isn't written over.
+    with _registry_transaction(registry_dir) as current:
+        return copy.deepcopy(current)
+
+
+def _parse_registry(path: Path) -> dict[str, Any]:
     if not path.exists():
         return _empty_registry()
     try:
@@ -558,9 +570,16 @@ def _load_registry(registry_dir: Path, path: Path) -> dict[str, Any]:
         Draft202012Validator(_registry_schema()).validate(document)
     except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as exc:
         raise RattishWorkspaceError(f"Invalid Rattish workspace registry {path}: {exc}") from exc
+    return cast(dict[str, Any], document)
+
+
+def _migrate_legacy_paths(document: dict[str, Any]) -> bool:
+    """Point registrations at workspaces renamed from the legacy folders; True if any moved.
+
+    A project may already have renamed its workspace on disk. Its IDs and creation
+    times are kept. A legacy workflow.rad entrypoint is renamed to workflow.rattish.
+    """
     previous = canonical_json_bytes(document)
-    # A project may already have renamed its workspace on disk. Keep its IDs and
-    # creation times when reading the previous registry paths.
     for item in document["workflows"]:
         project = Path(item["project_root"])
         for directory in LEGACY_WORKSPACE_DIRECTORIES:
@@ -579,9 +598,69 @@ def _load_registry(registry_dir: Path, path: Path) -> dict[str, Any]:
             and entrypoint == Path(item["workflow_root"]) / "workflow.rad"
         ):
             item["entrypoint"] = str(migrate_source(entrypoint))
-    if canonical_json_bytes(document) != previous:
-        _write_registry(registry_dir, document)
-    return cast(dict[str, Any], document)
+    return canonical_json_bytes(document) != previous
+
+
+@contextmanager
+def _registry_transaction(registry_root: Path) -> Iterator[dict[str, Any]]:
+    """Read, change and save the registry while no other thread or process can.
+
+    The app's request threads and the CLI's own process (rattish new, rattish
+    discover) both change the registry, so the lock is a file lock on
+    radish/workspace-registry.lock. The registry is read fresh from disk, not from
+    the read cache, and saved on exit only if it changed and no error was raised.
+    Readers don't take the lock: each save replaces the file whole. A transaction
+    opened inside another one in the same thread joins it.
+    """
+    open_documents: dict[Path, dict[str, Any]] = (
+        getattr(_open_registry_transactions, "documents", None) or {}
+    )
+    _open_registry_transactions.documents = open_documents
+    if registry_root in open_documents:
+        yield open_documents[registry_root]
+        return
+    path = registry_root / "radish" / REGISTRY_FILE
+    with _exclusive_file_lock(path.with_name(REGISTRY_LOCK_FILE)):
+        document = _parse_registry(path)
+        if _migrate_legacy_paths(document):
+            # Saved at once, so a read made inside the transaction finds nothing to move.
+            _write_registry(registry_root, document)
+        saved = canonical_json_bytes(document)
+        open_documents[registry_root] = document
+        try:
+            yield document
+        finally:
+            del open_documents[registry_root]
+        if canonical_json_bytes(document) != saved:
+            _write_registry(registry_root, document)
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    """Hold an exclusive lock on a lock file, waiting for any other holder."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise RattishWorkspaceError(f"Could not open the registry lock {path}: {exc}") from exc
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)
 
 
 def _write_registry(registry_dir: Path, document: dict[str, Any]) -> None:

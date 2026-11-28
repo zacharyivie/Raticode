@@ -52,6 +52,7 @@ test("waiting reasons read worker while the backend keeps its employee reason co
   const { waitingReasonText } = await import("./organizations.js");
   assert.equal(waitingReasonText("Assign an employee"), "Assign a worker");
   assert.equal(waitingReasonText("Employee is held"), "Worker is held");
+  assert.equal(waitingReasonText("Run limit for this task reached. Reopen it to allow more runs."), "Run limit for this ticket reached. Reopen it to allow more runs.");
   assert.equal(waitingReasonText("Scheduled for 2026-12-01"), "Scheduled for 2026-12-01");
 });
 test("change labels name workers and fields instead of raw identifiers", () => {
@@ -145,7 +146,7 @@ test("team groups retain reporting lines under external managers and include una
 test("project people includes the owner and distinct task assignees only for this project", () => {
   const employees = [{ id: "owner" }, { id: "dev" }, { id: "other" }];
   const tasks = [{ project: "p", assignee: "owner" }, { project: "p", assignee: "dev" }, { project: "p", assignee: "dev", status: "done" }, { project: "q", assignee: "other" }, { project: "p", assignee: "removed" }];
-  assert.deepEqual(projectPeople(employees, { id: "p", owner: "owner" }, tasks), [{ id: "owner", assignment: "Initiative owner, Task assignee" }, { id: "dev", assignment: "Task assignee" }]);
+  assert.deepEqual(projectPeople(employees, { id: "p", owner: "owner" }, tasks), [{ id: "owner", assignment: "Initiative owner, Ticket assignee" }, { id: "dev", assignment: "Ticket assignee" }]);
   assert.deepEqual(projectPeople(employees, { id: "empty" }, tasks), []);
 });
 

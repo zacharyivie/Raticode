@@ -50,7 +50,12 @@ class Fake:
         self.fail = fail
 
     async def __call__(self, node, context, bindings) -> HandlerResult:
-        result = {"stdout": self.stdout.get(node["id"], ""), "stderr": "", "exit_code": 0}
+        result = {
+            "stdout": self.stdout.get(node["id"], ""),
+            "stderr": "",
+            "exit_code": 0,
+            "truncated": False,
+        }
         if node["id"] in self.fail:
             return HandlerResult(False, {**result, "stderr": "boom: disk full", "exit_code": 3})
         return HandlerResult(True, result)

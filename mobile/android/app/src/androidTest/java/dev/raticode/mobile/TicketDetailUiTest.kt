@@ -124,6 +124,31 @@ class TicketDetailUiTest {
         screenshot("ticket-detail-done-when.png")
     }
 
+    @Test fun aRemTicketThatIsntRunningHasEditWhichSendsOnlyWhatChanged() {
+        val sent = mutableListOf<JSONObject>()
+        show(later, sent)
+        compose.onNodeWithTag("kanbanEdit").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("kanbanEditSheet").assertExists()
+        compose.onNodeWithTag("kanbanEditTitle").performTextReplacement("Sign every provider in from the phone, one at a time")
+        compose.onNodeWithTag("kanbanEditPriority-low").performScrollTo().performClick()
+        compose.onNodeWithTag("kanbanEditKind-maintain").performScrollTo().performClick()
+        compose.onNodeWithTag("kanbanEditDoneWhen").performScrollTo().performTextReplacement("Codex signs in\nGrok signs in")
+        screenshot("ticket-detail-edit.png")
+        compose.onNodeWithTag("kanbanEditSave").performScrollTo().performClick()
+        val edit = sent.single()
+        assertEquals("edit", edit.optString("action")); assertEquals("t210", edit.optString("ticket_id")); assertEquals(3L, edit.optLong("expected_revision"))
+        assertEquals("Sign every provider in from the phone, one at a time", edit.optString("title"))
+        assertEquals("low", edit.optString("priority")); assertEquals("maintain", edit.optString("type"))
+        assertEquals("Codex signs in\nGrok signs in", edit.optString("done_when"))
+        assertTrue("an unchanged description stays out", !edit.has("description"))
+        compose.onAllNodesWithTag("kanbanEditSheet").assertCountEquals(0)
+    }
+
+    @Test fun aRunningRemTicketHasNoEdit() {
+        show(later.copy(status = "in_progress", running = true))
+        compose.onAllNodesWithTag("kanbanEdit").assertCountEquals(0)
+    }
+
     @Test fun aTicketWithoutAFinishLineHasNoDoneWhen() {
         show(later)
         compose.onAllNodesWithTag("kanbanDoneWhen").assertCountEquals(0)

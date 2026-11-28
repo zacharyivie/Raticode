@@ -24,6 +24,8 @@ from gofer.core.usage_context import (
     UsageObserver,
     active_usage_observer,
 )
+from gofer.core.usage_ledger import count_tokens
+from gofer.core.usage_ledger import empty_usage as ledger_empty_usage
 
 TOKEN_LIMIT_EXCEEDED = "RATTISH_TOKEN_LIMIT_EXCEEDED"
 COST_LIMIT_EXCEEDED = "RATTISH_COST_LIMIT_EXCEEDED"
@@ -52,13 +54,7 @@ _PROVIDER_NAMES = {"claude_code": "Claude Code"}
 
 def empty_usage() -> dict[str, Any]:
     return {
-        "calls": 0,
-        "reported_calls": 0,
-        "partial_calls": 0,
-        "unknown_calls": 0,
-        "input_tokens": None,
-        "output_tokens": None,
-        "total_tokens": None,
+        **ledger_empty_usage(),
         "cost_usd": None,
         "cost_reported_calls": 0,
         "cost_unknown_calls": 0,
@@ -90,24 +86,7 @@ def failed_without_report(call: ProviderCall) -> bool:
 
 def add_call(target: dict[str, Any], call: ProviderCall) -> None:
     """Add one call. Estimated counts are left out; partial ones count as a lower bound."""
-    target["calls"] += 1
-    tokens = {} if call.estimated else call.tokens
-    if call_tokens_complete(call):
-        target["reported_calls"] += 1
-    elif tokens:
-        target["partial_calls"] += 1
-    else:
-        target["unknown_calls"] += 1
-    total = tokens.get("total_tokens")
-    if total is None and tokens:
-        total = tokens.get("input_tokens", 0) + tokens.get("output_tokens", 0)
-    for field, value in (
-        ("input_tokens", tokens.get("input_tokens")),
-        ("output_tokens", tokens.get("output_tokens")),
-        ("total_tokens", total),
-    ):
-        if value is not None:
-            target[field] = (target[field] or 0) + value
+    count_tokens(target, {} if call.estimated else call.tokens, call.partial)
     if call_cost_complete(call):
         target["cost_reported_calls"] += 1
     else:

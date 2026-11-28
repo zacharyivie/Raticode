@@ -44,7 +44,7 @@ function Effective({ effective }) {
 
 // The project's setup and its approval. Setup runs commands as the user in every new
 // worktree, outside agent sandboxes, so the exact text is shown before approving.
-export function WorktreeSetupReview({ project, api = worktreeSetupApi, onClose }) {
+function WorktreeSetupReview({ project, api = worktreeSetupApi, onClose }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);

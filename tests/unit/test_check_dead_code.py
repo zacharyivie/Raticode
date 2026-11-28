@@ -184,12 +184,64 @@ def test_an_unused_frontend_export_fails_the_check(
     assert out.splitlines()[0] == "frontend/src/lib/greet.js:5 FAREWELL"
 
 
-def test_an_export_used_in_its_own_file_counts_as_used(
+def test_an_export_only_its_own_file_uses_fails_until_the_export_goes(
     check_dead_code: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = _tree(tmp_path)
     _append(root, "frontend/src/lib/greet.js", "\nexport const NAME = 'x';\ngreet(NAME);\n")
-    assert _run(check_dead_code, root, capsys)[0] == 0
+    code, out = _run(check_dead_code, root, capsys)
+    assert code == 1
+    assert out.splitlines()[0] == "frontend/src/lib/greet.js:5 NAME (export only its own file uses)"
+
+    (root / "frontend/src/lib/greet.js").write_text(
+        "export function greet() {\n  return 'hi';\n}\n\nconst NAME = 'x';\ngreet(NAME);\n",
+        encoding="utf-8",
+    )
+    assert _run(check_dead_code, root, capsys) == (0, "check-dead-code: nothing unused\n")
+
+
+def test_an_export_another_file_names_is_not_only_its_own(
+    check_dead_code: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A test, an HTML page or a doc naming the export counts; so does an export in a
+    # test file, which the kind leaves out.
+    uses = {
+        "frontend/src/lib/greet.test.mjs": 'import { NAME } from "./greet.js";\n\nNAME;\n',
+        "frontend/electron/page.html": "<p>STAMP</p>\n",
+        "frontend/src/lib/helpers.test.mjs": "export const LOCAL = 1;\nLOCAL;\n",
+    }
+    root = _tree(tmp_path, uses)
+    _append(
+        root,
+        "frontend/src/lib/greet.js",
+        "\nexport const NAME = 'x';\ngreet(NAME);\nexport const STAMP = 1;\ngreet(STAMP);\n",
+    )
+    assert _run(check_dead_code, root, capsys) == (0, "check-dead-code: nothing unused\n")
+
+
+def test_an_allowlisted_export_only_its_own_file_uses_passes(
+    check_dead_code: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    allow = {
+        "scripts/dead-code-allowlist.txt": (
+            "frontend/src/lib/greet.js:NAME  # an add-on outside the repository imports it\n"
+        )
+    }
+    root = _tree(tmp_path, allow)
+    _append(root, "frontend/src/lib/greet.js", "\nexport const NAME = 'x';\ngreet(NAME);\n")
+    assert _run(check_dead_code, root, capsys) == (0, "check-dead-code: nothing unused\n")
+
+
+def test_raticode_has_no_export_only_its_own_file_uses(check_dead_code: Any) -> None:
+    files = dict(check_dead_code.corpus(ROOT))
+    exports = check_dead_code.frontend_exports(files, check_dead_code.frontend_modules(files))
+    allowed = check_dead_code.read_allowlist(ROOT / check_dead_code.ALLOWLIST)
+    found = [
+        str(finding)
+        for finding in check_dead_code.exports_only_their_file_uses(exports, files)
+        if f"{finding.path}:{finding.name}" not in allowed and finding.name not in allowed
+    ]
+    assert found == []
 
 
 def test_a_frontend_module_nothing_imports_fails_the_check(
@@ -216,7 +268,11 @@ def test_a_name_only_a_browser_test_uses_needs_a_test_seam_reason(
     browser_test = {
         "frontend/browser-tests/rem-home.browser.cjs": (
             "// loads ../src/lib/remHomeSample.js\nconst { SAMPLE_PROJECTS } = globalThis;\n"
-        )
+        ),
+        "frontend/package.json": (
+            '{"main": "electron/main.cjs", '
+            '"scripts": {"test:rem-home": "electron browser-tests/rem-home.browser.cjs"}}\n'
+        ),
     }
     code, out = _run(check_dead_code, _tree(tmp_path / "with", {**sample, **browser_test}), capsys)
     assert code == 1
@@ -283,7 +339,64 @@ def test_a_path_scoped_allowlist_entry_covers_only_that_file(
     _append(root, "src/gofer/server.py", "\n\ndef _spare():\n    return 1\n")
     code, out = _run(check_dead_code, root, capsys)
     assert code == 1
-    assert out.splitlines()[0] == "src/gofer/server.py:28 _spare"
+    # The line for a file that doesn't exist matches nothing, so it is reported too.
+    assert out.splitlines()[:2] == [
+        "scripts/dead-code-allowlist.txt:1 src/gofer/other.py:_spare "
+        "(allowlist line matches nothing)",
+        "src/gofer/server.py:28 _spare",
+    ]
+
+
+def test_an_allowlist_line_for_a_name_its_file_lacks_fails_the_check(
+    check_dead_code: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    allowlist = "src/gofer/ui/server.py:no_such_name # test\n"
+    root = _tree(tmp_path, {"scripts/dead-code-allowlist.txt": allowlist})
+    code, out = _run(check_dead_code, root, capsys)
+    assert code == 1
+    assert out.splitlines()[0] == (
+        "scripts/dead-code-allowlist.txt:1 src/gofer/ui/server.py:no_such_name "
+        "(allowlist line matches nothing)"
+    )
+    # The same line passes once its file names it, and fails again when the file goes.
+    (root / "src/gofer/ui").mkdir(parents=True)
+    (root / "src/gofer/ui/server.py").write_text("# no_such_name\n", encoding="utf-8")
+    assert _run(check_dead_code, root, capsys)[0] == 0
+    (root / "src/gofer/ui/server.py").unlink()
+    assert _run(check_dead_code, root, capsys)[0] == 1
+
+
+def test_stale_route_and_css_allowlist_lines_fail_the_check(
+    check_dead_code: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _route_tree(tmp_path, {"POST /api/hooks/*/trigger": {"excluded": "webhook-ingress"}})
+    (root / "frontend/src/styles").mkdir(parents=True)
+    (root / "frontend/src/styles/app.css").write_text(".xterm-viewport { gap: 0; }\n", "utf-8")
+    allowlist = root / "scripts/dead-code-allowlist.txt"
+    allowlist.parent.mkdir(exist_ok=True)
+    live = (
+        "docs/cli-parity.json:POST /api/hooks/*/trigger  # outside services call it\n"
+        ".xterm-*  # xterm.js builds the terminal's DOM\n"
+        "frontend/src/styles/app.css:.xterm-view*  # xterm.js again\n"
+        "_never_written  # a bare name isn't checked\n"
+    )
+    allowlist.write_text(live, encoding="utf-8")
+    assert _run(check_dead_code, root, capsys) == (0, "check-dead-code: nothing unused\n")
+
+    stale = (
+        "docs/cli-parity.json:POST /api/workflows/*/webhooks/*/trigger  # gone\n"
+        ".lucide-*  # no icon styles left\n"
+        "frontend/src/styles/other.css:.xterm-*  # stylesheet gone\n"
+        "frontend/src/styles/app.css:.lucide  # not in this stylesheet\n"
+    )
+    allowlist.write_text(live + stale, encoding="utf-8")
+    code, out = _run(check_dead_code, root, capsys)
+    assert code == 1
+    assert out.splitlines()[:4] == [
+        f"scripts/dead-code-allowlist.txt:{number} {line.split('  #')[0]} "
+        "(allowlist line matches nothing)"
+        for number, line in enumerate(stale.splitlines(), 5)
+    ]
 
 
 def test_an_allowlist_line_without_a_reason_is_an_error(
@@ -414,6 +527,7 @@ dev = ["pyinstaller>=6"]
 PYTHON_USES = {
     "src/gofer/config.py": "import yaml\nfrom typer import Typer\n\nTyper(yaml)\n",
     "scripts/secrets.py": "import keyring.backend\n",
+    "README.md": "`python3 scripts/secrets.py` stores the keys.\n",
     "raticode.spec": 'datas = collect_data_files("tzdata")\n',
     "tests/test_tink.py": "import tink\n",
 }
@@ -734,7 +848,7 @@ ROUTE_TREE = {
     "frontend/src/lib/greetings.js": (
         'import { apiUrl } from "./api.js";\n\n'
         "export const greeting = id => fetch(apiUrl(`/greetings/${id}`));\n"
-        "export const swarm = (id, suffix) => fetch(apiUrl(`/swarms/${id}${suffix}`));\n"
+        "const swarm = (id, suffix) => fetch(apiUrl(`/swarms/${id}${suffix}`));\n"
         'export const start = id => swarm(id, "/start");\n'
     ),
     "frontend/src/lib/api.js": "export const apiUrl = path => `/api${path}`;\n",
@@ -924,3 +1038,97 @@ def test_an_allowlisted_css_class_passes(
     code, out = _run(check_dead_code, root, capsys)
     assert code == 1
     assert out.splitlines()[0] == "frontend/src/icons.css:1 .lucide (CSS class nothing uses)"
+
+
+def test_a_script_no_other_file_names_fails_the_check(
+    check_dead_code: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Its own usage line and the allowlist don't count as naming it.
+    root = _tree(tmp_path, {"scripts/x.py": '"""Run: python3 scripts/x.py"""\n'})
+    code, out = _run(check_dead_code, root, capsys)
+    assert code == 1
+    assert out.splitlines()[0] == "scripts/x.py:1 x.py (script nothing runs)"
+    # A longer name that contains it isn't it either.
+    (root / "README.md").write_text("Run `python3 scripts/old-x.py`.\n", "utf-8")
+    assert _run(check_dead_code, root, capsys)[0] == 1
+    # The root Markdown, docs/ and benchmarks/ count, ending a sentence too.
+    for relative in ("README.md", "docs/guide.md", "benchmarks/README.md"):
+        for other in ("README.md", "docs/guide.md", "benchmarks/README.md"):
+            (root / other).unlink(missing_ok=True)
+        (root / relative).parent.mkdir(exist_ok=True)
+        (root / relative).write_text("Run `python3 scripts/x.py`. Or x.py.\n", "utf-8")
+        assert _run(check_dead_code, root, capsys) == (0, "check-dead-code: nothing unused\n")
+
+
+def test_a_browser_test_nothing_runs_fails_the_check(
+    check_dead_code: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tests = "frontend/browser-tests"
+    root = _tree(
+        tmp_path,
+        {
+            f"{tests}/x.browser.cjs": "// Run: electron x.browser.cjs\n",
+            # A unit test naming it doesn't run it.
+            "frontend/electron/tests/x.test.cjs": 'require("../../browser-tests/x.browser.cjs");\n',
+            "tests/test_x.py": 'X = "x.browser.cjs"\n',
+            # Nothing runs a run-*.cjs runner either; its own name doesn't count.
+            f"{tests}/run-y.cjs": 'run(path.join(__dirname, "y.browser.cjs")); // run-y.cjs\n',
+            f"{tests}/y.browser.cjs": "",
+            # *.test.cjs files aren't checked: run-tests.cjs picks them all up.
+            "frontend/electron/tests/run-z.test.cjs": "",
+        },
+    )
+    code, out = _run(check_dead_code, root, capsys)
+    assert code == 1
+    assert out.splitlines()[:2] == [
+        f"{tests}/run-y.cjs:1 run-y.cjs (script nothing runs)",
+        f"{tests}/x.browser.cjs:1 x.browser.cjs (script nothing runs)",
+    ]
+    # A package.json script runs the runner; a browser test it runs requires x.
+    scripts = {
+        "test:y": "node browser-tests/run-y.cjs",
+        "test:studio": "electron browser-tests/studio.browser.cjs",
+    }
+    manifest = {"main": "electron/main.cjs", "scripts": scripts}
+    (root / "frontend/package.json").write_text(json.dumps(manifest), "utf-8")
+    (root / tests / "studio.browser.cjs").write_text('require("./x.browser.cjs");\n', "utf-8")
+    assert _run(check_dead_code, root, capsys) == (0, "check-dead-code: nothing unused\n")
+
+
+def test_a_browser_test_a_runner_lists_by_short_name_passes(
+    check_dead_code: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runner = (
+        'for (const script of ["file-media", "y"]) {\n'
+        "  await runBrowserTest(path.join(__dirname, `${script}.browser.cjs`));\n"
+        "}\n"
+    )
+    root = _tree(
+        tmp_path,
+        {
+            "frontend/package.json": (
+                '{"main": "electron/main.cjs", '
+                '"scripts": {"test:browser": "node ./browser-tests/run-studio-browser.cjs"}}\n'
+            ),
+            "frontend/browser-tests/run-studio-browser.cjs": runner,
+            "frontend/browser-tests/y.browser.cjs": "",
+        },
+    )
+    assert _run(check_dead_code, root, capsys) == (0, "check-dead-code: nothing unused\n")
+    # The short name has to be a whole quoted string: "y-other" or a bare y doesn't count.
+    (root / "frontend/browser-tests/run-studio-browser.cjs").write_text(
+        runner.replace('"y"', '"y-other", y'), "utf-8"
+    )
+    code, out = _run(check_dead_code, root, capsys)
+    assert code == 1
+    assert out.splitlines()[0] == (
+        "frontend/browser-tests/y.browser.cjs:1 y.browser.cjs (script nothing runs)"
+    )
+
+
+def test_raticode_has_no_script_nothing_runs(check_dead_code: Any) -> None:
+    found = [
+        str(finding)
+        for finding in check_dead_code.unrun_files(ROOT, dict(check_dead_code.corpus(ROOT)))
+    ]
+    assert found == []

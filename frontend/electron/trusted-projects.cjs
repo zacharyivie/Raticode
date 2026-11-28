@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const crypto = require("node:crypto");
+const { writeFileAtomicSync } = require("./atomic-file.cjs");
 
 function createTrustedProjectStore(file) {
   function read() {
@@ -20,22 +20,7 @@ function createTrustedProjectStore(file) {
 
   function write(record) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-    try {
-      const descriptor = fs.openSync(temporary, "wx", 0o600);
-      try {
-        fs.writeFileSync(descriptor, JSON.stringify(record));
-        fs.fsyncSync(descriptor);
-      } finally { fs.closeSync(descriptor); }
-      fs.renameSync(temporary, file);
-      if (process.platform !== "win32") {
-        const directory = fs.openSync(path.dirname(file), "r");
-        try { fs.fsyncSync(directory); }
-        finally { fs.closeSync(directory); }
-      }
-    } finally {
-      fs.rmSync(temporary, { force: true });
-    }
+    writeFileAtomicSync(file, JSON.stringify(record), { syncDirectory: true });
   }
 
   function add(roots) {

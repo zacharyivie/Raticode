@@ -8,9 +8,9 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
-      "instructions": {"type": "string", "maxLength": 20000},
-      "wait": {"type": "boolean"}
+      "task_id": {"description": "The Rem task to run.", "type": "string", "minLength": 1, "maxLength": 128},
+      "instructions": {"description": "Extra instructions for this run only.", "type": "string", "maxLength": 20000},
+      "wait": {"description": "Wait for the run to finish and fail the node if it doesn't succeed.", "type": "boolean"}
     },
     "required": ["task_id"],
     "additionalProperties": false

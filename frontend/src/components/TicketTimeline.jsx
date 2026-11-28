@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowRight, Check, ExternalLink, MessageSquare, X } from "lucide-react";
 import { checksLine, entryHeadline, entryTone, readTimeline, sendComment, STATUS_LABELS, visibleEntries } from "../lib/remKanban.js";
-import { ago, formatWhen } from "../lib/organizationModel.js";
+import { dateTime, timeAgo } from "../lib/timeText.js";
 import { openRemThread } from "../lib/remHomeStore.js";
 import { startPolling } from "../lib/refresh.js";
 
@@ -78,7 +78,7 @@ function TimelineEntry({ entry }) {
     <div className="kb-entry-main">
       <div className="kb-entry-meta">
         <span className="kb-entry-who">{entry.author_name || "Raticode"}</span>
-        {entry.at ? <time dateTime={entry.at} title={formatWhen(entry.at)}>{ago(entry.at) || formatWhen(entry.at)}</time> : null}
+        {entry.at ? <time dateTime={entry.at} title={dateTime(entry.at)}>{timeAgo(entry.at) || dateTime(entry.at)}</time> : null}
       </div>
       {headline ? <p className="kb-entry-title">{headline}</p> : null}
       {entry.kind === "status" && entry.from && entry.to ? <p className="kb-entry-move" aria-label={`From ${STATUS_LABELS[entry.from] || entry.from} to ${STATUS_LABELS[entry.to] || entry.to}`}>

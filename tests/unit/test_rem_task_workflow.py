@@ -425,3 +425,10 @@ def test_an_undo_recorded_in_a_transaction_waits_for_its_commit(
     home.tick()
     assert store.get(trigger_id).enabled is False
     assert view(home, task["id"])["workflow_switch"]["trigger_off"] is True
+
+
+def test_a_cron_schedule_reads_in_words_with_its_expression_only_when_unusual() -> None:
+    words = {"kind": "cron", "cron": "0 9 * * mon", "timezone": "Europe/London"}
+    assert flow.describe_schedule(words) == "every Monday at 9:00 (Europe/London)"
+    unusual = {"kind": "cron", "cron": "0 9-17 * * mon-fri", "timezone": "UTC"}
+    assert flow.describe_schedule(unusual) == "cron 0 9-17 * * mon-fri (UTC)"

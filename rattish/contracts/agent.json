@@ -8,30 +8,33 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "provider": {"type": "string", "minLength": 1, "x-rattish-role": "provider_id"},
-      "profile": {"type": ["string", "null"]},
-      "model": {"type": "string", "minLength": 1},
-      "effort": {"type": "string", "minLength": 1},
-      "working_dir": {"type": "string", "x-rattish-type": "Path"},
-      "prompt": {"type": "string"},
-      "prompt_path": {"type": ["string", "null"], "x-rattish-type": "Path"},
-      "skill": {"type": ["string", "null"]},
-      "memory": {"enum": ["none", "run", "all"]},
-      "tools": {"type": "array", "items": {"type": "string"}},
-      "mcp_servers": {"type": "array", "items": {"type": "string"}},
+      "provider": {"description": "Rattish provider ID.", "type": "string", "minLength": 1, "x-rattish-role": "provider_id"},
+      "profile": {"description": "Optional compatible deployment profile, or one of the provider's accounts.", "type": ["string", "null"]},
+      "model": {"description": "Model ID supported by the selected provider.", "type": "string", "minLength": 1},
+      "effort": {"description": "Effort choice supported by that model.", "type": "string", "minLength": 1},
+      "working_dir": {"description": "Working directory resolved from the workflow project.", "type": "string", "x-rattish-type": "Path"},
+      "prompt": {"description": "Inline task prompt.", "type": "string"},
+      "prompt_path": {"description": "Readable prompt source file.", "type": ["string", "null"], "x-rattish-type": "Path"},
+      "skill": {"description": "Selected skill reference.", "type": ["string", "null"]},
+      "memory": {"description": "Provider memory scope.", "enum": ["none", "run", "all"]},
+      "tools": {"description": "Selected provider tools.", "type": "array", "items": {"type": "string"}},
+      "mcp_servers": {"description": "Names of MCP servers the provider already has set up.", "type": "array", "items": {"type": "string"}},
       "env": {
+        "description": "Additional string environment values.",
         "type": "object",
         "additionalProperties": {"type": "string"}
       },
       "extra_paths": {
+        "description": "Additional authored resource paths.",
         "type": "array",
         "items": {"type": "string", "x-rattish-type": "Path"}
       },
-      "output_schema": {"type": ["object", "null"]},
-      "output_schema_path": {"type": ["string", "null"], "x-rattish-type": "Path"},
-      "repair_attempts": {"type": "integer", "minimum": 0, "maximum": 3},
-      "sandbox": {"enum": ["on", "off"]},
+      "output_schema": {"description": "Inline successful-output JSON Schema.", "type": ["object", "null"]},
+      "output_schema_path": {"description": "File containing the successful-output schema.", "type": ["string", "null"], "x-rattish-type": "Path"},
+      "repair_attempts": {"description": "Bounded structured-output repair attempts.", "type": "integer", "minimum": 0, "maximum": 3},
+      "sandbox": {"description": "Set to off to run the step without its operating-system sandbox.", "enum": ["on", "off"]},
       "network": {
+        "description": "Hosts the step's shell may reach.",
         "anyOf": [
           {"const": "any"},
           {"type": "null"},
@@ -46,15 +49,16 @@
         ]
       },
       "fallback": {
+        "description": "Providers to try next when this one can't serve the step.",
         "type": "array",
         "maxItems": 4,
         "items": {
           "type": "object",
           "properties": {
-            "provider": {"type": "string", "minLength": 1, "x-rattish-role": "provider_id"},
-            "profile": {"type": ["string", "null"]},
-            "model": {"type": "string", "minLength": 1},
-            "effort": {"type": "string", "minLength": 1}
+            "provider": {"description": "Provider ID to try.", "type": "string", "minLength": 1, "x-rattish-role": "provider_id"},
+            "profile": {"description": "Optional profile or account for that provider.", "type": ["string", "null"]},
+            "model": {"description": "Optional model for that provider.", "type": "string", "minLength": 1},
+            "effort": {"description": "Optional effort for that model.", "type": "string", "minLength": 1}
           },
           "required": ["provider"],
           "additionalProperties": false

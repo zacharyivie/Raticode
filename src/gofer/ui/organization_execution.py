@@ -28,7 +28,7 @@ def target_for(org: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
         None,
     )
     if not target or task["assignee"] not in target["employees"]:
-        raise ValueError("Execution target is missing or outside employee grants")
+        raise ValueError("Execution target is missing or outside the worker's grants")
     return dict(target)
 
 
@@ -72,7 +72,7 @@ def validate_execution(org: dict[str, Any], task: dict[str, Any]) -> None:
         target_for(org, task)
     employee = next(e for e in org["config"]["employees"] if e["id"] == task["assignee"])
     if employee["permissionMode"] in {"read-only", "plan"}:
-        raise ValueError("Read-only employees cannot launch delegated execution")
+        raise ValueError("Read-only workers cannot launch delegated execution")
     reservation(org, task)
 
 
@@ -230,7 +230,7 @@ class OrganizationExecution:
                 != employee["resources"]
             ):
                 raise ValueError(
-                    "Swarm permission mode and resources must match the employee grant"
+                    "Swarm permission mode and resources must match the worker's grant"
                 )
         scope = {
             "organizationId": org["id"],
@@ -529,7 +529,7 @@ class OrganizationExecution:
                     if not self_outer.manager.store.owns_project(org["id"], root) or (
                         grants is not None and root not in grants
                     ):
-                        raise ValueError("Nested workflow workspace is outside employee grants")
+                        raise ValueError("Nested workflow workspace is outside the worker's grants")
                     if "node:" + node["id"] not in allowed:
                         raise ValueError("Workflow node is outside its resource grants")
                     if node["type"] == "workflow":

@@ -465,7 +465,8 @@ def test_edges_bindings_and_prompts_keep_their_meaning(tmp_path: Path) -> None:
     assert "{{triage-digest}}" in source and "{{report-path}}" in source
     assert "triage-digest: node.score-plus-format-digest.output.stdout" in source
     # Relative paths resolved from the TOML file's folder still point there.
-    assert json.dumps(str((tmp_path / "out" / "tickets.json").resolve())) in source
+    tickets = str((tmp_path / "out" / "tickets.json").resolve())
+    assert json.dumps(tickets, ensure_ascii=False) in source
     assert "max-runs: 20" in source
 
     demo = convert_toml_workflow(_toml(tmp_path, "demo", GOFER_DEMO)).source
@@ -669,7 +670,9 @@ command = "echo hi"
     project = tmp_path / "project"
     project.mkdir()
     registered, placed = convert_toml_into_project(path, project, registry_dir=tmp_path / "reg")
-    assert f"triggers add cron {registered.entrypoint}" in "\n".join(placed.notes)
+    # Quoted for the shell, with the folder's letters as they are.
+    entrypoint = json.dumps(str(registered.entrypoint), ensure_ascii=False)
+    assert f"triggers add cron {entrypoint} " in "\n".join(placed.notes)
 
 
 def test_converting_into_a_project_registers_it_and_leaves_the_toml_alone(

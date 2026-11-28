@@ -21,7 +21,7 @@ const HOW_TO = {
   linux: "Choose Raticode as the web browser in your desktop's default-apps settings, or use Make Raticode the default browser.",
 };
 
-export function defaultBrowserSummary(status) {
+function defaultBrowserSummary(status) {
   if (!status) return "Checking…";
   if (status.problem) return status.problem;
   if (status.isDefault === true) return "Raticode is the default web browser on this computer.";

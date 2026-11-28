@@ -12,20 +12,11 @@ const { ChromiumContents } = require("../chromium-contents.cjs");
 const { createFirefoxEngine, findFirefox } = require("../firefox-engine.cjs");
 const { FirefoxContents } = require("../firefox-contents.cjs");
 const { watchMedia } = require("../browser-media.cjs");
+const { chromiumForTesting, waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 12_000, interval: 100 };
 
-function chromeForTesting() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    for (const entry of fs.readdirSync(root).filter((name) => /^chromium-\d+$/.test(name)).sort().reverse()) {
-      const candidate = path.join(root, entry, "chrome-linux64", "chrome");
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  } catch { /* No Playwright downloads. */ }
-  return "";
-}
-
-const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromeForTesting() : ""));
-const EDGE_PATH = process.env.RATICODE_SKIP_EDGE_TESTS === "1" ? "" : (findBrowser(EDGE) || (process.platform === "linux" ? chromeForTesting() : ""));
+const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromiumForTesting() : ""));
+const EDGE_PATH = process.env.RATICODE_SKIP_EDGE_TESTS === "1" ? "" : (findBrowser(EDGE) || (process.platform === "linux" ? chromiumForTesting() : ""));
 const FIREFOX_PATH = process.env.RATICODE_SKIP_FIREFOX_TESTS === "1" ? "" : findFirefox();
 const fakeImage = { createFromBuffer: (buffer) => ({ isEmpty: () => !buffer.length, getSize: () => ({ width: 1280, height: 800 }), resize() { return this; }, toPNG: () => buffer }) };
 
@@ -74,16 +65,6 @@ const PAGES = {
   "/quiet": "<!doctype html><title>Quiet page</title><body>Nothing playing</body>",
 };
 
-async function waitFor(check, message, timeout = 12000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
-
 for (const [name, spec] of Object.entries(ENGINES)) {
   const skip = { skip: spec.path ? false : `${name} is not installed` };
 
@@ -99,7 +80,7 @@ for (const [name, spec] of Object.entries(ENGINES)) {
     const contents = spec.contents(engine);
     const watcher = watchMedia(contents, { audible: () => contents.isCurrentlyAudible(), muted: () => false });
     const start = () => contents.evaluateIn("test", "document.querySelector('audio').play().then(() => true)", { userGesture: true });
-    const pollSnapshot = (check, message) => waitFor(() => { contents.emit("media-started-playing"); const media = watcher.snapshot(); return check(media) && (media || true); }, message);
+    const pollSnapshot = (check, message) => waitFor(() => { contents.emit("media-started-playing"); const media = watcher.snapshot(); return check(media) && (media || true); }, message, WAIT);
     try {
       await contents.ready;
       await contents.loadURL(`${base}/player`);
@@ -114,18 +95,18 @@ for (const [name, spec] of Object.entries(ENGINES)) {
       assert.deepEqual([playing.title, playing.artist, playing.artwork, playing.canPlayPause, playing.canPrevious, playing.canNext], ["First song", "The Band", "https://art.test/big.jpg", true, true, true]);
 
       assert.deepEqual(await watcher.control("next"), { handled: true });
-      await waitFor(async () => (await contents.evaluateIn("test", "document.title")) === "next:1", "next did not reach the page's handler");
+      await waitFor(async () => (await contents.evaluateIn("test", "document.title")) === "next:1", "next did not reach the page's handler", WAIT);
       await pollSnapshot((media) => media?.title === "Song 1", "the new track's title did not reach the bar");
       assert.deepEqual(await watcher.control("previous"), { handled: true });
-      await waitFor(async () => (await contents.evaluateIn("test", "document.title")) === "previous:0", "previous did not reach the page's handler");
+      await waitFor(async () => (await contents.evaluateIn("test", "document.title")) === "previous:0", "previous did not reach the page's handler", WAIT);
 
       // Pause and resume, with the bar kept for the Play button in between.
       assert.deepEqual(await watcher.control("play-pause"), { handled: true });
-      await waitFor(() => contents.evaluateIn("test", "document.querySelector('audio').paused"), "pause did not reach the element");
+      await waitFor(() => contents.evaluateIn("test", "document.querySelector('audio').paused"), "pause did not reach the element", WAIT);
       const paused = await pollSnapshot((media) => media && !media.playing, "the bar did not show the pause");
       assert.equal(paused.canPlayPause, true);
       assert.deepEqual(await watcher.control("play-pause"), { handled: true });
-      await waitFor(async () => !(await contents.evaluateIn("test", "document.querySelector('audio').paused")), "play did not reach the element");
+      await waitFor(async () => !(await contents.evaluateIn("test", "document.querySelector('audio').paused")), "play did not reach the element", WAIT);
 
       // A new page has none of the old page's media, even if its sound lingers.
       await contents.loadURL(`${base}/quiet`);

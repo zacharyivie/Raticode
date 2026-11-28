@@ -29,7 +29,7 @@ import sqlite3
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -56,6 +56,7 @@ from gofer.rattish.trigger_defaults import DEFAULT_MISSED as DEFAULT_MISSED
 from gofer.rattish.trigger_defaults import DEFAULT_OVERLAP as DEFAULT_OVERLAP
 from gofer.rattish.trigger_defaults import MAX_RUN_SECONDS_CEILING, format_run_time
 from gofer.rattish.workspaces import list_registered_workflows
+from gofer.utils.cron_times import next_cron_time
 
 TriggerKind = Literal["cron", "file", "webhook"]
 TRIGGER_KINDS: tuple[str, ...] = ("cron", "file", "webhook")
@@ -84,7 +85,7 @@ MAX_DAILY_TOKENS = 10_000_000_000
 # Spending older than this can't fall inside any time zone's "today".
 SPEND_KEPT_DAYS = 3
 COST_REPORTING_PROVIDERS = frozenset({"claude_code"})
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 # Who approved a trigger's workflow version, as shown in the Triggers section.
 APPROVED_BY = ("desktop", "studio", "phone", "cli", "upgrade")
 USER_ONLY = (
@@ -560,6 +561,83 @@ def parse_cron(expression: str, timezone: str, *, saved: bool = False) -> CronTr
     return schedule
 
 
+# Minute steps that divide the hour: */7 restarts at :00, so it isn't "every 7 minutes".
+_EVEN_MINUTE_STEPS = frozenset({1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30})
+_DAY_WORDS = {
+    "mon": "Monday",
+    "tue": "Tuesday",
+    "wed": "Wednesday",
+    "thu": "Thursday",
+    "fri": "Friday",
+    "sat": "Saturday",
+    "sun": "Sunday",
+}
+
+
+def _cron_number(field: str) -> int | None:
+    return int(field) if field.isdigit() and len(field) <= 2 else None
+
+
+def _cron_days_words(field: str) -> str | None:
+    """Which days a weekday field picks, in words, or None when it picks no day."""
+    selected = _cron_weekday_set(field)
+    if selected is None or len(selected) == 7:
+        return "Every day"
+    if selected == {"mon", "tue", "wed", "thu", "fri"}:
+        return "Weekdays"
+    if selected == {"sat", "sun"}:
+        return "Weekends"
+    days = [day for day in _APS_WEEKDAYS if day in selected]
+    if len(days) == 1:
+        return f"Every {_DAY_WORDS[days[0]]}"
+    if not days:
+        return None
+    short = [_DAY_WORDS[day][:3] for day in days]
+    return f"Every {', '.join(short[:-1])} and {short[-1]}"
+
+
+def describe_cron(expression: str) -> str:
+    """A cron expression in words, such as "Weekdays at 9:00", or "" when it isn't a common one.
+
+    Covers every N minutes, every hour at :MM, every day, weekdays, weekends or named days
+    at H:MM, and one day of the month at H:MM. Anything else comes back empty so screens
+    show the expression by itself rather than words that might not match it.
+    """
+    try:
+        parse_cron(expression, "UTC")
+    except TriggerError:
+        return ""
+    minute, hour, day, month, weekday = (field.lower() for field in str(expression).split())
+    if month not in {"*", "?"}:
+        return ""
+    any_day = day in {"*", "?"} and weekday in {"*", "?"}
+    if any_day and hour == "*":
+        if minute == "*":
+            return "Every minute"
+        step = _cron_number(minute[2:]) if minute.startswith("*/") else None
+        if step in _EVEN_MINUTE_STEPS:
+            return "Every minute" if step == 1 else f"Every {step} minutes"
+        at = _cron_number(minute)
+        return f"Every hour at :{at:02d}" if at is not None else ""
+    at_minute, at_hour = _cron_number(minute), _cron_number(hour)
+    if at_minute is None or at_hour is None:
+        return ""
+    time = f"{at_hour}:{at_minute:02d}"
+    if day in {"*", "?"}:
+        words = _cron_days_words(weekday)
+        return f"{words} at {time}" if words else ""
+    # The 29th to 31st skip short months, so "every month" would be wrong for them.
+    date = _cron_number(day)
+    if weekday in {"*", "?"} and date is not None and 1 <= date <= 28:
+        return f"Day {date} of every month at {time}"
+    return ""
+
+
+def cron_summary(record: TriggerRecord) -> str:
+    """A cron trigger's schedule in words, or "" for other triggers and unusual schedules."""
+    return describe_cron(record.config["expression"]) if record.kind == "cron" else ""
+
+
 def occurrences_between(
     schedule: CronTrigger,
     after: datetime,
@@ -571,7 +649,7 @@ def occurrences_between(
     found: list[datetime] = []
     cursor = after
     while len(found) < limit:
-        upcoming = schedule.get_next_fire_time(cursor, cursor)
+        upcoming = next_cron_time(schedule, cursor)
         if upcoming is None or upcoming > until:
             break
         found.append(upcoming)
@@ -580,13 +658,14 @@ def occurrences_between(
 
 
 def next_occurrence(schedule: CronTrigger, after: datetime) -> datetime | None:
-    upcoming: datetime | None = schedule.get_next_fire_time(after, after)
-    return upcoming
+    """The first scheduled time strictly after ``after`` (a repeated local time runs once)."""
+    return next_cron_time(schedule, after)
 
 
 def describe_trigger(record: TriggerRecord) -> str:
     if record.kind == "cron":
-        return f"{record.config['expression']} ({record.config['timezone']})"
+        schedule = cron_summary(record) or record.config["expression"]
+        return f"{schedule} ({record.config['timezone']})"
     if record.kind == "file":
         return f"{record.config['path']} ({record.config['glob']})"
     return f"POST /rattish-hooks/{record.id}"
@@ -991,6 +1070,15 @@ class TriggerStore:
                             continue
                         try:
                             db.execute(f"ALTER TABLE usage_waits ADD COLUMN {column} TEXT")
+                        except sqlite3.OperationalError as exc:
+                            if "duplicate column" not in str(exc):
+                                raise
+                    # Version 9 keeps a queued start's occurrence on its history entry,
+                    # so the next scheduler starts it. Entries saved before it have none.
+                    event_columns = {row[1] for row in db.execute("PRAGMA table_info(events)")}
+                    if "occurrence" not in event_columns:
+                        try:
+                            db.execute("ALTER TABLE events ADD COLUMN occurrence TEXT")
                         except sqlite3.OperationalError as exc:
                             if "duplicate column" not in str(exc):
                                 raise
@@ -1479,14 +1567,16 @@ class TriggerStore:
         run_id: str | None = None,
         message: str = "",
         count: int = 1,
+        occurrence: str | None = None,
     ) -> int:
+        """Add a history entry. ``occurrence`` is a queued start's saved JSON."""
         with self._transaction() as db:
             cursor = db.execute(
                 """
                 INSERT INTO events (
                     trigger_id, workflow_id, source_path, kind, status, at, scheduled_for,
-                    run_id, message, count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    run_id, message, count, occurrence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -1499,11 +1589,14 @@ class TriggerStore:
                     run_id,
                     message,
                     count,
+                    occurrence if status == "queued" else None,
                 ),
             )
+            # Waiting and queued entries are runs still to come, so they stay.
             db.execute(
                 """
-                DELETE FROM events WHERE trigger_id = ? AND status != 'waiting' AND id <= (
+                DELETE FROM events WHERE trigger_id = ? AND status NOT IN ('waiting', 'queued')
+                AND id <= (
                     SELECT id FROM events WHERE trigger_id = ?
                     ORDER BY id DESC LIMIT 1 OFFSET ?
                 )
@@ -1534,27 +1627,58 @@ class TriggerStore:
             if value is not None:
                 assignments.append(f"{column} = ?")
                 values.append(value)
+        if status is not None and status != "queued":
+            # The start left the queue, so its saved occurrence has no more use.
+            assignments.append("occurrence = NULL")
         if not assignments:
             return
         with self._transaction() as db:
             columns = ", ".join(assignments)
             db.execute(f"UPDATE events SET {columns} WHERE id = ?", [*values, event_id])
 
-    def close_open_events(self, message: str) -> int:
+    def save_queued_occurrence(self, event_id: int, occurrence: str | None) -> None:
+        """Keep a queued start's occurrence JSON, or forget it with None."""
+        with self._transaction() as db:
+            db.execute(
+                "UPDATE events SET occurrence = ? WHERE id = ? AND status = 'queued'",
+                (occurrence, event_id),
+            )
+
+    def queued_occurrences(self) -> list[tuple[int, str, str, int]]:
+        """Queued entries that saved their occurrence: (id, trigger, JSON, count), oldest first."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, trigger_id, occurrence, count FROM events "
+                "WHERE status = 'queued' AND occurrence IS NOT NULL ORDER BY id"
+            ).fetchall()
+        return [(row["id"], row["trigger_id"], row["occurrence"], row["count"]) for row in rows]
+
+    def close_open_events(
+        self, message: str, *, queued_message: str, keep: Collection[int] = ()
+    ) -> int:
         """Mark runs left unfinished by a scheduler that is no longer running.
 
         A run waiting for a usage limit to reset stays waiting: its wait is saved, and
         the next scheduler resumes it. Only a waiting entry whose wait is gone closes.
+        Queued entries in ``keep`` stay queued for the next scheduler to start; any
+        other queued entry never started and closes with ``queued_message``.
         """
+        kept = sorted({int(event_id) for event_id in keep})
+        marks = ", ".join("?" for _ in kept)
+        not_kept = f"AND id NOT IN ({marks})" if kept else ""
         with self._transaction() as db:
-            return int(
-                db.execute(
-                    "UPDATE events SET status = 'interrupted', message = ? "
-                    "WHERE status IN ('running', 'queued') OR (status = 'waiting' AND "
-                    "id NOT IN (SELECT event_id FROM usage_waits))",
-                    (message,),
-                ).rowcount
-            )
+            closed = db.execute(
+                "UPDATE events SET status = 'interrupted', message = ?, occurrence = NULL "
+                f"WHERE status = 'queued' {not_kept}",
+                (queued_message, *kept),
+            ).rowcount
+            closed += db.execute(
+                "UPDATE events SET status = 'interrupted', message = ?, occurrence = NULL "
+                "WHERE status = 'running' OR (status = 'waiting' AND "
+                "id NOT IN (SELECT event_id FROM usage_waits))",
+                (message,),
+            ).rowcount
+        return int(closed)
 
     def add_usage_wait(self, wait: UsageWait, *, message: str) -> None:
         """Save a run's wait for a usage limit to reset, and show it in the history."""

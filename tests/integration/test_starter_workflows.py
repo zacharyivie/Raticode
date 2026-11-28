@@ -22,7 +22,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import click
 import pytest
 from typer.testing import CliRunner
 
@@ -405,6 +404,118 @@ def test_create_from_unknown_starter_names_the_choices(tmp_path: Path) -> None:
     assert not (tmp_path / ".raticode").exists()
 
 
+def _node_providers(source: str) -> dict[str, str]:
+    """Each node's own provider field, by node ID."""
+    providers: dict[str, str] = {}
+    node = ""
+    for line in source.splitlines():
+        if line.startswith("node "):
+            node = line.removeprefix("node ").rstrip(":").strip()
+        elif line.startswith("  provider:") and node:
+            providers[node] = line.split(":", 1)[1].strip().strip('"')
+    return providers
+
+
+def test_create_from_starter_with_codex_calls_codex_and_checks(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    data_dir = tmp_path / "data"
+    runner = CliRunner()
+    created = runner.invoke(
+        app,
+        [
+            "rattish",
+            "create",
+            "--from",
+            "daily-report",
+            "--provider",
+            "codex",
+            "--project",
+            str(project),
+            "--registry-dir",
+            str(data_dir),
+            "--format",
+            "json",
+        ],
+    )
+    assert created.exit_code == 0, created.output
+    payload = json.loads(created.output)
+    assert payload["starter"]["providers"] == ["codex"]
+    assert payload["starter"]["providerApps"] == ["codex"]
+    source = Path(payload["workflow"]["sourcePath"])
+    text = source.read_text(encoding="utf-8")
+    assert _node_providers(text) == {"write-report": "codex"}
+    assert "claude-code" not in text
+
+    checked = runner.invoke(
+        app, ["rattish", "check", str(source), "--data-dir", str(data_dir), "--format", "json"]
+    )
+    assert checked.exit_code == 0, checked.output
+    assert json.loads(checked.output)["ok"] is True
+
+    # Text output names the app the copy calls, not the one starter.json lists.
+    second = runner.invoke(
+        app,
+        [
+            "rattish",
+            "create",
+            "Fixes",
+            "--from",
+            "test-and-fix",
+            "--provider",
+            "codex",
+            "--project",
+            str(project),
+            "--registry-dir",
+            str(data_dir),
+        ],
+    )
+    assert second.exit_code == 0, second.output
+    assert "Uses the provider: codex." in second.output
+
+
+def test_starter_provider_takes_app_ids_and_keeps_the_listed_one(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    data_dir = tmp_path / "data"
+    plain = create_workflow_from_starter(project, "summarize-a-link", registry_dir=data_dir)
+    # The app ID of the provider the starter already lists changes nothing.
+    same = create_workflow_from_starter(
+        project, "summarize-a-link", provider="claude_code", registry_dir=data_dir
+    )
+    assert same.workflow_id != plain.workflow_id
+    assert same.entrypoint.read_text(encoding="utf-8") == plain.entrypoint.read_text(
+        encoding="utf-8"
+    )
+    cursor = create_workflow_from_starter(
+        project, "summarize-a-link", "With Cursor", provider="cursor", registry_dir=data_dir
+    )
+    assert _node_providers(cursor.entrypoint.read_text(encoding="utf-8")) == {"summarize": "cursor"}
+
+
+def test_starter_provider_refuses_unknown_apps_and_starters_without_a_model(
+    tmp_path: Path,
+) -> None:
+    from gofer.rattish.workspaces import RattishWorkspaceError
+
+    project = tmp_path / "project"
+    project.mkdir()
+    with pytest.raises(RattishWorkspaceError, match="Unknown provider 'nope'.*codex"):
+        create_workflow_from_starter(
+            project, "daily-report", provider="nope", registry_dir=tmp_path / "data"
+        )
+    with pytest.raises(RattishWorkspaceError, match="doesn't call a model"):
+        create_workflow_from_starter(
+            project, "webhook-approval", provider="codex", registry_dir=tmp_path / "data"
+        )
+    assert not (project / ".raticode").exists()
+    result = CliRunner().invoke(
+        app, ["rattish", "create", "Plain", "--provider", "codex", "--project", str(project)]
+    )
+    assert result.exit_code == 2
+    assert "--provider works with --from" in result.output
+
+
 def test_studio_api_lists_starters_and_creates_from_one(tmp_path: Path) -> None:
     from gofer.ui.api import create_workflow_from_starter_payload, starter_workflows_payload
 
@@ -422,6 +533,25 @@ def test_studio_api_lists_starters_and_creates_from_one(tmp_path: Path) -> None:
     )
 
 
+def test_studio_api_names_starter_apps_and_creates_with_the_picked_one(tmp_path: Path) -> None:
+    from gofer.ui.api import create_workflow_from_starter_payload, starter_workflows_payload
+
+    payload = starter_workflows_payload()
+    assert {"claude_code", "codex"} <= set(payload["providerApps"])
+    listed = {item["id"]: item for item in payload["starters"]}
+    assert listed["daily-report"]["providerApps"] == ["claude_code"]
+    # Jev has no provider contract, so the dialog has no app to check for it.
+    assert listed["jev-demo"]["providerApps"] == []
+    assert listed["webhook-approval"]["providerApps"] == []
+    project = tmp_path / "project"
+    project.mkdir()
+    created = create_workflow_from_starter_payload(
+        "daily-report", "", project, provider="codex", registry_dir=tmp_path / "data"
+    )
+    source = Path(created["sourcePath"]).read_text(encoding="utf-8")
+    assert _node_providers(source) == {"write-report": "codex"}
+
+
 def test_workflow_list_shows_node_and_route_counts(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -431,11 +561,10 @@ def test_workflow_list_shows_node_and_route_counts(tmp_path: Path) -> None:
         app,
         ["workflow", "list", "--data-dir", str(data_dir)],
         terminal_width=200,
-        env={"COLUMNS": "200", "NO_COLOR": "1"},
+        env={"COLUMNS": "200"},
     )
     assert result.exit_code == 0, result.output
-    # FORCE_COLOR in the environment makes Rich style the cells even here.
-    lines = click.unstyle(result.output).splitlines()
+    lines = result.output.splitlines()
     header = next(line for line in lines if "Name" in line)
     # Windows consoles draw the header with light lines instead of heavy ones.
     assert [cell.strip() for cell in re.split("[┃│]", header.strip("┃│ "))] == [

@@ -19,18 +19,12 @@ from gofer.ui.brain_library import (
     pending_reports,
     queue_pending_report,
 )
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
 
 # Long enough for the library's own reads, short enough to keep the tests quick. The
 # blocker below holds its write lock for longer than this, as a re-index would for 30 s.
 TEST_BUSY_TIMEOUT = 0.4
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def build(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:

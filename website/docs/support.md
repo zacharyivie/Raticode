@@ -10,15 +10,18 @@ Raticode is built by one developer, in the open. For help or to get in touch, em
 
 ## Check the guides first
 
-- [Troubleshooting](./reference/troubleshooting.md) covers installation, providers, workflow validation, saved state and paired devices.
+- [Troubleshooting](./reference/troubleshooting.md) covers installation, providers, workflow validation, saved state and paired devices. In the desktop app, **Help › Troubleshooting** opens it and **Help › Documentation** opens [Getting started](./getting-started.md).
 - [Installation](./installation.md) has the unsigned-build prompts for macOS and Windows, and how to [verify a download](./installation.md#verify-a-download).
 - Search these guides with the search box at the top of the page.
 
 ## Report a bug or ask for a feature
 
-Open an issue at [github.com/zacharyivie/Raticode/issues](https://github.com/zacharyivie/Raticode/issues). For a bug, include:
+In the desktop app, choose **Help › Report a Problem**. It opens a new issue on GitHub with the Raticode version, your operating system and architecture, and the Electron version already filled in, and a blank **What happened** section for you to write. It never adds file paths, project names or settings. On macOS, the menu bar's **Help** menu has the same items. On the phone, use **More › Help › Report a problem**, which fills in the phone app's version and your Android version (see [Raticode Mobile](./mobile/index.md#help-and-reporting-a-problem)).
 
-- the Raticode version (**Settings > Developer** lists runtime versions; for the CLI run `Raticode --version`) and your operating system;
+**Help › About Raticode** shows the same details with a **Copy** button, for an email or an issue you open yourself at [github.com/zacharyivie/Raticode/issues](https://github.com/zacharyivie/Raticode/issues). For the CLI, run `Raticode --version`.
+
+For a bug, write in **What happened**:
+
 - what you did, what you expected and what happened instead;
 - the exact error text, and the workflow file if a workflow failed. Remove secrets, tokens and private paths first.
 

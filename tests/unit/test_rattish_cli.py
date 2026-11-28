@@ -264,7 +264,9 @@ def test_rattish_check_text_output_names_source_and_cache_state(tmp_path: Path) 
 
 
 def test_rattish_compile_publishes_internal_ir_and_inspect_prints_it(tmp_path: Path) -> None:
-    source = tmp_path / "workflow.rattish"
+    # The workflow's ID comes from its folder's name.
+    source = tmp_path / "CLI_slice" / "workflow.rattish"
+    source.parent.mkdir()
     source.write_text(_read_file_source(), encoding="utf-8")
     data_dir = tmp_path / "app-data"
 
@@ -277,12 +279,12 @@ def test_rattish_compile_publishes_internal_ir_and_inspect_prints_it(tmp_path: P
     assert compiled.exit_code == 0, compiled.output
     assert payload["command"] == "compile"
     assert payload["ir"]["version"] == 1
-    assert payload["ir"]["workflow_id"] == tmp_path.name.replace("_", "-")
+    assert payload["ir"]["workflow_id"] == "cli-slice"
     assert inspected.exit_code == 0, inspected.output
     ir = json.loads(inspected.stdout)
     assert ir["ir_version"] == 1
     assert ir["workflow"]["name"] == "CLI slice"
-    assert not list(tmp_path.glob("*.ir.json"))
+    assert not list(source.parent.glob("*.ir.json"))
 
 
 def test_rattish_format_check_and_write_modes(tmp_path: Path) -> None:

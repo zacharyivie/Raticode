@@ -14,9 +14,9 @@ import {
 import { useRouteError } from "react-router-dom";
 import packageMetadata from "../../package.json";
 import RaticodeMark from "./RaticodeMark.jsx";
+import { newIssueUrl } from "../lib/issueReport.js";
 
 const THEME_STORAGE_KEY = "gofer-ui-theme";
-const ISSUE_URL = `${packageMetadata.bugs.url}/new`;
 const SUPPORT_EMAIL = packageMetadata.bugs.email;
 
 function currentLocation() {
@@ -63,6 +63,7 @@ export function formatCrashReport(crash) {
   const sections = [
     crash.stack || crash.summary,
     crash.componentStack ? `React component stack:\n${crash.componentStack}` : "",
+    crash.view ? `View: ${crash.view}` : "",
     `URL: ${crash.url}`,
     `Time: ${crash.timestamp}`,
     `Raticode v${packageMetadata.version}`,
@@ -71,9 +72,15 @@ export function formatCrashReport(crash) {
   return sections.filter(Boolean).join("\n\n");
 }
 
+// A public issue shouldn't name the user's account or folders: the packaged app loads from
+// file:///C:/Users/<name>/AppData/..., and error messages often hold a project path.
+const APP_FILE = /file:\/\/\/?[^\s"'()]*?\/app\.asar\//gi;
+const HOME_FOLDER = /(?:[A-Za-z]:[\\/]Users|\/Users|\/home)[\\/][^\\/\s"'()]+/g;
+const withoutLocalPaths = text => String(text).replace(APP_FILE, "app.asar/").replace(HOME_FOLDER, "~");
+
 export function issueUrlForCrash(crash) {
-  const title = `Crash: ${crash.summary}`.slice(0, 180);
-  const report = formatCrashReport(crash).slice(0, 6000);
+  const title = withoutLocalPaths(`Crash: ${crash.summary}`).slice(0, 180);
+  const report = withoutLocalPaths(formatCrashReport(crash)).slice(0, 6000);
   const body = [
     "### What happened",
     "",
@@ -85,7 +92,7 @@ export function issueUrlForCrash(crash) {
     report,
     "```",
   ].join("\n");
-  return `${ISSUE_URL}?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+  return newIssueUrl({ title, body });
 }
 
 function initialTheme() {
@@ -141,6 +148,111 @@ export class AppCrashBoundary extends React.Component {
     if (this.state.crash) return <AppCrashPage crash={this.state.crash} />;
     return this.props.children;
   }
+}
+
+// Catches a render error inside one view (Posts, the editor, Rem…) and shows a
+// fallback in that view's place, so the rail, the other panes and the rest of the
+// window keep working. AppCrashBoundary in main.jsx stays the last resort for
+// errors outside every view. Reload this view remounts the view's tree; a change
+// of resetKey (the view being hidden and shown again) does the same.
+export class ViewCrashBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { attempt: 0, crash: null, resetKey: props.resetKey };
+    this.reload = this.reload.bind(this);
+  }
+
+  static getDerivedStateFromError(error) {
+    return { crash: createCrashDetails(error) };
+  }
+
+  static getDerivedStateFromProps(props, state) {
+    if (Object.is(props.resetKey, state.resetKey)) return null;
+    if (!state.crash) return { resetKey: props.resetKey };
+    return { attempt: state.attempt + 1, crash: null, resetKey: props.resetKey };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    const componentStack = errorInfo?.componentStack || "";
+    void window.goferDesktop?.developer?.log?.(`${this.props.name} view: ${error?.stack || error}\n${componentStack}`)?.catch?.(() => {});
+    this.setState(({ crash }) => ({
+      crash: crash ? { ...crash, componentStack: componentStack.trim() } : crash,
+    }));
+  }
+
+  reload() {
+    this.setState(({ attempt }) => ({ attempt: attempt + 1, crash: null }));
+  }
+
+  render() {
+    const { crash, attempt } = this.state;
+    if (crash) {
+      return <ViewCrashFallback className={this.props.className} crash={{ ...crash, view: this.props.name }} name={this.props.name} onReload={this.reload} style={this.props.style} />;
+    }
+    return <React.Fragment key={attempt}>{this.props.children}</React.Fragment>;
+  }
+}
+
+function ViewCrashFallback({ className = "", crash, name, onReload, style }) {
+  const [copyState, setCopyState] = useState("idle");
+  const copyTimerRef = useRef(null);
+  const report = useMemo(() => formatCrashReport(crash), [crash]);
+  const issueUrl = useMemo(() => issueUrlForCrash(crash), [crash]);
+
+  useEffect(() => () => window.clearTimeout(copyTimerRef.current), []);
+
+  const handleCopy = async () => {
+    try {
+      await copyText(report);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setCopyState("idle"), 1800);
+  };
+
+  const titleId = `view-crash-${String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  const secondary = "inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-white px-3 text-[12px] font-semibold text-ink transition-colors hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand";
+  return (
+    <section aria-labelledby={titleId} className={`flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-y-auto bg-canvas px-5 py-8 text-ink ${className}`} data-view-crash={name} role="alert" style={style}>
+      <div className="w-full max-w-[460px] text-center">
+        <span aria-hidden="true" className="mx-auto mb-3 grid h-9 w-9 place-items-center rounded-full border border-red-200 bg-red-50 text-red-700 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-300">
+          <AlertTriangle size={17} />
+        </span>
+        <h2 className="mb-1.5 text-[17px] font-semibold" id={titleId}>{name} stopped working</h2>
+        <p className="mx-auto mb-3 max-w-[44ch] text-[13px] leading-5 text-muted">
+          The rest of Raticode is still running. Reloading this view usually clears it. If it happens again, copy the details and report it.
+        </p>
+        <div className="mx-auto mb-4 flex max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap rounded-md border border-line bg-slate-50 px-3 py-1.5 text-left font-mono text-[11px] text-muted">
+          <AlertTriangle aria-hidden="true" className="shrink-0 text-red-600 dark:text-red-300" size={12} />
+          <span>{crash.summary}</span>
+        </div>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <button
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand px-3 text-[12px] font-semibold text-white transition-colors hover:bg-indigo-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+            onClick={onReload}
+            type="button"
+          >
+            <RefreshCw aria-hidden="true" size={13} />
+            Reload this view
+          </button>
+          <button className={secondary} onClick={handleCopy} type="button">
+            {copyState === "copied" ? <Check aria-hidden="true" size={13} /> : <Clipboard aria-hidden="true" size={13} />}
+            {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy details"}
+          </button>
+          <a className={secondary} href={issueUrl} rel="noreferrer" target="_blank">
+            <ExternalLink aria-hidden="true" size={13} />
+            Report
+          </a>
+        </div>
+      </div>
+      <div aria-live="polite" className="sr-only" role="status">
+        {copyState === "copied" ? "Copied error details" : null}
+        {copyState === "failed" ? "Could not copy error details" : null}
+      </div>
+    </section>
+  );
 }
 
 export function RouteCrashPage() {

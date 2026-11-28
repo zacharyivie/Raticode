@@ -17,14 +17,8 @@ import pytest
 
 from gofer.ui import brain_library
 from gofer.ui.brain_library import BrainLibrary, Published, search_passages
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 @pytest.fixture
@@ -74,6 +68,7 @@ def stored_rows(library: BrainLibrary, brain_id: str) -> tuple[list[Any], list[A
     return [tuple(row) for row in documents], [tuple(row) for row in passages]
 
 
+# Takes one path and makes sure the scan fingerprint moves, unlike the shared write.
 def write(path: Path, text: str) -> None:
     """Write a file so its scan fingerprint surely moves."""
     before = path.stat().st_mtime_ns if path.exists() else 0

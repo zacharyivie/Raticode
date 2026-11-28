@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Literal, Never
@@ -14,11 +15,11 @@ from gofer.rattish.diagnostics import (
     SourceSpan,
 )
 from gofer.rattish.lexer import (
-    DuplicateJsonKeyError,
     LineView,
     RattishLexer,
     RattishToken,
     SourceLine,
+    StrictJsonError,
     strict_json_loads,
 )
 
@@ -27,12 +28,18 @@ AST_SCHEMA_ID = "urn:raticode:rattish:schema:ast-1.json"
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*\Z")
 
 
+def _hyphenated(text: str) -> str | None:
+    """The hyphenated spelling of a name written with underscores or spaces, if it differs."""
+    candidate = re.sub(r"[\s_]+", "-", text.strip()).strip("-")
+    return candidate if candidate != text and _IDENTIFIER.fullmatch(candidate) else None
+
+
 def _identifier_suggestion(text: str) -> tuple[str, ...]:
     """Suggest the hyphenated spelling of a name written with underscores or spaces."""
-    candidate = re.sub(r"[\s_]+", "-", text.strip()).strip("-")
-    if candidate != text and _IDENTIFIER.fullmatch(candidate):
-        return (f"Did you mean {candidate!r}? Rattish names use hyphens, not underscores.",)
-    return ()
+    candidate = _hyphenated(text)
+    if candidate is None:
+        return ()
+    return (f"Did you mean {candidate!r}? Rattish names use hyphens, not underscores.",)
 
 
 _IDENTIFIER_SEGMENT = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*|[0-9]+")
@@ -41,6 +48,17 @@ _INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)\Z")
 _NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z")
 _DURATION = re.compile(r"([1-9][0-9]*)(ms|s|m|h|d)\Z", re.IGNORECASE)
 _REFERENCE_ROOTS = {"input", "node", "loop", "trigger", "secret", "workflow"}
+
+
+def _numeric_value(text: str) -> int | float | None:
+    """Return an integer or number token's value, or None when it is out of range."""
+    try:
+        value: int | float = int(text) if _INTEGER.fullmatch(text) else float(text)
+    except ValueError:  # an integer longer than Python's digit limit
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +261,8 @@ class RattishParser:
         return result
 
     def _parse_workflow(self) -> dict[str, Any]:
+        if self.index >= len(self.lines):
+            self._raise_eof("RATTISH_EXPECTED_TOKEN", "Expected a 'workflow:' declaration.")
         header = self._view()
         keyword = self._declaration_header(header, "Workflow", has_name=False)
         start = header.line.position(header.content_index)
@@ -395,6 +415,7 @@ class RattishParser:
                 view.content_index + colon,
                 phase="lexer",
                 suggestions=_identifier_suggestion(key_text),
+                misspelled=key_text,
             )
         key_start = view.content_index + view.content.index(key_text)
         key_end = key_start + len(key_text)
@@ -527,7 +548,8 @@ class RattishParser:
         while index < len(text) and used < columns and text[index] in {" ", "\t"}:
             used += 2 if text[index] == "\t" else 1
             index += 1
-        return text[index:]
+        # A tab that crosses the trim column keeps its leftover column as a space.
+        return " " * (used - columns) + text[index:]
 
     def _parse_block_value(self, indent: int) -> dict[str, Any]:
         view = self._view()
@@ -998,6 +1020,7 @@ class RattishParser:
                     start_index + len(text),
                     phase="lexer",
                     suggestions=_identifier_suggestion(text),
+                    misspelled=text,
                 )
             return {
                 "kind": "identifier_value",
@@ -1037,7 +1060,7 @@ class RattishParser:
             try:
                 json_source, json_span = self._collect_json(text, line, start_index)
                 value = strict_json_loads(json_source)
-            except (json.JSONDecodeError, DuplicateJsonKeyError) as exc:
+            except (json.JSONDecodeError, StrictJsonError) as exc:
                 self._raise(
                     "RATTISH_INVALID_JSON",
                     str(exc),
@@ -1074,10 +1097,19 @@ class RattishParser:
                 "canonical_unit": duration.group(2).lower(),
                 "span": span.to_json(),
             }
-        if _INTEGER.fullmatch(text):
-            return {"kind": "integer", "source": text, "value": int(text), "span": span.to_json()}
-        if _NUMBER.fullmatch(text) and any(char in text for char in ".eE"):
-            return {"kind": "number", "source": text, "value": float(text), "span": span.to_json()}
+        if _NUMBER.fullmatch(text):
+            number = _numeric_value(text)
+            if number is None:
+                self._raise(
+                    "RATTISH_INVALID_TOKEN",
+                    f"Number {text} is out of range.",
+                    line,
+                    start_index,
+                    start_index + len(text),
+                    phase="lexer",
+                )
+            kind = "integer" if _INTEGER.fullmatch(text) else "number"
+            return {"kind": kind, "source": text, "value": number, "span": span.to_json()}
         reference = self._try_reference(text, line, start_index)
         if reference is not None:
             return reference
@@ -1304,7 +1336,14 @@ class RattishParser:
         *,
         phase: Literal["lexer", "parser"] = "parser",
         suggestions: tuple[str, ...] = (),
+        misspelled: str | None = None,
     ) -> Never:
+        """``misspelled`` is a name written with underscores, offered hyphenated as a fix."""
+        details: dict[str, Any] = {}
+        if misspelled is not None and line.text[start_index:end_index] == misspelled:
+            candidate = _hyphenated(misspelled)
+            if candidate is not None:
+                details["replacements"] = [candidate]
         diagnostic = RattishDiagnostic(
             code=code,
             severity="error",
@@ -1312,6 +1351,7 @@ class RattishParser:
             message=message,
             file=self.source_id,
             span=SourceSpan(line.position(start_index), line.position(end_index)),
+            details=details,
             suggestions=suggestions,
         )
         raise RattishParseError([diagnostic])
@@ -1568,18 +1608,14 @@ class PredicateParser:
             }
         if lowered == "null":
             return {"kind": "null", "source": token.value, "value": None, "span": span.to_json()}
-        if _INTEGER.fullmatch(token.value):
-            return {
-                "kind": "integer",
-                "source": token.value,
-                "value": int(token.value),
-                "span": span.to_json(),
-            }
         if _NUMBER.fullmatch(token.value):
+            number = _numeric_value(token.value)
+            if number is None:
+                self._error(f"Number {token.value} is out of range.", token)
             return {
-                "kind": "number",
+                "kind": "integer" if _INTEGER.fullmatch(token.value) else "number",
                 "source": token.value,
-                "value": float(token.value),
+                "value": number,
                 "span": span.to_json(),
             }
         self._error("Expected a predicate reference or literal.", token)

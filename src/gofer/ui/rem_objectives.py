@@ -10,9 +10,12 @@ work: that belongs on the board as a ticket.
 - The user can add, edit, remove, check and uncheck anything.
 - Rem changes them from chat when the user tells it what self-work should focus on
   (``source="chat"``), and on its own (``source="self_work"``) when the list is empty at the
-  start of a session or self-work runs out of work, or ``source="own"`` in a chat turn the
-  user didn't start. On its own it may only add objectives, check them off and give a finish
-  line to one of its own that has none.
+  start of a session or self-work runs out of work with every objective done, or
+  ``source="own"`` in a chat turn the user didn't start. On its own it may only add
+  objectives, check them off and give a finish line to one of its own that has none, and it
+  adds only while no objective is open in any scope (``_open_before``): open objectives,
+  open-ended or not, are the ones self-work follows, and only the user, directly or by asking
+  in chat, adds to them.
 - Open-ended objectives (no ``done_when``) are the user's: an open-ended goal Rem picked
   itself got all of self-work's attention for as long as it ran. Every objective Rem writes on
   its own needs a concrete, checkable finish line and is refused without one. One that comes
@@ -31,6 +34,17 @@ work: that belongs on the board as a ticket.
 - Clients load the first ``PAGE`` objectives in that order and ask for more as the user
   scrolls (``view(limit=...)``); the list keeps up to ``MAX_STORED``, dropping the oldest
   stale ones first.
+- An objective may belong to one of Rem's projects (``project``, the project's folder). Those
+  steer only that project's tickets and research (``applying``); objectives without one are
+  the global ones and apply everywhere. Each scope (global, or one project) has its own
+  limits and list (``in_scope``), and ``view`` lists the global ones with each project's
+  list under ``projects``. A project taken off Rem's projects keeps its objectives, so they
+  come back when it is chosen again. The user moves one between scopes with ``edit`` and
+  ``project`` ("" for global); it keeps its id, so its task links hold.
+- Ask Rem (rem_objective_ideas) adds three to five objectives to one project when the user
+  presses it (``source="ask"``). The user asked, so they may stay open-ended like chat ones,
+  and they don't count toward the few Rem keeps of its own; each must still be a whole-session
+  goal.
 """
 
 from __future__ import annotations
@@ -60,11 +74,17 @@ MAX_OPEN_BY_REM = 6
 MAX_CHECKS = 10
 # The fewest words a goal Rem writes can have; "Fix bug" is a task, not an objective.
 MIN_WORDS = 3
+# The longest project folder an objective may name.
+PROJECT_MAX = 4096
 
 Actor = Literal["user", "rem"]
-# Where a change by Rem came from: the user's chat message, self-work deciding on its own, or
-# a chat turn the user didn't start (a task finishing, a schedule), which is Rem on its own too.
-Source = Literal["chat", "self_work", "own"]
+# Where a change by Rem came from: the user's chat message, the user pressing Ask Rem in a
+# project's Objectives section (rem_objective_ideas), self-work deciding on its own, or a chat
+# turn the user didn't start (a task finishing, a schedule), which is Rem on its own too.
+Source = Literal["chat", "ask", "self_work", "own"]
+ASKED = "ask"
+# Sources that are the user asking, so Rem isn't acting on its own initiative.
+USER_ASKED = frozenset({"chat", ASKED})
 
 # Rem's own objectives must read as goals for a session, not one ticket or one file.
 TICKET_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
@@ -139,6 +159,9 @@ class ObjectivesRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     action: Literal["set", "add", "check", "edit", "remove", "uncheck", "move"]
+    # For add and set: the name or folder of one of Rem's projects, whose own objectives
+    # change; "" for the global ones.
+    project: str = Field(default="", max_length=PROJECT_MAX)
     items: list[NewObjective] = Field(default_factory=list, max_length=MAX_OPEN_BY_REM)
     checks: list[ObjectiveCheck] = Field(default_factory=list, max_length=10)
     id: str = Field(default="", max_length=64)
@@ -176,9 +199,41 @@ def open_items(objectives: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in objectives["items"] if not item.get("done")]
 
 
+def project_of(item: dict[str, Any]) -> str:
+    """The project folder an objective belongs to, or "" for a global one."""
+    return str(item.get("project") or "")
+
+
+def in_scope(objectives: dict[str, Any], project: str | None) -> dict[str, Any]:
+    """The list with only one scope's objectives: a project's own, or the global ones."""
+    scope = project or ""
+    return {**objectives, "items": [i for i in objectives["items"] if project_of(i) == scope]}
+
+
+def applying(objectives: dict[str, Any], project: str | None) -> dict[str, Any]:
+    """The objectives that steer work in ``project``: the global ones and its own.
+
+    Another project's objectives never apply, so its tickets and research are never pulled
+    for them.
+    """
+    scope = project or ""
+    return {
+        **objectives,
+        "items": [i for i in objectives["items"] if project_of(i) in {"", scope}],
+    }
+
+
+def clean_project(value: Any) -> str:
+    """A project folder as an objective stores it, or "" for none."""
+    text = str(value or "").strip()
+    if len(text) > PROJECT_MAX:
+        raise ObjectiveRefused("invalid", "That project folder is too long.")
+    return text
+
+
 def on_its_own(actor: Actor, source: str) -> bool:
     """Whether a change is Rem acting on its own initiative, not on the user's words."""
-    return actor == "rem" and source != "chat"
+    return actor == "rem" and source not in USER_ASKED
 
 
 def needs_finish_line(item: dict[str, Any]) -> bool:
@@ -190,7 +245,7 @@ def needs_finish_line(item: dict[str, Any]) -> bool:
     return bool(
         not item.get("done")
         and item.get("created_by") == "rem"
-        and item.get("source") != "chat"
+        and item.get("source") not in USER_ASKED
         and not item.get("done_when")
         and item.get("open_ended_by") != "user"
     )
@@ -221,13 +276,28 @@ def ordered(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(listed, key=group)
 
 
-def view(objectives: dict[str, Any], limit: int = PAGE, offset: int = 0) -> dict[str, Any]:
+def view(
+    objectives: dict[str, Any], limit: int = PAGE, offset: int = 0, project: str | None = None
+) -> dict[str, Any]:
     """What clients show: up to ``limit`` objectives in display order from ``offset``.
 
     ``open`` and ``done`` count the current session's objectives, which the heading shows as
     done/total; ``stale`` counts the history below them and ``total`` all of them, so a client
     knows whether there are more to load.
+
+    Without ``project`` it lists the global objectives, and ``projects`` holds the first page
+    of each project's own, by folder. With one it lists only that project's, for paging.
     """
+    if project is None:
+        roots = sorted({project_of(i) for i in objectives["items"]} - {""})
+        return {
+            **_scope_view(in_scope(objectives, ""), limit, offset),
+            "projects": {root: _scope_view(in_scope(objectives, root), PAGE, 0) for root in roots},
+        }
+    return {**_scope_view(in_scope(objectives, project), limit, offset), "project": project}
+
+
+def _scope_view(objectives: dict[str, Any], limit: int, offset: int) -> dict[str, Any]:
     items = ordered(objectives["items"])
     limit = max(1, min(int(limit), MAX_STORED))
     offset = max(0, int(offset))
@@ -257,6 +327,8 @@ def for_prompt(objectives: dict[str, Any]) -> list[dict[str, Any]]:
             **({"done_when": item["done_when"]} if item.get("done_when") else {}),
             **({"open_ended": True} if not item.get("done_when") else {}),
             **({"needs_done_when": True} if needs_finish_line(item) else {}),
+            # Only that project's work follows it; without one it applies everywhere.
+            **({"project": project_of(item)} if project_of(item) else {}),
         }
         for item in listed
     ]
@@ -315,14 +387,18 @@ def finish_line_problem(done_when: str) -> str:
     return ""
 
 
-def _same(a: str, b: str) -> bool:
+def same(a: str, b: str) -> bool:
+    """Whether two objective texts say the same, ignoring case, spacing and punctuation."""
+
     def key(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
     return key(a) == key(b)
 
 
-def _new(text: str, done_when: str, actor: Actor, source: str, stamp: str) -> dict[str, Any]:
+def _new(
+    text: str, done_when: str, actor: Actor, source: str, stamp: str, project: str = ""
+) -> dict[str, Any]:
     return {
         "id": uuid4().hex[:12],
         "text": text,
@@ -332,6 +408,7 @@ def _new(text: str, done_when: str, actor: Actor, source: str, stamp: str) -> di
         "source": source,
         "created_at": stamp,
         "updated_at": stamp,
+        **({"project": project} if project else {}),
     }
 
 
@@ -362,10 +439,12 @@ def _add(
     actor: Actor,
     source: str,
     stamp: str = "",
+    project: str = "",
 ) -> list[dict[str, Any]]:
     """Append new objectives; Rem's must be high-order and few. Returns those added.
 
     They all get the time ``stamp`` (now by default), so they list in the order given.
+    ``project`` gives them to one project; the limits count each project's list on its own.
     """
     stamp = stamp or now()
     added: list[dict[str, Any]] = []
@@ -374,25 +453,27 @@ def _add(
         done_when = _clean(entry.done_when, CRITERIA_MAX)
         if not text:
             raise ObjectiveRefused("invalid", "Write the objective first.")
-        if any(_same(text, i["text"]) for i in open_items(objectives)):
+        scope = open_items(in_scope(objectives, project))
+        if any(same(text, i["text"]) for i in scope):
             continue
         if actor == "rem":
             if problem := high_order_problem(text):
                 raise ObjectiveRefused("invalid", problem)
             if on_its_own(actor, source) and (problem := finish_line_problem(done_when)):
                 raise ObjectiveRefused("invalid", problem)
-            mine = [i for i in open_items(objectives) if i.get("created_by") == "rem"]
-            if len(mine) >= MAX_OPEN_BY_REM:
+            # Ask Rem's objectives are the user's request, capped per press instead.
+            mine = [i for i in scope if i.get("created_by") == "rem" and i.get("source") != ASKED]
+            if source != ASKED and len(mine) >= MAX_OPEN_BY_REM:
                 raise ObjectiveRefused(
                     "invalid",
                     f"Rem keeps at most {MAX_OPEN_BY_REM} open objectives of its own; "
                     "finish or drop one first.",
                 )
-        if len(open_items(objectives)) >= MAX_ITEMS:
+        if len(scope) >= MAX_ITEMS:
             raise ObjectiveRefused(
                 "invalid", f"The list holds at most {MAX_ITEMS} open objectives."
             )
-        item = _new(text, done_when, actor, source, stamp)
+        item = _new(text, done_when, actor, source, stamp, project)
         objectives["items"].append(item)
         objectives["items"] = _trim(objectives["items"])
         added.append(item)
@@ -471,6 +552,12 @@ def change(
             "On its own, Rem can only add objectives, check them off and give its own a "
             "finish line.",
         )
+    if on_its_own(actor, source) and action == "add" and (held := _open_before(objectives, stamp)):
+        raise ObjectiveRefused(
+            "unauthorized",
+            f"{len(held)} {'objective is' if len(held) == 1 else 'objectives are'} still open. "
+            "On its own, Rem adds objectives only when none are open.",
+        )
     if action == "add":
         entries = payload.get("items") or [
             {"text": payload.get("text"), "done_when": payload.get("done_when") or ""}
@@ -479,7 +566,8 @@ def change(
             parsed = [NewObjective.model_validate(e) for e in entries]
         except ValueError as exc:
             raise ObjectiveRefused("invalid", "Write the objective in a short sentence.") from exc
-        if not _add(objectives, parsed, actor, source or actor, stamp):
+        project = clean_project(payload.get("project"))
+        if not _add(objectives, parsed, actor, source or actor, stamp, project):
             raise ObjectiveRefused("conflict", "That objective is already on the list.")
     elif action == "set":
         if actor != "rem":
@@ -491,32 +579,47 @@ def change(
         for entry in parsed:
             if problem := high_order_problem(_clean(entry.text, TEXT_MAX)):
                 raise ObjectiveRefused("invalid", problem)
-        kept = [i for i in objectives["items"] if i.get("done")]
+        # Only one scope's open objectives are replaced: the global ones, or one project's.
+        project = clean_project(payload.get("project"))
+        scope = in_scope(objectives, project)
+        kept = [i for i in objectives["items"] if i.get("done") or project_of(i) != project]
         # An open objective named again keeps its identity, so task links survive.
-        current = {i["text"].casefold(): i for i in open_items(objectives)}
+        current = {i["text"].casefold(): i for i in open_items(scope)}
         objectives["items"] = []
         stamp = stamp or now()
         for entry in parsed:
             text = _clean(entry.text, TEXT_MAX)
-            same = next((i for k, i in current.items() if _same(k, text)), None)
-            if same is not None and not any(i["id"] == same["id"] for i in objectives["items"]):
-                same.update(text=text, updated_at=now())
+            match = next((i for k, i in current.items() if same(k, text)), None)
+            if match is not None and not any(i["id"] == match["id"] for i in objectives["items"]):
+                match.update(text=text, updated_at=now())
                 if entry.done_when:
-                    same["done_when"] = _clean(entry.done_when, CRITERIA_MAX)
-                objectives["items"].append(same)
+                    match["done_when"] = _clean(entry.done_when, CRITERIA_MAX)
+                objectives["items"].append(match)
             else:
-                _add(objectives, [entry], actor, source or actor, stamp)
-        # The finished ones stay as history; clients list the new goals above them.
+                _add(objectives, [entry], actor, source or actor, stamp, project)
+        # The finished ones stay as history, and other scopes' as they were; clients list the
+        # new goals above them.
         objectives["items"] = _trim([*objectives["items"], *kept])
     elif action == "edit":
         item = _find(objectives, payload.get("id"))
+        text = item["text"]
         if "text" in payload:
             text = _clean(payload.get("text"), TEXT_MAX)
             if not text:
                 raise ObjectiveRefused("invalid", "Write the objective first, or remove it.")
             if actor == "rem" and (problem := high_order_problem(text)):
                 raise ObjectiveRefused("invalid", problem)
-            item["text"] = text
+        # ``project`` moves it to one of Rem's projects, or with "" to the global list. It
+        # keeps its id, so the tasks and tickets that serve it still do.
+        if "project" in payload:
+            target = clean_project(payload.get("project"))
+            if target != project_of(item):
+                _check_move(objectives, item, text, target)
+                if target:
+                    item["project"] = target
+                else:
+                    item.pop("project", None)
+        item["text"] = text
         if payload.get("done_when") is not None:
             if actor == "rem" and item.get("done"):
                 raise ObjectiveRefused(
@@ -564,10 +667,36 @@ def change(
     return objectives
 
 
+def _open_before(objectives: dict[str, Any], stamp: str) -> list[dict[str, Any]]:
+    """The open objectives, in every scope, that keep Rem from adding its own.
+
+    Any open one does, open-ended or not, whoever wrote it. Rem's own objectives added in
+    this same batch (the same ``stamp``) don't: a batch written for an empty list is saved
+    one objective at a time.
+    """
+    return [
+        item
+        for item in open_items(objectives)
+        if not (stamp and item.get("created_by") == "rem" and item.get("created_at") == stamp)
+    ]
+
+
+def _check_move(objectives: dict[str, Any], item: dict[str, Any], text: str, target: str) -> None:
+    """Refuse moving ``item`` (as ``text``) into the ``target`` scope, as adding it there would be.
+
+    Nothing has changed yet when it refuses, so the objective stays where it was.
+    """
+    scope = [i for i in open_items(in_scope(objectives, target)) if i["id"] != item["id"]]
+    if any(same(text, i["text"]) for i in scope):
+        raise ObjectiveRefused("conflict", "That objective is already on the list.")
+    if not item.get("done") and len(scope) >= MAX_ITEMS:
+        raise ObjectiveRefused("invalid", f"The list holds at most {MAX_ITEMS} open objectives.")
+
+
 def _give_finish_line(objectives: dict[str, Any], payload: dict[str, Any]) -> None:
     """Rem, on its own, gives a finish line to an open-ended objective it wrote itself."""
     item = _find(objectives, payload.get("id"))
-    if not needs_finish_line(item) or "text" in payload:
+    if not needs_finish_line(item) or "text" in payload or "project" in payload:
         raise ObjectiveRefused(
             "unauthorized",
             "On its own, Rem can only give a finish line to an open-ended objective it wrote "
@@ -608,19 +737,49 @@ def mark_stale(db: sqlite3.Connection, store: Any, clock: datetime) -> int:
     return len(fresh)
 
 
+def resolve_project(name: str, projects: list[tuple[str, str]]) -> str:
+    """The folder of the project ``name`` names, from ``projects`` as (root, name) pairs.
+
+    Rem may name a project by its folder or its name; "" stays global. A name that matches
+    none of Rem's projects is refused, so an objective never lands on a project Rem can't
+    work in.
+    """
+    wanted = name.strip()
+    if not wanted:
+        return ""
+    for root, label in projects:
+        if wanted == root or wanted.casefold() == label.casefold():
+            return root
+    raise ObjectiveRefused("invalid", f"“{wanted[:80]}” isn't one of Rem's projects.")
+
+
 def apply_request(
-    db: sqlite3.Connection, store: Any, request: ObjectivesRequest, *, from_user: bool = True
+    db: sqlite3.Connection,
+    store: Any,
+    request: ObjectivesRequest,
+    *,
+    from_user: bool = True,
+    projects: list[tuple[str, str]] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Apply a chat decision's change; returns the new list (or None) and a sentence.
 
     ``from_user`` is whether the user's own message started the turn. A turn they didn't
     start (a task finishing, a schedule) is Rem on its own, under the same rules as self-work.
+    ``projects`` are Rem's projects as (root, name) pairs, for a change to one project's
+    objectives.
     """
     payload = request.model_dump(exclude_none=True)
     payload["items"] = [item.model_dump() for item in request.items]
     payload["checks"] = [check.model_dump() for check in request.checks]
     if request.action in {"edit"} and not request.text:
         payload.pop("text", None)
+    try:
+        payload["project"] = resolve_project(request.project, projects or [])
+    except ObjectiveRefused as exc:
+        return None, f"I didn't change the objectives: {exc}"
+    if request.action == "edit":
+        # A chat edit leaves the objective where it is; only the user moves one.
+        payload.pop("project", None)
     try:
         objectives = change(db, store, payload, actor="rem", source="chat" if from_user else "own")
     except ObjectiveRefused as exc:

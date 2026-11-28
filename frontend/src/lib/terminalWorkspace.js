@@ -182,7 +182,26 @@ export function terminalWorkspaceShortcutAction(event, options = {}) {
   if (!options.active || options.renaming || event.repeat) return null;
   if (matchesCommand(event, options.settings, "terminal.new")) return "new";
   if (matchesCommand(event, options.settings, "terminal.close") && options.activeKey) return "close";
+  if (matchesCommand(event, options.settings, "terminal.find") && options.activeKey) return "find";
   return null;
+}
+
+// What the find bar says about the addon's last search. The addon stops counting at its
+// highlight limit, so a full count may be higher.
+export function terminalFindCountText(results, term, limit = TERMINAL_FIND_HIGHLIGHT_LIMIT) {
+  if (!term || !results) return "";
+  const { resultCount, resultIndex } = results;
+  if (!resultCount) return "No results";
+  const total = resultCount >= limit ? `${limit}+` : String(resultCount);
+  return resultIndex >= 0 ? `${resultIndex + 1} of ${total}` : `${total} found`;
+}
+
+export const TERMINAL_FIND_HIGHLIGHT_LIMIT = 1000;
+
+// A single-line selection is what someone usually wants to find; more than one line isn't.
+export function terminalFindInitialTerm(selection) {
+  const text = String(selection ?? "");
+  return text.trim() && !/[\r\n]/.test(text) ? text : "";
 }
 
 export function clamp(value, minimum, maximum) {

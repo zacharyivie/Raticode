@@ -38,7 +38,9 @@ async def test_synchronous_run_stays_live_with_matching_source_revision(tmp_path
 
     async def handler(node, context, bindings):
         await release.wait()
-        return HandlerResult(True, {"stdout": "done", "stderr": "", "exit_code": 0})
+        return HandlerResult(
+            True, {"stdout": "done", "stderr": "", "exit_code": 0, "truncated": False}
+        )
 
     def on_started(run):
         live.update(run.document)
@@ -106,7 +108,9 @@ async def test_live_progress_survives_completion_failure_and_stop(
                     {"stdout": "", "stderr": "broken command", "exit_code": 7},
                     RuntimeErrorInfo("command", "RATTISH_TEST_FAILURE", "broken command"),
                 )
-        return HandlerResult(True, {"stdout": node["id"], "stderr": "", "exit_code": 0})
+        return HandlerResult(
+            True, {"stdout": node["id"], "stderr": "", "exit_code": 0, "truncated": False}
+        )
 
     async def execute():
         result = await run_rattish_file(
@@ -123,6 +127,12 @@ async def test_live_progress_survives_completion_failure_and_stop(
             group.start_soon(execute)
             await working.wait()
             try:
+                # Live saves come at most once a second, so wait for the one after "work" started.
+                while True:
+                    latest = api.latest_workflow_log_payload(workflow.workflow_id, base)
+                    if "work" in latest["runNodes"]:
+                        break
+                    await anyio.sleep(0.01)
                 latest = api.latest_workflow_log_payload(workflow.workflow_id, base)
                 selected = api.workflow_run_log_payload(
                     workflow.workflow_id, run_id, base, include_details=False
@@ -193,7 +203,9 @@ Node work:
             return HandlerResult(
                 False, {}, RuntimeErrorInfo("command", "RATTISH_TEST_RETRY", "try again")
             )
-        return HandlerResult(True, {"stdout": str(index), "stderr": "", "exit_code": 0})
+        return HandlerResult(
+            True, {"stdout": str(index), "stderr": "", "exit_code": 0, "truncated": False}
+        )
 
     handlers = NodeHandlerRegistry(
         {
@@ -251,7 +263,9 @@ async def test_background_runs_have_exact_ids_and_stop_only_one_after_cleanup(
         try:
             while not release.is_set():
                 await anyio.sleep(0.01)
-            return HandlerResult(True, {"stdout": "done", "stderr": "", "exit_code": 0})
+            return HandlerResult(
+                True, {"stdout": "done", "stderr": "", "exit_code": 0, "truncated": False}
+            )
         finally:
             with anyio.CancelScope(shield=True):
                 await anyio.sleep(0.02)
@@ -323,7 +337,7 @@ async def test_background_run_rejects_changed_source_and_reports_preflight_failu
 
     async def handler(node, context, bindings):
         invoked.append(node["id"])
-        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False})
 
     async def fake_run(*args, **kwargs):
         return await run_rattish_file(
@@ -354,7 +368,7 @@ async def test_orphaned_live_artifact_is_disconnected_never_succeeded(
     base, workflow = setup_workflow(tmp_path)
 
     async def handler(node, context, bindings):
-        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False})
 
     run = await run_rattish_file(
         workflow.entrypoint,
@@ -382,7 +396,7 @@ async def test_a_run_whose_pid_another_program_reused_reads_as_interrupted(
     seen: dict[str, object] = {}
 
     async def handler(node, context, bindings):
-        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False})
 
     def on_started(result) -> None:
         seen.update(result.document)
@@ -429,7 +443,7 @@ async def test_a_stop_marker_ends_a_run_that_has_no_cancel_event(tmp_path: Path)
             await anyio.sleep(60)
         finally:
             cleaned.append(node["id"])
-        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False})
 
     async def execute():
         result = await run_rattish_file(
@@ -475,7 +489,7 @@ async def test_the_app_stop_reaches_a_run_it_did_not_start_and_runs_shows_the_re
         with anyio.CancelScope(shield=True):
             while not release.is_set():
                 await anyio.sleep(0.01)
-        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False})
 
     async def execute():
         result = await run_rattish_file(
@@ -531,7 +545,7 @@ async def test_stopping_a_workflow_without_a_run_id_asks_every_running_run(
         if count["n"] == 2:
             working.set()
         await anyio.sleep(60)
-        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False})
 
     async def execute():
         result = await run_rattish_file(

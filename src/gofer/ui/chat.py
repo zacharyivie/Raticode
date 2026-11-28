@@ -14,7 +14,8 @@ import sys
 import tempfile
 import threading
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Iterator
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -55,6 +56,7 @@ from gofer.core.prompt_envelope import (
 )
 from gofer.core.provider_capabilities import (
     IMAGE_ATTACHMENT_PROVIDERS,
+    PROVIDER_BINARIES,
     ProviderCapabilityError,
     image_attachment_refusal,
     provider_capabilities_payload,
@@ -1374,18 +1376,9 @@ async def stream_workflow_chat(
             )
         except ProviderCapabilityError as exc:
             raise ChatProviderError(str(exc)) from exc
-
     if cancel_event is not None and cancel_event.is_set():
         return
-    binary = {
-        "codex": "codex",
-        "claude_code": "claude",
-        "cursor": "cursor-agent",
-        "copilot": "copilot",
-        "opencode": "opencode",
-        "antigravity": "agy",
-        "grok": "grok",
-    }[provider]
+    binary = PROVIDER_BINARIES[provider]
     binary_path = resolve_provider_executable(cast(ProviderName, provider))
     if binary_path is None:
         raise ChatProviderError(cli_missing(binary))
@@ -1530,7 +1523,29 @@ async def stream_workflow_chat(
     if provider in ADDITIONAL_PROVIDERS or not trust_data_dir:
         # Without the data folder, path-restricted CLIs still need to read skills.
         extra_paths += _skill_read_paths(workflow)
-    turn_resources = AgentResources.model_validate((workflow or {}).get("remResources") or {})
+    second_brain_on = ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+    report_format = ((workflow or {}).get("remReportTheme") or {}).get("format")
+    turn = _ProviderTurn(
+        provider=provider,
+        model=model,
+        effort=effort,
+        prompt=prompt,
+        binary_path=binary_path,
+        cwd=resolved_working_dir,
+        permission_mode=permission_mode,
+        workflow=workflow,
+        session=_session,
+        resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
+        second_brain_cli_path=gofer_cli_path if second_brain_on or report_format else None,
+        session_dir=_session.root / _session.state["generation"] if _session else None,
+        max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
+        slot_env=slot_env,
+        account_env=account_env,
+        image_paths=image_paths,
+        cli_extra_paths=[*([resolved_data_dir] if trust_data_dir else []), *extra_paths],
+        cancel_event=cancel_event,
+        trusted_swarm_url=trusted_swarm_url,
+    )
     command = _build_chat_command(
         provider=provider,
         model=model,
@@ -1550,15 +1565,8 @@ async def stream_workflow_chat(
         trusted_organization_url=trusted_organization_url,
         trusted_rem_artifacts_url=trusted_rem_artifacts_url,
         trusted_rem_wait_url=trusted_rem_wait_url,
-        resources=turn_resources,
-        second_brain_cli_path=(
-            gofer_cli_path
-            if (
-                ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
-                or ((workflow or {}).get("remReportTheme") or {}).get("format")
-            )
-            else None
-        ),
+        resources=turn.resources,
+        second_brain_cli_path=turn.second_brain_cli_path,
         codex_home=Path(account_env["CODEX_HOME"]) if "CODEX_HOME" in account_env else None,
     )
     claude_settings: dict[str, Any] = {}
@@ -1574,6 +1582,10 @@ async def stream_workflow_chat(
             sandbox_env = claude_sandbox.sandbox_environment(scratch, read_only=read_only_turn)
         slots_root = Path(slot_env[COMMAND_SLOTS_ROOT_ENV]) if slot_env else None
         activity = slot_env.get(COMMAND_ACTIVITY_ENV)
+        # A worktree's commits go to the repository's shared .git folder, granted only
+        # when that repository lists the worktree back, less its hooks and config.
+        git_common = None if read_only_turn else claude_sandbox.git_common_dir(resolved_working_dir)
+        git_controls = claude_sandbox.git_control_paths(resolved_working_dir, git_common)
         try:
             settings = claude_sandbox.sandbox_settings(
                 root=resolved_working_dir,
@@ -1584,8 +1596,7 @@ async def stream_workflow_chat(
                     # Queued tests report progress and take a place in line here.
                     Path(activity).parent if activity else None,
                     slots_root / "queue" if slots_root else None,
-                    # A worktree's commits go to the repository's shared .git folder.
-                    None if read_only_turn else claude_sandbox.git_common_dir(resolved_working_dir),
+                    git_common,
                 ],
                 # Wrappers, slot locks and queue settings; not the hook, which
                 # Claude Code runs outside the sandbox.
@@ -1593,15 +1604,19 @@ async def stream_workflow_chat(
                 if slots_root
                 else [],
                 protected=[
-                    path
-                    for path in _unique_existing_directories(extra_paths)
-                    if path.resolve() != resolved_working_dir.resolve()
+                    *(
+                        path
+                        for path in _unique_existing_directories(extra_paths)
+                        if path.resolve() != resolved_working_dir.resolve()
+                    ),
+                    *git_controls,
                 ],
-                # Private brains inside the turn's projects (_private_brains_in_turn).
+                # Every private brain on this computer (_private_brains_in_turn).
                 hidden=private_brains,
             )
         except ValueError as exc:
             raise ChatProviderError(str(exc)) from exc
+        settings["permissions"]["deny"] += claude_sandbox.git_control_deny_rules(git_controls)
         claude_settings.update(settings)
         # A project's own Claude settings could name hooks, which run outside the sandbox.
         command += claude_sandbox.project_instruction_args(resolved_working_dir)
@@ -1655,7 +1670,7 @@ async def stream_workflow_chat(
     process_env.update(sandbox_env)
     if provider == "codex":
         # Codex reads Raticode's tool tokens from here, never from its arguments.
-        process_env.update(codex_mcp_token_env(turn_resources))
+        process_env.update(codex_mcp_token_env(turn.resources))
     if trusted_scratch_dir is not None and provider == "codex" and permission_mode == "read-only":
         # Read-only Codex sandboxes have nowhere to write temp files or caches,
         # so checks like pytest and mypy fail. Run from a private scratch folder
@@ -1794,135 +1809,10 @@ async def stream_workflow_chat(
         if provider == "claude_code"
         else None
     )
-    if provider == "antigravity":
-        agy_source = stream_antigravity(
-            prompt,
-            session_id=native_id,
-            session_dir=_session.root / _session.state["generation"] if _session else None,
-            cwd=resolved_working_dir,
-            model=model,
-            effort=effort,
-            permission_mode=permission_mode,
-            executable=binary_path,
-            resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
-            env=slot_env or None,
-            cancel_event=cancel_event,
-            max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
-            trusted_swarm_url=trusted_swarm_url,
-            second_brain_cli_path=gofer_cli_path
-            if (
-                ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
-                or ((workflow or {}).get("remReportTheme") or {}).get("format")
-            )
-            else None,
-        )
-        try:
-            async for event in agy_source:
-                metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
-                yield {**metadata, **event, "provider": provider, "model": model, "effort": effort}
-        except (ValueError, OSError) as exc:
-            raise ChatProviderError(str(exc)) from exc
-        finally:
-            await agy_source.aclose()
-            project_tracker.close()
-        return
-    if provider in ACP_PROVIDERS:
-        acp_source = stream_acp(
-            provider,
-            prompt,
-            session_id=native_id,
-            session_dir=_session.root / _session.state["generation"] if _session else None,
-            cwd=resolved_working_dir,
-            model=model,
-            effort=effort,
-            permission_mode=permission_mode,
-            executable=binary_path,
-            image_paths=image_paths,
-            resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
-            # A Grok account's GROK_HOME, with XAI_API_KEY and its other sign-ins dropped.
-            env={**slot_env, **account_env} or None,
-            cancel_event=cancel_event,
-            max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
-            trusted_swarm_url=trusted_swarm_url,
-            second_brain_cli_path=gofer_cli_path
-            if (
-                ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
-                or ((workflow or {}).get("remReportTheme") or {}).get("format")
-            )
-            else None,
-        )
-        try:
-            async for event in acp_source:
-                metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
-                yield {**metadata, **event, "provider": provider, "model": model, "effort": effort}
-        except (ValueError, OSError, AcpTransportError) as exc:
-            raise ChatProviderError(str(exc)) from exc
-        finally:
-            await acp_source.aclose()
-            project_tracker.close()
-        return
-    if provider in ADDITIONAL_PROVIDERS:
-        resources = AgentResources.model_validate((workflow or {}).get("remResources") or {})
-        try:
-            if provider == "cursor":
-                await check_cursor_plugins(binary_path, cancel_event)
-            if cancel_event is not None and cancel_event.is_set():
-                return
-            prompt_command, stdin = cli_prompt_input(provider, command)
-            with cli_invocation(
-                provider,
-                prompt_command,
-                resources,
-                env=slot_env or None,
-                read_only=((workflow or {}).get("remManagedTask") or {}).get("readOnly") is True,
-                structured_output="remManagedTask" in (workflow or {}),
-                trusted_swarm_url=trusted_swarm_url,
-                extra_paths=_unique_existing_directories(
-                    [*([resolved_data_dir] if trust_data_dir else []), *extra_paths]
-                ),
-                second_brain_cli_path=gofer_cli_path
-                if (
-                    ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
-                    or ((workflow or {}).get("remReportTheme") or {}).get("format")
-                )
-                else None,
-                **(
-                    {"session_dir": _session.root / _session.state["generation"]}
-                    if _session
-                    else {}
-                ),
-            ) as (new_command, child_env):
-                source = stream_cli(
-                    new_command,
-                    provider,
-                    cwd=resolved_working_dir,
-                    env=child_env,
-                    cancel_event=cancel_event,
-                    max_output_bytes=None
-                    if unlimited_output
-                    else limits.max_subprocess_output_bytes,
-                    stdin=stdin,
-                )
-                try:
-                    async for event in source:
-                        metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
-                        if _session and provider == "copilot" and event["type"] == "final":
-                            event["sessionId"] = command[command.index("--session-id") + 1]
-                        yield {
-                            **metadata,
-                            **event,
-                            "provider": provider,
-                            "model": model,
-                            "effort": effort,
-                        }
-                finally:
-                    close = getattr(source, "aclose", None)
-                    if close is not None:
-                        await close()
-        except (ValueError, OSError) as exc:
-            raise ChatProviderError(str(exc)) from exc
-        finally:
-            project_tracker.close()
+    if (stream_turn := _provider_turn_stream(provider)) is not None:
+        async with aclosing(stream_turn(turn, command, turn_metadata, project_tracker)) as events:
+            async for event in events:
+                yield event
         return
     try:
         exec_command, private_config = _private_mcp_config(provider, command)
@@ -1944,7 +1834,7 @@ async def stream_workflow_chat(
             cwd=process_cwd,
             env=env_with_executable_on_path(binary_path, process_env),
             timeout=None,
-            max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
+            max_output_bytes=turn.max_output_bytes,
             protocol_stdout=True,
         )
         if steering is not None and provider == "codex":
@@ -1954,7 +1844,7 @@ async def stream_workflow_chat(
                 cwd=process_cwd,
                 env=process_env,
                 cancel_event=cancel_event,
-                max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
+                max_output_bytes=turn.max_output_bytes,
             )
         async for event in provider_stream:
             if event["type"] == "chunk":
@@ -2118,6 +2008,195 @@ async def stream_workflow_chat(
         if private_config is not None:
             shutil.rmtree(private_config, ignore_errors=True)
         temp_cleanup.turn_finished(temp_turn)
+
+
+@dataclass(frozen=True)
+class _ProviderTurn:
+    """One chat turn's values, shared by its command and its provider's stream."""
+
+    provider: str
+    model: str
+    effort: str | None
+    prompt: str
+    binary_path: str
+    cwd: Path
+    permission_mode: str | None
+    workflow: dict[str, Any] | None
+    session: ChatSession | None
+    resources: AgentResources
+    second_brain_cli_path: Path | None
+    session_dir: Path | None
+    max_output_bytes: int | None
+    slot_env: dict[str, str]
+    account_env: dict[str, str]
+    image_paths: list[Path]
+    # The folders a path-restricted CLI may use: the turn's extra paths and, when the
+    # turn trusts it, the data folder.
+    cli_extra_paths: list[Path]
+    cancel_event: threading.Event | None
+    trusted_swarm_url: str | None
+
+    @property
+    def native_id(self) -> str | None:
+        return self.session.native_id if self.session else None
+
+
+_TurnStream = Callable[
+    [_ProviderTurn, list[str], Callable[[], dict[str, Any]], _ChatProjectTracker],
+    AsyncGenerator[dict[str, Any], None],
+]
+
+
+def _provider_turn_stream(provider: str) -> _TurnStream | None:
+    """The stream for a provider that doesn't run as Claude Code or Codex.
+
+    Close it when the turn closes (aclosing): an async for loop doesn't, and its
+    finally blocks stop the provider and remove its config folders.
+    """
+    if provider == "antigravity":
+        return _stream_antigravity_turn
+    if provider in ACP_PROVIDERS:
+        return _stream_acp_turn
+    if provider in ADDITIONAL_PROVIDERS:
+        return _stream_cli_provider_turn
+    return None
+
+
+async def _stream_antigravity_turn(
+    turn: _ProviderTurn,
+    command: list[str],
+    turn_metadata: Callable[[], dict[str, Any]],
+    project_tracker: _ChatProjectTracker,
+) -> AsyncGenerator[dict[str, Any], None]:
+    agy_source = stream_antigravity(
+        turn.prompt,
+        session_id=turn.native_id,
+        session_dir=turn.session_dir,
+        cwd=turn.cwd,
+        model=turn.model,
+        effort=turn.effort,
+        permission_mode=turn.permission_mode,
+        executable=turn.binary_path,
+        resources=turn.resources,
+        env=turn.slot_env or None,
+        cancel_event=turn.cancel_event,
+        max_output_bytes=turn.max_output_bytes,
+        trusted_swarm_url=turn.trusted_swarm_url,
+        second_brain_cli_path=turn.second_brain_cli_path,
+    )
+    try:
+        async for event in agy_source:
+            metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
+            yield {
+                **metadata,
+                **event,
+                "provider": turn.provider,
+                "model": turn.model,
+                "effort": turn.effort,
+            }
+    except (ValueError, OSError) as exc:
+        raise ChatProviderError(str(exc)) from exc
+    finally:
+        await agy_source.aclose()
+        project_tracker.close()
+
+
+async def _stream_acp_turn(
+    turn: _ProviderTurn,
+    command: list[str],
+    turn_metadata: Callable[[], dict[str, Any]],
+    project_tracker: _ChatProjectTracker,
+) -> AsyncGenerator[dict[str, Any], None]:
+    acp_source = stream_acp(
+        turn.provider,
+        turn.prompt,
+        session_id=turn.native_id,
+        session_dir=turn.session_dir,
+        cwd=turn.cwd,
+        model=turn.model,
+        effort=turn.effort,
+        permission_mode=turn.permission_mode,
+        executable=turn.binary_path,
+        image_paths=turn.image_paths,
+        resources=turn.resources,
+        # A Grok account's GROK_HOME, with XAI_API_KEY and its other sign-ins dropped.
+        env={**turn.slot_env, **turn.account_env} or None,
+        cancel_event=turn.cancel_event,
+        max_output_bytes=turn.max_output_bytes,
+        trusted_swarm_url=turn.trusted_swarm_url,
+        second_brain_cli_path=turn.second_brain_cli_path,
+    )
+    try:
+        async for event in acp_source:
+            metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
+            yield {
+                **metadata,
+                **event,
+                "provider": turn.provider,
+                "model": turn.model,
+                "effort": turn.effort,
+            }
+    except (ValueError, OSError, AcpTransportError) as exc:
+        raise ChatProviderError(str(exc)) from exc
+    finally:
+        await acp_source.aclose()
+        project_tracker.close()
+
+
+async def _stream_cli_provider_turn(
+    turn: _ProviderTurn,
+    command: list[str],
+    turn_metadata: Callable[[], dict[str, Any]],
+    project_tracker: _ChatProjectTracker,
+) -> AsyncGenerator[dict[str, Any], None]:
+    provider = turn.provider
+    try:
+        if provider == "cursor":
+            await check_cursor_plugins(turn.binary_path, turn.cancel_event)
+        if turn.cancel_event is not None and turn.cancel_event.is_set():
+            return
+        prompt_command, stdin = cli_prompt_input(provider, command)
+        with cli_invocation(
+            provider,
+            prompt_command,
+            turn.resources,
+            env=turn.slot_env or None,
+            read_only=((turn.workflow or {}).get("remManagedTask") or {}).get("readOnly") is True,
+            structured_output="remManagedTask" in (turn.workflow or {}),
+            trusted_swarm_url=turn.trusted_swarm_url,
+            extra_paths=_unique_existing_directories(turn.cli_extra_paths),
+            second_brain_cli_path=turn.second_brain_cli_path,
+            session_dir=turn.session_dir,
+        ) as (new_command, child_env):
+            source = stream_cli(
+                new_command,
+                provider,
+                cwd=turn.cwd,
+                env=child_env,
+                cancel_event=turn.cancel_event,
+                max_output_bytes=turn.max_output_bytes,
+                stdin=stdin,
+            )
+            try:
+                async for event in source:
+                    metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
+                    if turn.session and provider == "copilot" and event["type"] == "final":
+                        event["sessionId"] = command[command.index("--session-id") + 1]
+                    yield {
+                        **metadata,
+                        **event,
+                        "provider": provider,
+                        "model": turn.model,
+                        "effort": turn.effort,
+                    }
+            finally:
+                close = getattr(source, "aclose", None)
+                if close is not None:
+                    await close()
+    except (ValueError, OSError) as exc:
+        raise ChatProviderError(str(exc)) from exc
+    finally:
+        project_tracker.close()
 
 
 def _text_delta_event(
@@ -3296,14 +3375,16 @@ def _private_brains_in_turn(
     library_dir: Path,
     sandboxed: bool,
 ) -> list[Path]:
-    """Private brains inside this turn's project folders, which its sandbox must hide.
+    """Private brains this turn's sandbox must hide.
 
     A brain with Allow cloud processing off reaches only providers on localhost. A
     project that is or sits inside one is refused. One that holds one runs only as a
     sandboxed Claude Code turn, which hides the brain from the shell and every file
-    tool; any other turn is refused, since nothing else can hide it. The Second Brain
-    folder the turn was given (Settings > Memory, or an organization's knowledge folder)
-    was approved when the user chose it and never counts.
+    tool; any other turn is refused, since nothing else can hide it. A sandboxed turn
+    hides every other private brain too, wherever its folder is, because its shell
+    reads the whole computer except what it denies. The Second Brain folder the turn
+    was given (Settings > Memory, or an organization's knowledge folder) was approved
+    when the user chose it and never counts.
     """
     from gofer.ui.brain_privacy import PrivateBrainError, turn_private_brains
 
@@ -3320,6 +3401,7 @@ def _private_brains_in_turn(
             provider={"id": provider, "profile": provider_profile},
             data_dir=library_dir,
             approved=[str(root) for root in approved if root],
+            everywhere=sandboxed,
         )
     except PrivateBrainError as exc:
         raise ChatProviderError(str(exc)) from exc

@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, overload
 
@@ -25,6 +26,32 @@ class ProcessStreamEvent(TypedDict):
     text: str
     returncode: int | None
     output_truncated: NotRequired[bool]
+    # Set on the final exit event when ``separate_budgets`` is on.
+    stdout_truncated: NotRequired[bool]
+    stderr_truncated: NotRequired[bool]
+    # The last ``STREAM_TAIL_BYTES`` of a cut stdout, which its kept start doesn't hold.
+    stdout_tail: NotRequired[str]
+
+
+# With separate budgets, a cut stderr keeps this much of its end: errors print last.
+STREAM_TAIL_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedOutput:
+    """A finished command's output when stdout and stderr have separate budgets."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    # The end of stdout when it was cut, for a failure reason; not part of ``stdout``.
+    stdout_tail: str = ""
+
+    @property
+    def truncated(self) -> bool:
+        return self.stdout_truncated or self.stderr_truncated
 
 
 # Credentials a child process must never inherit, even from a copied parent env or an
@@ -442,33 +469,106 @@ async def run_subprocess(
     on_stdout: Callable[[str], None] | None = None,
 ) -> tuple[int, str, str]:
     """Run a subprocess and return (returncode, stdout, stderr)."""
-    merged_env = build_subprocess_env(env)
+    captured = await _collect_subprocess(
+        cmd,
+        cancel_event=cancel_event,
+        cwd=cwd,
+        env=env,
+        timeout=timeout,
+        stdin=stdin,
+        max_output_bytes=max_output_bytes,
+        on_stdout=on_stdout,
+        separate_budgets=False,
+    )
+    return captured.returncode, captured.stdout, captured.stderr
 
-    async def _run() -> tuple[int, str, str]:
-        stdout_chunks: list[str] = []
-        stderr_chunks: list[str] = []
-        returncode = 1
-        async for event in stream_subprocess(
-            cmd,
-            cancel_event=cancel_event,
-            cwd=cwd,
-            env=merged_env,
-            stdin=stdin,
-            timeout=timeout,
-            max_output_bytes=max_output_bytes,
-            on_stdout=on_stdout,
-        ):
-            if event["type"] == "chunk":
-                if event["stream"] == "stdout":
-                    stdout_chunks.append(event["text"])
-                elif event["stream"] == "stderr":
-                    stderr_chunks.append(event["text"])
-                continue
-            if event["stream"] is None:
-                returncode = event["returncode"] if event["returncode"] is not None else 1
-        return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
-    return await _run()
+async def run_command_capture(
+    cmd: list[str],
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: bytes | None = None,
+    max_output_bytes: int | None = None,
+) -> CapturedOutput:
+    """Run a command whose stdout is data: each stream gets its own budget, no note is
+    written into either stream, and the result says which one was cut."""
+    return await _collect_subprocess(
+        cmd,
+        cwd=cwd,
+        env=env,
+        timeout=timeout,
+        stdin=stdin,
+        max_output_bytes=max_output_bytes,
+        separate_budgets=True,
+    )
+
+
+async def _collect_subprocess(
+    cmd: list[str],
+    *,
+    cancel_event: threading.Event | None = None,
+    cwd: str | os.PathLike[str] | None = None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: bytes | None = None,
+    max_output_bytes: int | None = None,
+    on_stdout: Callable[[str], None] | None = None,
+    separate_budgets: bool,
+) -> CapturedOutput:
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    returncode = 1
+    final: ProcessStreamEvent | None = None
+    async for event in stream_subprocess(
+        cmd,
+        cancel_event=cancel_event,
+        cwd=cwd,
+        env=build_subprocess_env(env),
+        stdin=stdin,
+        timeout=timeout,
+        max_output_bytes=max_output_bytes,
+        on_stdout=on_stdout,
+        separate_budgets=separate_budgets,
+    ):
+        if event["type"] == "chunk":
+            if event["stream"] == "stdout":
+                stdout_chunks.append(event["text"])
+            elif event["stream"] == "stderr":
+                stderr_chunks.append(event["text"])
+            continue
+        if event["stream"] is None:
+            returncode = event["returncode"] if event["returncode"] is not None else 1
+            final = event
+    return CapturedOutput(
+        returncode,
+        "".join(stdout_chunks),
+        "".join(stderr_chunks),
+        stdout_truncated=bool(final is not None and final.get("stdout_truncated")),
+        stderr_truncated=bool(final is not None and final.get("stderr_truncated")),
+        stdout_tail=final.get("stdout_tail", "") if final is not None else "",
+    )
+
+
+def _utf8_boundary(data: bytes | bytearray, end: int) -> int:
+    """``end`` moved back so ``data[:end]`` doesn't split a UTF-8 character."""
+    end = max(0, min(end, len(data)))
+    if end == len(data):
+        return end
+    start = end
+    # At most three continuation bytes follow a lead byte.
+    while start > 0 and end - start < 4 and data[start] & 0xC0 == 0x80:
+        start -= 1
+    return start if data[start] & 0xC0 != 0x80 else end
+
+
+def _decode_tail(data: bytes | bytearray) -> str:
+    """Decode the end of a stream, dropping a character cut at its start."""
+    start = 0
+    while start < min(3, len(data)) and data[start] & 0xC0 == 0x80:
+        start += 1
+    return bytes(data[start:]).decode(errors="replace")
 
 
 async def stream_subprocess(
@@ -482,11 +582,18 @@ async def stream_subprocess(
     max_output_bytes: int | None = None,
     on_stdout: Callable[[str], None] | None = None,
     protocol_stdout: bool = False,
+    separate_budgets: bool = False,
 ) -> AsyncGenerator[ProcessStreamEvent, None]:
     """Stream output, optionally leaving stdout framing intact for protocol readers.
 
     Protocol consumers must bound records and retained content themselves. The
     subprocess budget then applies to stderr only, never to JSON wire records.
+
+    By default stdout and stderr share one ``max_output_bytes`` budget and a note saying
+    where output was cut is written into the stream that crossed it. With
+    ``separate_budgets`` each stream gets the whole budget and no note is written:
+    stdout keeps its start, stderr keeps its start and its last ``STREAM_TAIL_BYTES``,
+    and the final exit event says which stream was cut.
     """
     merged_env = build_subprocess_env(env)
 
@@ -540,7 +647,58 @@ async def stream_subprocess(
                 emitted_output_bytes += len(chunk)
                 return chunk
 
+        # Separate budgets: what each stream has emitted, whether it was cut, and the
+        # bytes past its budget that are still held back (stderr's tail) or only
+        # remembered (stdout's end, for a failure reason).
+        stream_emitted = {"stdout": 0, "stderr": 0}
+        stream_cut = {"stdout": False, "stderr": False}
+        held_tail = {"stdout": bytearray(), "stderr": bytearray()}
+        tail_size = min(STREAM_TAIL_BYTES, max_output_bytes or 0)
+        stdout_recent = bytearray()
+
+        def hold_tail(stream_name: str, data: bytes) -> None:
+            held = held_tail[stream_name]
+            held.extend(data)
+            if len(held) > tail_size:
+                del held[: len(held) - tail_size]
+                stream_cut[stream_name] = True
+
+        def separate_chunk(stream_name: Literal["stdout", "stderr"], chunk: bytes) -> bytes:
+            """The part of ``chunk`` to emit now under its own stream's budget."""
+            assert max_output_bytes is not None
+            if stream_name == "stdout":
+                stdout_recent.extend(chunk)
+                if len(stdout_recent) > STREAM_TAIL_BYTES:
+                    del stdout_recent[: len(stdout_recent) - STREAM_TAIL_BYTES]
+            head_limit = (
+                max_output_bytes if stream_name == "stdout" else max_output_bytes - tail_size
+            )
+            if held_tail[stream_name] or stream_cut[stream_name]:
+                if stream_name == "stdout":
+                    stream_cut["stdout"] = True
+                else:
+                    hold_tail(stream_name, chunk)
+                return b""
+            remaining = head_limit - stream_emitted[stream_name]
+            if len(chunk) <= remaining:
+                stream_emitted[stream_name] += len(chunk)
+                return chunk
+            # Cut at a character boundary, measured from the start of this stream.
+            cut = _utf8_boundary(chunk, remaining)
+            stream_emitted[stream_name] += cut
+            if stream_name == "stdout":
+                stream_cut["stdout"] = True
+            else:
+                hold_tail(stream_name, chunk[cut:])
+            return chunk[:cut]
+
         async def send_stderr_text(text: str) -> None:
+            if separate_budgets:
+                # Raticode's own stop or timeout line, never cut.
+                await send.send(
+                    {"type": "chunk", "stream": "stderr", "text": text, "returncode": None}
+                )
+                return
             chunk = await bounded_chunk(text.encode())
             if chunk is None:
                 return
@@ -582,6 +740,8 @@ async def stream_subprocess(
                 bounded = (
                     chunk
                     if protocol_stdout and stream_name == "stdout"
+                    else separate_chunk(stream_name, chunk)
+                    if separate_budgets and max_output_bytes is not None
                     else await bounded_chunk(chunk)
                 )
                 if bounded is None:
@@ -609,6 +769,14 @@ async def stream_subprocess(
                         "returncode": None,
                     }
                 )
+            if stream_name == "stderr" and held_tail["stderr"]:
+                # The held-back end of a long stderr, where the error usually is.
+                held = held_tail["stderr"]
+                text = _decode_tail(held) if stream_cut["stderr"] else held.decode(errors="replace")
+                if text:
+                    await send.send(
+                        {"type": "chunk", "stream": "stderr", "text": text, "returncode": None}
+                    )
             await send.send(
                 {
                     "type": "exit",
@@ -680,13 +848,19 @@ async def stream_subprocess(
                         break
             tg.cancel_scope.cancel()
 
-        yield {
+        final: ProcessStreamEvent = {
             "type": "exit",
             "stream": None,
             "text": "",
             "returncode": returncode if returncode is not None else 130,
-            "output_truncated": output_truncated,
+            "output_truncated": output_truncated or stream_cut["stdout"] or stream_cut["stderr"],
         }
+        if separate_budgets:
+            final["stdout_truncated"] = stream_cut["stdout"]
+            final["stderr_truncated"] = stream_cut["stderr"]
+            if stream_cut["stdout"]:
+                final["stdout_tail"] = _decode_tail(stdout_recent)
+        yield final
 
     process = await anyio.open_process(
         scoped_command(cmd, merged_env),

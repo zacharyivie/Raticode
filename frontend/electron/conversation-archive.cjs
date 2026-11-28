@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { writeFileAtomicSync } = require("./atomic-file.cjs");
 const attachmentHashes = new Map();
 const archiveIndexes = new Map();
 const completedArchives = new Map();
@@ -43,13 +44,7 @@ function assertNoSymlink(file) {
   try { if (fs.lstatSync(file).isSymbolicLink()) throw new Error("Archive files must not be symbolic links."); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
 }
-function atomicWrite(file, text) {
-  const temp = `${file}.${crypto.randomUUID()}.tmp`;
-  const fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-  try { fs.writeFileSync(fd, text); fs.fsyncSync(fd); }
-  finally { fs.closeSync(fd); }
-  fs.renameSync(temp, file);
-}
+const atomicWrite = (file, text) => writeFileAtomicSync(file, text);
 const atomicJson = (file, value) => atomicWrite(file, JSON.stringify(value, null, 2) + "\n");
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); }
@@ -92,9 +87,7 @@ function writeReadme(root) {
   catch (error) { if (error.code !== "ENOENT") throw error; }
   if (current === README) return;
   if (current !== null && !GENERATED_READMES.has(hash(current))) return;
-  const temp = `${readme}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(temp, README, { mode: 0o600, flag: "wx" });
-  fs.renameSync(temp, readme);
+  writeFileAtomicSync(readme, README);
 }
 // Archived attachments are always "attachments/<sha256><extension>".
 function isAttachmentPath(value) {

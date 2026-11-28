@@ -19,7 +19,9 @@ import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import aclosing, contextmanager
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -360,7 +362,7 @@ MAX_TURN_EVENTS = 1000
 # Reasons that let the scheduler claim, block or pause; anything else leaves the company idle.
 DISPATCH_REASONS = {
     "Ready",
-    "Task turn limit reached",
+    "Ticket run limit reached",
     "Workspace is outside employee grants",
     "Monthly turn limit: company",
     "Monthly token limit: company",
@@ -396,6 +398,13 @@ def _worktree_state(root: str) -> dict[str, Any]:
 def actor_name(org: dict[str, Any], actor: str) -> str:
     eid = actor.removeprefix("employee:")
     return next((e["name"] for e in org["config"]["employees"] if e["id"] == eid), eid)
+
+
+def named_actor(org: dict[str, Any], actor: str) -> str:
+    """Who changed a ticket, as its notes say it: you, Rem or the worker's name."""
+    return (
+        "you" if actor == "user" else "Rem" if actor.startswith("Rem") else actor_name(org, actor)
+    )
 
 
 # Permission modes that only read. Any other change of mode can widen what an employee does.
@@ -1139,6 +1148,107 @@ def session_tool(scope: dict[str, Any]) -> dict[str, Any]:
     return tool
 
 
+class Needs(Enum):
+    """What an organization action needs before its handler runs."""
+
+    # Nothing: answered without an organization.
+    NOTHING = "nothing"
+    # The organization's ID only; the handler reads the organization itself.
+    ID = "id"
+    # The organization, for the user's own decisions that never wait for consent.
+    ORGANIZATION = "organization"
+    # The organization, and from Rem a change may wait for the user's consent first.
+    CONSENT = "consent"
+
+
+@dataclass
+class ActionCall:
+    """One organization action as ``OrganizationManager.call`` checked it."""
+
+    action: str
+    project: str
+    actor: str
+    params: dict[str, Any]
+    oid: Any
+    employee_id: str | None
+    bound_org: str | None
+    generation: int | None
+    read_only: bool
+    workspace_paths: set[str] | None
+    run_id: str | None
+    consented: bool
+    from_request: bool
+    credential: Any
+    # Loaded by _organization for actions that need it.
+    org: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def user_follow(self) -> bool:
+        """Whether new workers get all of the organization's folders to work on alone.
+
+        The Organizations tab asks for this when the user creates an organization or adds
+        workers: those workers get all of its folders to work on by themselves, now and as
+        folders change. Never for Rem, a worker, a token or a request someone approved.
+        """
+        return (
+            self.params.get("followProjects") is True
+            and self.actor == "user"
+            and not self.from_request
+            and not self.employee_id
+            and not self.consented
+        )
+
+
+@dataclass
+class TicketChange:
+    """One ticket action inside the store's transaction, and what it leaves behind."""
+
+    request: ActionCall
+    # The idempotency key, scoped to the actor and the action asked for.
+    key: str | None
+    request_hash: str
+    # Set inside the transaction.
+    current: dict[str, Any] = field(default_factory=dict)
+    self_run: dict[str, Any] | None = None
+    scoped: bool = False
+    before: dict[str, Any] = field(default_factory=dict)
+    # Runs to stop once the change is saved, and the action's answer.
+    revoked: list[str] = field(default_factory=list)
+    result: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class WorkerRun:
+    """One worker run: where it works, what it was given, and how it ended."""
+
+    # The folder the worker runs in: its task's worktree, or the project itself.
+    run_root: str = ""
+    # Every folder the run's threads may open, the run's own folder included.
+    workspace_paths: list[str] = field(default_factory=list)
+    # The instruction lines about the worktree, the shared repository and git push.
+    workspace_note: str = ""
+    assigned_roots: list[str] = field(default_factory=list)
+    schedule: dict[str, Any] = field(default_factory=dict)
+    # The organization right after the memory check, and the worker's memories it kept.
+    fresh: dict[str, Any] = field(default_factory=dict)
+    verified_memory: list[str] = field(default_factory=list)
+    runtime_dir: Path | None = None
+    account: dict[str, Any] = field(default_factory=dict)
+    # Fingerprint of exactly what the worker was given, and where its work ended up.
+    provenance: dict[str, Any] = field(default_factory=dict)
+    # Filled in by the provider turn.
+    final: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+    managed_turns: int | None = None
+    stored: int = 0
+    stream_finished: bool = False
+    error: str | None = None
+    # Set when the run ends.
+    cancelled: bool = False
+    cancel_reason: str = "cancelled"
+    paused: bool = False
+
+
 class OrganizationManager:
     def __init__(
         self,
@@ -1793,21 +1903,6 @@ class OrganizationManager:
                     }
         return {"last": read["last"], "more": read["more"], "alerts": list(found.values())}
 
-    def _read(self, org: dict[str, Any], count: int, employee_id: str | None) -> dict[str, Any]:
-        """The read action's full answer; employees see only their own memory."""
-        result = self.public(org, count)
-        if employee_id:
-            result["runtime"]["employeeMemory"] = {
-                employee_id: result["runtime"].get("employeeMemory", {}).get(employee_id, "")
-            }
-            result["runtime"]["memories"] = {
-                key: value
-                for key, value in result["runtime"].get("memories", {}).items()
-                if value["employeeId"] == employee_id
-            }
-        result["runtime"].pop("requests", None)
-        return result
-
     def running_workers(self) -> int:
         """Organization workers running on this computer now.
 
@@ -1843,6 +1938,9 @@ class OrganizationManager:
         to decide (Auto mode, or the user's chat instruction); no caller outside Raticode
         can set it. ``from_request`` marks any request ``_decide`` applies, so only the
         user's own create or save gives new workers the organization's folders.
+
+        After the access checks below, ``ORGANIZATION_ACTIONS`` names the action's handler
+        and how much of the organization ``_organization`` loads and checks first.
         """
         if not self.enabled:
             raise ValueError(
@@ -1879,7 +1977,7 @@ class OrganizationManager:
         }
         # Check privilege before inspecting configuration payloads from employees.
         if employee_id and action in CONFIG_ACTIONS:
-            raise ValueError("Employees cannot configure organizations; ask Rem or the user")
+            raise ValueError("Workers cannot configure organizations; ask Rem or the user")
         if employee_id and action not in EMPLOYEE_ACTIONS:
             raise ValueError(WORKER_REFUSAL)
         if missing := required.get(action, set()) - params.keys():
@@ -1888,209 +1986,59 @@ class OrganizationManager:
             raise ValueError("Organization changes are unavailable in read-only/plan mode")
         if employee_id:
             if self._closed.is_set():
-                raise OrganizationConflict("This employee turn has been revoked")
+                raise OrganizationConflict("This worker turn has been revoked")
             if action in CONFIG_ACTIONS or action in {"import_preview", "export", "history"}:
-                raise ValueError("Employees cannot configure organizations; ask Rem or the user")
+                raise ValueError("Workers cannot configure organizations; ask Rem or the user")
             if oid != bound_org:
-                raise ValueError("Employee access is limited to its own organization")
+                raise ValueError("Worker access is limited to its own organization")
             # Checked from the organization's row and one task lookup, without decoding it.
             current_generation, org_state, claimed = self.store.turn_status(str(oid), run_id)
             if current_generation != generation or org_state != "running" or not claimed:
-                raise OrganizationConflict("This employee turn has been revoked")
-        if action == "help":
-            guide = management_help()
-            if employee_id:
-                guide["actions"] = {
-                    name: value
-                    for name, value in guide["actions"].items()
-                    if name in EMPLOYEE_ACTIONS
-                }
-            return {
-                **guide,
-                "instructions": HELP,
-                "employee": employee_id,
-                "readOnly": read_only,
-                "workspacePaths": sorted(workspace_paths or []),
-                "configurationSchema": OrganizationConfig.model_json_schema()
-                if not employee_id
-                else None,
-            }
-        if action == "list":
-            return [
-                item for item in self.store.summaries() if not bound_org or item["id"] == bound_org
-            ]
-        if action == "providers":
-            from gofer.core.provider_capabilities import provider_capabilities_payload
-
-            refresh = params.get("refresh", False)
-            if not isinstance(refresh, bool):
-                raise ValueError("refresh must be a boolean")
-            # Each provider's accounts too, by ID, for employees[].account.
-            return {
-                **provider_capabilities_payload(refresh=refresh),
-                "accounts": provider_accounts(self.data_dir),
-            }
-        if action in {"import_github", "import_github_preview"}:
-            if employee_id:
-                raise ValueError("Employees cannot import organization packages")
-            files = github_package(
-                params.get("repository", ""), params.get("commit", ""), params.get("directory", "")
-            )
-            preview = parse_package(files)
-            preview["provenance"] = {
-                "repository": params["repository"],
-                "commit": params["commit"],
-                "directory": params.get("directory", ""),
-                "files": {
-                    path: hashlib.sha256(base64.b64decode(content)).hexdigest()
-                    for path, content in files.items()
-                },
-            }
-            if action == "import_github_preview":
-                return preview
-            preview["config"]["metadata"]["raticodeImport"] = preview["provenance"]
-            return self.public(
-                self.store.create(
-                    project,
-                    preview["config"],
-                    actor,
-                    "Imported pinned GitHub company template",
-                    preview["tasks"],
-                )
-            )
-        if action in {"import", "import_preview"}:
-            sources = [key for key in ("files", "zip", "path") if key in params]
-            if len(sources) != 1:
-                raise ValueError("Supply exactly one package source: files, zip or path")
-            package_files = params.get("files")
-            if "zip" in params:
-                if not isinstance(params["zip"], str):
-                    raise ValueError("Package ZIP must be base64 text")
-                package_files = read_zip(params["zip"])
-            elif "path" in params:
-                value = params["path"]
-                if not isinstance(value, str) or not Path(value).is_absolute():
-                    raise ValueError("Package path must be an absolute path")
-                path = Path(value).resolve()
-                if workspace_paths is None or not any(
-                    path.is_relative_to(Path(root).resolve()) for root in workspace_paths
-                ):
-                    raise ValueError("Choose a package inside a project open in this Rem session")
-                if path.is_dir():
-                    package_files = read_directory(path)
-                else:
-                    from gofer.ui.organization_packages import MAX_PACKAGE_BYTES
-
-                    try:
-                        with open_binary_input(path) as package_file:
-                            content = package_file.read(MAX_PACKAGE_BYTES + 1)
-                    except OSError as exc:
-                        raise ValueError("Package ZIP changed or cannot be read safely") from exc
-                    if len(content) > MAX_PACKAGE_BYTES:
-                        raise ValueError("Package exceeds 16 MiB")
-                    package_files = read_zip(base64.b64encode(content).decode())
-            if not isinstance(package_files, dict):
-                raise ValueError("Package files must be a map of relative paths to base64 content")
-            package = parse_package(package_files)
-            if action == "import_preview":
-                return package
-            return self.public(
-                self.store.create(
-                    project,
-                    package["config"],
-                    actor,
-                    params.get("reason", "Imported Agent Companies package"),
-                    package["tasks"],
-                )
-            )
-        if action in {"create", "configure"} and workspace_paths is not None:
-            existing = self.store.get(project, str(oid))["config"] if action == "configure" else {}
-            previous = set(existing.get("projectRoots", [])) | {
-                p["workspacePath"] for p in existing.get("projects", []) if p.get("workspacePath")
-            }
-            paths = list(params["config"].get("projectRoots", [])) + [
-                p["workspacePath"]
-                for p in params["config"].get("projects", [])
-                if p.get("workspacePath")
-            ]
-            for path in paths:
-                if path not in previous and str(Path(path).resolve()) not in workspace_paths:
-                    raise ValueError(
-                        "Choose a workspace from the projects open in this Rem session"
-                    )
-        # The Organizations tab asks for this when the user creates an organization or adds
-        # workers: those workers get all of its folders to work on by themselves, now and as
-        # folders change. Never for Rem, a worker, a token or a request someone approved.
-        user_follow = (
-            params.get("followProjects") is True
-            and actor == "user"
-            and not from_request
-            and not employee_id
-            and not consented
+                raise OrganizationConflict("This worker turn has been revoked")
+        entry = ORGANIZATION_ACTIONS.get(action)
+        if entry is None:
+            raise ValueError("Unknown organization action; call help")
+        needs, handler = entry
+        request = ActionCall(
+            action=action,
+            project=project,
+            actor=actor,
+            params=params,
+            oid=oid,
+            employee_id=employee_id,
+            bound_org=bound_org,
+            generation=generation,
+            read_only=read_only,
+            workspace_paths=workspace_paths,
+            run_id=run_id,
+            consented=consented,
+            from_request=from_request,
+            credential=credential,
         )
-        if action == "create":
-            if project and (not Path(project).is_absolute() or not Path(project).is_dir()):
-                raise ValueError("Organization project must be an existing absolute directory")
-            return self.public(
-                self.store.create(
-                    project,
-                    check_accounts({}, params["config"], self.data_dir),
-                    actor,
-                    params.get("reason", "Created organization"),
-                    follow=user_follow,
-                )
-            )
-        if not isinstance(oid, str):
+        if needs is not Needs.NOTHING:
+            asked = self._organization(request, needs)
+            if asked is not None:
+                return asked
+        return handler(self, request)
+
+    def _organization(self, request: ActionCall, needs: Needs) -> dict[str, Any] | None:
+        """Load and check what ``needs`` asks for before the action's handler runs.
+
+        Returns Rem's consent request when the action waits for the user instead.
+        """
+        if request.action == "configure":
+            # New folders are checked before the organization ID, as create's are.
+            self._check_workspaces(request)
+        if not isinstance(request.oid, str):
             raise ValueError("organizationId is required")
-        if action == "read":
-            # An unchanged organization answers from its change counter, before any decoding.
-            since = params.get("sinceVersion")
-            if isinstance(since, str) and since == self.store.read_version(oid):
-                return {"notModified": True, "version": since}
-            count, org = self.store.get_versioned(project, oid)
-            return self._read(org, count, employee_id)
-        org = self.store.get(project, oid)
-        if action == "self_work_projects":
-            if actor != "user":
-                raise ValueError("Only the user can assign workers to projects")
-            return self._assign_self_work(project, org, params)
-        if action == "request_decide":
-            if actor != "user":
-                raise ValueError("Only the user can approve or decline Rem's requests")
-            return self._decide(project, org, params)
-        if action == "request_approve_all":
-            # Approve all: only the user's own click, with the exact list they confirmed.
-            if actor != "user":
-                raise ValueError("Only the user can approve or decline Rem's requests")
-            return approve_all(
-                self,
-                project,
-                oid,
-                params.get("requestIds"),
-                ttl_seconds=CONSENT_TTL.total_seconds(),
-            )
-        if action == "auto_mode":
-            # Only the user's own switch; Rem, workers and agent tokens are refused.
-            if actor != "user":
-                raise ValueError(
-                    "Only the user can turn Auto mode on or off, in the organization's settings"
-                )
-            return set_auto_mode(self, project, org, params)
-        if action == "run_there":
-            # The user's own pick of a suggested desktop; never Rem, Auto mode, a consent
-            # request or a worker, so nothing goes to another computer unpicked.
-            if actor != "user" or consented:
-                raise ValueError(RUN_THERE_USER_ONLY)
-            return self._run_there(project, org, params)
-        if action == "land":
-            # The user's own Accept; never Rem, Auto mode, a consent request or a worker.
-            if actor != "user" or consented:
-                raise ValueError(organization_landing.USER_ONLY)
-            return organization_landing.land(self, project, org, params, actor)
-        if action == "ticket_patch":
-            return organization_landing.read(org, params)
+        if needs is Needs.ID:
+            return None
+        request.org = org = self.store.get(request.project, request.oid)
+        if needs is Needs.ORGANIZATION:
+            return None
+        action, actor, params = request.action, request.actor, request.params
         if actor != "user" and action in {"configure", "restore"}:
-            self._keep_auto_mode(project, org, action, params)
+            self._keep_auto_mode(request.project, org, action, params)
         if action == "secret_store" and actor != "user":
             raise ValueError(
                 "Enter credential values in the Organizations tab. Rem can only reference "
@@ -2098,743 +2046,1052 @@ class OrganizationManager:
             )
         if (
             actor != "user"
-            and not employee_id
-            and not consented
+            and not request.employee_id
+            and not request.consented
             and action in CONSENT_ACTIONS
-            and (reason := self._consent_reason(project, org, action, params))
+            and (reason := self._consent_reason(request.project, org, action, params))
         ):
             return self._request_consent(org, actor, action, params, reason)
-        if action == "archive":
-            archived = params.get("archived", True)
-            if not isinstance(archived, bool):
-                raise ValueError("archived must be true or false")
-            with self._lock:
-                result = self.store.archive(oid, actor, archived)
-            return self.public(result)
-        if action == "audit_verify":
-            report = self.store.verify_audit(oid)
-            if report["ok"]:
-                # A verified head is worth remembering outside the database.
-                self.store.anchor(oid)
-            return report
-        if action == "run_input":
-            turn = params.get("turnId")
-            attempt = org["runtime"].get("attempts", {}).get(turn)
-            if (
-                not isinstance(turn, str)
-                or not attempt
-                or attempt["taskId"] != params.get("taskId")
-            ):
-                raise ValueError("Choose a run of this task")
-            try:
-                with gzip.open(self.run_input_path(oid, turn), "rb") as handle:
-                    stored = handle.read(MAX_RUN_INPUT_BYTES + 1)
-            except OSError as exc:
-                raise ValueError("This run's input wasn't kept; it predates input records") from exc
-            return {
-                "turnId": turn,
-                "input": json.loads(stored),
-                "sha256": hashlib.sha256(stored).hexdigest(),
-                "matchesRecord": hashlib.sha256(stored).hexdigest() == attempt.get("inputSha256"),
+        return None
+
+    def _check_workspaces(self, request: ActionCall) -> None:
+        """Refuse new project folders that aren't open in this Rem session."""
+        if request.workspace_paths is None:
+            return
+        existing = (
+            self.store.get(request.project, str(request.oid))["config"]
+            if request.action == "configure"
+            else {}
+        )
+        previous = set(existing.get("projectRoots", [])) | {
+            p["workspacePath"] for p in existing.get("projects", []) if p.get("workspacePath")
+        }
+        config = request.params["config"]
+        paths = list(config.get("projectRoots", [])) + [
+            p["workspacePath"] for p in config.get("projects", []) if p.get("workspacePath")
+        ]
+        for path in paths:
+            if path not in previous and str(Path(path).resolve()) not in request.workspace_paths:
+                raise ValueError("Choose a workspace from the projects open in this Rem session")
+
+    def _help(self, request: ActionCall) -> dict[str, Any]:
+        employee_id = request.employee_id
+        guide = management_help()
+        if employee_id:
+            guide["actions"] = {
+                name: value for name, value in guide["actions"].items() if name in EMPLOYEE_ACTIONS
             }
-        if action == "run_events":
-            turn = params.get("turnId")
-            attempt = org["runtime"].get("attempts", {}).get(turn)
-            if (
-                not isinstance(turn, str)
-                or not attempt
-                or attempt["taskId"] != params.get("taskId")
-            ):
-                raise ValueError("Choose a run of this task")
-            return {"turnId": turn, "events": self.store.turn_events(oid, turn)}
-        if action == "execution_reconcile":
-            if employee_id:
-                raise ValueError("Only the user or Rem may reconcile stopped executions")
-            return self.executions.reconcile(org)
-        if action == "execution_resolve":
-            if (
-                employee_id
-                or params.get("confirmStopped") is not True
-                or not str(params.get("reason", "")).strip()
-            ):
-                raise ValueError(
-                    "The user or Rem must confirm stopped work and supply inspection evidence"
-                )
+        return {
+            **guide,
+            "instructions": HELP,
+            "employee": employee_id,
+            "readOnly": request.read_only,
+            "workspacePaths": sorted(request.workspace_paths or []),
+            "configurationSchema": OrganizationConfig.model_json_schema()
+            if not employee_id
+            else None,
+        }
 
-            def resolve(current: dict[str, Any]) -> Any:
-                attempt = current["runtime"].get("attempts", {}).get(params.get("attemptId"))
-                if (
-                    not attempt
-                    or not attempt.get("executionHandle")
-                    or attempt["id"] in self._active
-                ):
-                    raise ValueError("Select a stopped execution record")
-                attempt["executionHandle"].update(
-                    settled=True, resolvedBy=actor, resolution=params["reason"], resolvedAt=now()
-                )
-                return {"attemptId": attempt["id"], "reason": params["reason"]}
+    def _list(self, request: ActionCall) -> list[dict[str, Any]]:
+        bound_org = request.bound_org
+        return [item for item in self.store.summaries() if not bound_org or item["id"] == bound_org]
 
-            return self.public(
-                self.store.mutate(project, oid, actor, "execution_resolved", resolve)
+    def _providers(self, request: ActionCall) -> dict[str, Any]:
+        from gofer.core.provider_capabilities import provider_capabilities_payload
+
+        refresh = request.params.get("refresh", False)
+        if not isinstance(refresh, bool):
+            raise ValueError("refresh must be a boolean")
+        # Each provider's accounts too, by ID, for employees[].account.
+        return {
+            **provider_capabilities_payload(refresh=refresh),
+            "accounts": provider_accounts(self.data_dir),
+        }
+
+    def _import_github(self, request: ActionCall) -> dict[str, Any]:
+        """import_github and import_github_preview: a pinned public GitHub template."""
+        params = request.params
+        if request.employee_id:
+            raise ValueError("Workers cannot import organization packages")
+        files = github_package(
+            params.get("repository", ""), params.get("commit", ""), params.get("directory", "")
+        )
+        preview = parse_package(files)
+        preview["provenance"] = {
+            "repository": params["repository"],
+            "commit": params["commit"],
+            "directory": params.get("directory", ""),
+            "files": {
+                path: hashlib.sha256(base64.b64decode(content)).hexdigest()
+                for path, content in files.items()
+            },
+        }
+        if request.action == "import_github_preview":
+            return preview
+        preview["config"]["metadata"]["raticodeImport"] = preview["provenance"]
+        return self.public(
+            self.store.create(
+                request.project,
+                preview["config"],
+                request.actor,
+                "Imported pinned GitHub company template",
+                preview["tasks"],
             )
-        if action == "webhook_save":
-            from gofer.ui.organization_webhooks import configure
+        )
 
-            if employee_id:
-                raise ValueError("Only the user or Rem may configure webhooks")
-            return configure(self, org, params, actor)
-        if action == "backup":
-            import sqlite3
-            import tempfile
+    def _import(self, request: ActionCall) -> dict[str, Any]:
+        """import and import_preview: an Agent Companies package from files, a ZIP or a path."""
+        params = request.params
+        sources = [key for key in ("files", "zip", "path") if key in params]
+        if len(sources) != 1:
+            raise ValueError("Supply exactly one package source: files, zip or path")
+        package_files = params.get("files")
+        if "zip" in params:
+            if not isinstance(params["zip"], str):
+                raise ValueError("Package ZIP must be base64 text")
+            package_files = read_zip(params["zip"])
+        elif "path" in params:
+            package_files = self._package_at(params["path"], request.workspace_paths)
+        if not isinstance(package_files, dict):
+            raise ValueError("Package files must be a map of relative paths to base64 content")
+        package = parse_package(package_files)
+        if request.action == "import_preview":
+            return package
+        return self.public(
+            self.store.create(
+                request.project,
+                package["config"],
+                request.actor,
+                params.get("reason", "Imported Agent Companies package"),
+                package["tasks"],
+            )
+        )
 
-            if employee_id:
-                raise ValueError("Only the user or Rem may export an operational backup")
-            with tempfile.TemporaryDirectory(prefix="raticode-org-backup-") as directory:
-                path = Path(directory) / "organizations.sqlite3"
-                with self.store.connect() as source, sqlite3.connect(path) as destination:
-                    source.backup(destination)
-                    destination.execute("PRAGMA journal_mode=DELETE")
-                content = path.read_bytes()
-            return {
-                "filename": "organizations.sqlite3",
-                "content": base64.b64encode(content).decode(),
-                "sha256": hashlib.sha256(content).hexdigest(),
+    @staticmethod
+    def _package_at(value: Any, workspace_paths: set[str] | None) -> dict[str, Any]:
+        """A package folder's or ZIP file's files, from inside an open project."""
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise ValueError("Package path must be an absolute path")
+        path = Path(value).resolve()
+        if workspace_paths is None or not any(
+            path.is_relative_to(Path(root).resolve()) for root in workspace_paths
+        ):
+            raise ValueError("Choose a package inside a project open in this Rem session")
+        if path.is_dir():
+            return read_directory(path)
+        from gofer.ui.organization_packages import MAX_PACKAGE_BYTES
+
+        try:
+            with open_binary_input(path) as package_file:
+                content = package_file.read(MAX_PACKAGE_BYTES + 1)
+        except OSError as exc:
+            raise ValueError("Package ZIP changed or cannot be read safely") from exc
+        if len(content) > MAX_PACKAGE_BYTES:
+            raise ValueError("Package exceeds 16 MiB")
+        return read_zip(base64.b64encode(content).decode())
+
+    def _create(self, request: ActionCall) -> dict[str, Any]:
+        self._check_workspaces(request)
+        project, params = request.project, request.params
+        if project and (not Path(project).is_absolute() or not Path(project).is_dir()):
+            raise ValueError("Organization project must be an existing absolute directory")
+        return self.public(
+            self.store.create(
+                project,
+                check_accounts({}, params["config"], self.data_dir),
+                request.actor,
+                params.get("reason", "Created organization"),
+                follow=request.user_follow,
+            )
+        )
+
+    def _read(self, request: ActionCall) -> dict[str, Any]:
+        """The read action's full answer; employees see only their own memory."""
+        employee_id = request.employee_id
+        # An unchanged organization answers from its change counter, before any decoding.
+        since = request.params.get("sinceVersion")
+        if isinstance(since, str) and since == self.store.read_version(request.oid):
+            return {"notModified": True, "version": since}
+        count, org = self.store.get_versioned(request.project, request.oid)
+        result = self.public(org, count)
+        if employee_id:
+            result["runtime"]["employeeMemory"] = {
+                employee_id: result["runtime"].get("employeeMemory", {}).get(employee_id, "")
             }
-        if action == "secret_store":
-            from gofer.devices.storage import OSSecretStore, StorageError
+            result["runtime"]["memories"] = {
+                key: value
+                for key, value in result["runtime"].get("memories", {}).items()
+                if value["employeeId"] == employee_id
+            }
+        result["runtime"].pop("requests", None)
+        return result
 
-            if employee_id:
-                raise ValueError("Only the user or Rem may store credentials")
-            sid, value = params.get("id"), credential
-            if (
-                not isinstance(sid, str)
-                or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", sid)
-                or not isinstance(value, str)
-                or not 1 <= len(value) <= 16384
-            ):
-                raise ValueError("Supply a reference ID and a credential up to 16384 characters")
-            account = f"{oid}/{sid}/{uuid4()}"
-            try:
-                OSSecretStore(service="Raticode organization secrets").put(account, value)
-            except StorageError:
-                from gofer.core.secrets_folder import SAVE_HINT
+    def _self_work_projects(self, request: ActionCall) -> dict[str, Any]:
+        if request.actor != "user":
+            raise ValueError("Only the user can assign workers to projects")
+        return self._assign_self_work(request.project, request.org, request.params)
 
-                raise ValueError(
-                    "Raticode couldn't save the credential in the system keychain. "
-                    + SAVE_HINT
-                    + " Then add a secret reference whose account names the file."
-                ) from None
-            return operation(
-                self, org, "secret_reference", {"id": sid, "account": account}, actor, None
+    def _request_decide(self, request: ActionCall) -> Any:
+        if request.actor != "user":
+            raise ValueError("Only the user can approve or decline Rem's requests")
+        return self._decide(request.project, request.org, request.params)
+
+    def _request_approve_all(self, request: ActionCall) -> Any:
+        # Approve all: only the user's own click, with the exact list they confirmed.
+        if request.actor != "user":
+            raise ValueError("Only the user can approve or decline Rem's requests")
+        return approve_all(
+            self,
+            request.project,
+            request.oid,
+            request.params.get("requestIds"),
+            ttl_seconds=CONSENT_TTL.total_seconds(),
+        )
+
+    def _auto_mode(self, request: ActionCall) -> Any:
+        # Only the user's own switch; Rem, workers and agent tokens are refused.
+        if request.actor != "user":
+            raise ValueError(
+                "Only the user can turn Auto mode on or off, in the organization's settings"
             )
-        if action == "workflow_launch":
-            if employee_id:
-                raise ValueError("Only the user or Rem may authorize a workflow launch")
-            return authorize_workflow(self, org, params, actor)
+        return set_auto_mode(self, request.project, request.org, request.params)
+
+    def _land(self, request: ActionCall) -> Any:
+        # The user's own Accept; never Rem, Auto mode, a consent request or a worker.
+        if request.actor != "user" or request.consented:
+            raise ValueError(organization_landing.USER_ONLY)
+        return organization_landing.land(
+            self, request.project, request.org, request.params, request.actor
+        )
+
+    def _ticket_patch(self, request: ActionCall) -> Any:
+        return organization_landing.read(request.org, request.params)
+
+    def _archive(self, request: ActionCall) -> dict[str, Any]:
+        archived = request.params.get("archived", True)
+        if not isinstance(archived, bool):
+            raise ValueError("archived must be true or false")
+        with self._lock:
+            result = self.store.archive(request.oid, request.actor, archived)
+        return self.public(result)
+
+    def _audit_verify(self, request: ActionCall) -> dict[str, Any]:
+        report = self.store.verify_audit(request.oid)
+        if report["ok"]:
+            # A verified head is worth remembering outside the database.
+            self.store.anchor(request.oid)
+        return report
+
+    @staticmethod
+    def _run_of(request: ActionCall) -> tuple[str, dict[str, Any]]:
+        """The run (turn) of this action's task that params names."""
+        params = request.params
+        turn = params.get("turnId")
+        attempt = request.org["runtime"].get("attempts", {}).get(turn)
+        if not isinstance(turn, str) or not attempt or attempt["taskId"] != params.get("taskId"):
+            raise ValueError("Choose a run of this task")
+        return turn, attempt
+
+    def _run_input(self, request: ActionCall) -> dict[str, Any]:
+        turn, attempt = self._run_of(request)
+        try:
+            with gzip.open(self.run_input_path(request.oid, turn), "rb") as handle:
+                stored = handle.read(MAX_RUN_INPUT_BYTES + 1)
+        except OSError as exc:
+            raise ValueError("This run's input wasn't kept; it predates input records") from exc
+        return {
+            "turnId": turn,
+            "input": json.loads(stored),
+            "sha256": hashlib.sha256(stored).hexdigest(),
+            "matchesRecord": hashlib.sha256(stored).hexdigest() == attempt.get("inputSha256"),
+        }
+
+    def _run_events(self, request: ActionCall) -> dict[str, Any]:
+        turn, _ = self._run_of(request)
+        return {"turnId": turn, "events": self.store.turn_events(request.oid, turn)}
+
+    def _execution_reconcile(self, request: ActionCall) -> Any:
+        if request.employee_id:
+            raise ValueError("Only the user or Rem may reconcile stopped executions")
+        return self.executions.reconcile(request.org)
+
+    def _execution_resolve(self, request: ActionCall) -> dict[str, Any]:
+        params, actor = request.params, request.actor
         if (
-            action == "secret_reference"
-            and actor != "user"
-            and not str(params.get("account", "")).startswith(f"{oid}/")
+            request.employee_id
+            or params.get("confirmStopped") is not True
+            or not str(params.get("reason", "")).strip()
+        ):
+            raise ValueError(
+                "The user or Rem must confirm stopped work and supply inspection evidence"
+            )
+
+        def resolve(current: dict[str, Any]) -> Any:
+            attempt = current["runtime"].get("attempts", {}).get(params.get("attemptId"))
+            if not attempt or not attempt.get("executionHandle") or attempt["id"] in self._active:
+                raise ValueError("Select a stopped execution record")
+            attempt["executionHandle"].update(
+                settled=True, resolvedBy=actor, resolution=params["reason"], resolvedAt=now()
+            )
+            return {"attemptId": attempt["id"], "reason": params["reason"]}
+
+        return self.public(
+            self.store.mutate(request.project, request.oid, actor, "execution_resolved", resolve)
+        )
+
+    def _webhook_save(self, request: ActionCall) -> Any:
+        from gofer.ui.organization_webhooks import configure
+
+        if request.employee_id:
+            raise ValueError("Only the user or Rem may configure webhooks")
+        return configure(self, request.org, request.params, request.actor)
+
+    def _backup(self, request: ActionCall) -> dict[str, Any]:
+        import sqlite3
+        import tempfile
+
+        if request.employee_id:
+            raise ValueError("Only the user or Rem may export an operational backup")
+        with tempfile.TemporaryDirectory(prefix="raticode-org-backup-") as directory:
+            path = Path(directory) / "organizations.sqlite3"
+            with self.store.connect() as source, sqlite3.connect(path) as destination:
+                source.backup(destination)
+                destination.execute("PRAGMA journal_mode=DELETE")
+            content = path.read_bytes()
+        return {
+            "filename": "organizations.sqlite3",
+            "content": base64.b64encode(content).decode(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+
+    def _secret_store(self, request: ActionCall) -> Any:
+        from gofer.devices.storage import OSSecretStore, StorageError
+
+        if request.employee_id:
+            raise ValueError("Only the user or Rem may store credentials")
+        sid, value = request.params.get("id"), request.credential
+        if (
+            not isinstance(sid, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", sid)
+            or not isinstance(value, str)
+            or not 1 <= len(value) <= 16384
+        ):
+            raise ValueError("Supply a reference ID and a credential up to 16384 characters")
+        account = f"{request.oid}/{sid}/{uuid4()}"
+        try:
+            OSSecretStore(service="Raticode organization secrets").put(account, value)
+        except StorageError:
+            from gofer.core.secrets_folder import SAVE_HINT
+
+            raise ValueError(
+                "Raticode couldn't save the credential in the system keychain. "
+                + SAVE_HINT
+                + " Then add a secret reference whose account names the file."
+            ) from None
+        return operation(
+            self,
+            request.org,
+            "secret_reference",
+            {"id": sid, "account": account},
+            request.actor,
+            None,
+        )
+
+    def _workflow_launch(self, request: ActionCall) -> Any:
+        if request.employee_id:
+            raise ValueError("Only the user or Rem may authorize a workflow launch")
+        return authorize_workflow(self, request.org, request.params, request.actor)
+
+    def _operation(self, request: ActionCall) -> Any:
+        """The READ_OPERATIONS and WRITE_OPERATIONS in organization_operations."""
+        if (
+            request.action == "secret_reference"
+            and request.actor != "user"
+            and not str(request.params.get("account", "")).startswith(f"{request.oid}/")
         ):
             raise ValueError("Rem can only reference credentials stored for this organization")
-        if action in READ_OPERATIONS | WRITE_OPERATIONS:
-            return operation(self, org, action, params, actor, employee_id, run_id)
-        if action in KNOWLEDGE_ACTIONS:
-            return knowledge_action(self, project, org, action, params, actor, employee_id, run_id)
-        if action == "history":
-            history = self.store.history(project, oid)
-            for entry in history:
-                files = entry["config"].pop("packageFiles", {})
-                entry["packageFiles"] = {
-                    path: hashlib.sha256(content.encode()).hexdigest()
-                    for path, content in files.items()
-                }
-            for index, entry in enumerate(history):
-                before = history[index + 1]["config"] if index + 1 < len(history) else {}
-                entry["changes"] = config_diff(before, entry["config"])
-                previous_files = (
-                    history[index + 1]["packageFiles"] if index + 1 < len(history) else {}
-                )
-                entry["changes"] += config_diff(
-                    previous_files, entry["packageFiles"], "/packageFiles"
-                )
-            offset, limit = int(params.get("offset", 0)), int(params.get("limit", 50))
-            if offset < 0 or not 1 <= limit <= 100:
-                raise ValueError("Use offset >= 0 and limit between 1 and 100")
-            return history[offset : offset + limit]
-        if action == "events":
-            return self.store.events(
-                project, oid, int(params.get("after", 0)), int(params.get("recent", 0))
-            )
-        if action == "export":
-            files = export_package(org["config"], org["runtime"]["tasks"])
-            return {"files": files, "zip": zip_package(files)}
-        if action in {"configure", "restore"}:
-            with self._lock:
-                if action == "configure":
-                    result = self.store.configure(
-                        project,
-                        oid,
-                        check_accounts(org["config"], params["config"], self.data_dir),
-                        params.get("expectedRevision", -1),
-                        actor,
-                        params.get("reason", ""),
-                        follow_new=user_follow,
-                    )
-                else:
-                    result = self.store.restore(
-                        project,
-                        oid,
-                        params["revision"],
-                        params.get("expectedRevision", -1),
-                        actor,
-                        params.get("reason", ""),
-                    )
-                self.stop_revoked(oid, result)
-                self.ensure_repository(result)
-                return self.public(result)
-        if action == "control":
-            state = params.get("state")
-            if state not in {"running", "paused"}:
-                raise ValueError("State must be running or paused")
+        return operation(
+            self,
+            request.org,
+            request.action,
+            request.params,
+            request.actor,
+            request.employee_id,
+            request.run_id,
+        )
 
-            who = "you" if actor == "user" else "Rem" if actor.startswith("Rem") else actor
-            with self._lock:
-                result = self.store.control(project, oid, actor, state, reason=f"Paused by {who}")
-                if state == "paused":
-                    self.cancel(oid, "paused")
-            self._wake.set()
-            return self.public(result)
-        if action == "memory":
-            if not employee_id:
-                raise ValueError(
-                    "Working memory is written by the employee; edit persona memory in settings"
-                )
-            body = params.get("body")
-            if not isinstance(body, str) or len(body) > 100_000:
-                raise ValueError("Memory must be text up to 100000 characters")
+    def _knowledge(self, request: ActionCall) -> Any:
+        """Plans, shared knowledge, claims and checks in organization_knowledge."""
+        return knowledge_action(
+            self,
+            request.project,
+            request.org,
+            request.action,
+            request.params,
+            request.actor,
+            request.employee_id,
+            request.run_id,
+        )
 
-            def remember(current: dict[str, Any]) -> dict[str, Any]:
-                if (
-                    current["runtime"]["generation"] != generation
-                    or current["runtime"]["state"] != "running"
-                    or (
-                        run_id is not None
-                        and not any(t["claim"] == run_id for t in current["runtime"]["tasks"])
-                    )
-                ):
-                    raise OrganizationConflict("This employee turn has been revoked")
-                current["runtime"].setdefault("employeeMemory", {})[employee_id] = body
-                return {"employeeId": employee_id, "body": body}
-
-            self.store.mutate(project, oid, actor, "memory_updated", remember)
-            return {"saved": True}
-        request_action = action
-        if action == "wake":
-            params = {
-                "title": params.get("message", "Employee heartbeat"),
-                "assignee": params["employeeId"],
-                **(
-                    {"idempotencyKey": params["idempotencyKey"]}
-                    if "idempotencyKey" in params
-                    else {}
-                ),
+    def _history(self, request: ActionCall) -> list[dict[str, Any]]:
+        params = request.params
+        history = self.store.history(request.project, request.oid)
+        for entry in history:
+            files = entry["config"].pop("packageFiles", {})
+            entry["packageFiles"] = {
+                path: hashlib.sha256(content.encode()).hexdigest()
+                for path, content in files.items()
             }
-            action = "task_create"
-        if action not in {"task_create", "task_update", "comment", "approve", "review", "reopen"}:
-            raise ValueError("Unknown organization action; call help")
-        for root in org["config"].get("projectRoots", []):
+        for index, entry in enumerate(history):
+            before = history[index + 1]["config"] if index + 1 < len(history) else {}
+            entry["changes"] = config_diff(before, entry["config"])
+            previous_files = history[index + 1]["packageFiles"] if index + 1 < len(history) else {}
+            entry["changes"] += config_diff(previous_files, entry["packageFiles"], "/packageFiles")
+        offset, limit = int(params.get("offset", 0)), int(params.get("limit", 50))
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("Use offset >= 0 and limit between 1 and 100")
+        return history[offset : offset + limit]
+
+    def _events(self, request: ActionCall) -> Any:
+        params = request.params
+        return self.store.events(
+            request.project, request.oid, int(params.get("after", 0)), int(params.get("recent", 0))
+        )
+
+    def _export(self, request: ActionCall) -> dict[str, Any]:
+        files = export_package(request.org["config"], request.org["runtime"]["tasks"])
+        return {"files": files, "zip": zip_package(files)}
+
+    def _configure(self, request: ActionCall) -> dict[str, Any]:
+        params = request.params
+        with self._lock:
+            result = self.store.configure(
+                request.project,
+                request.oid,
+                check_accounts(request.org["config"], params["config"], self.data_dir),
+                params.get("expectedRevision", -1),
+                request.actor,
+                params.get("reason", ""),
+                follow_new=request.user_follow,
+            )
+            return self._revised(request.oid, result)
+
+    def _restore(self, request: ActionCall) -> dict[str, Any]:
+        params = request.params
+        with self._lock:
+            result = self.store.restore(
+                request.project,
+                request.oid,
+                params["revision"],
+                params.get("expectedRevision", -1),
+                request.actor,
+                params.get("reason", ""),
+            )
+            return self._revised(request.oid, result)
+
+    def _revised(self, oid: str, result: dict[str, Any]) -> dict[str, Any]:
+        """After a new configuration revision: stop revoked runs and set up the repository."""
+        self.stop_revoked(oid, result)
+        self.ensure_repository(result)
+        return self.public(result)
+
+    def _control(self, request: ActionCall) -> dict[str, Any]:
+        state = request.params.get("state")
+        if state not in {"running", "paused"}:
+            raise ValueError("State must be running or paused")
+        actor, oid = request.actor, request.oid
+        who = "you" if actor == "user" else "Rem" if actor.startswith("Rem") else actor
+        with self._lock:
+            result = self.store.control(
+                request.project, oid, actor, state, reason=f"Paused by {who}"
+            )
+            if state == "paused":
+                self.cancel(oid, "paused")
+        self._wake.set()
+        return self.public(result)
+
+    def _memory(self, request: ActionCall) -> dict[str, Any]:
+        employee_id = request.employee_id
+        if not employee_id:
+            raise ValueError(
+                "Working memory is written by the worker; edit persona memory in settings"
+            )
+        body = request.params.get("body")
+        if not isinstance(body, str) or len(body) > 100_000:
+            raise ValueError("Memory must be text up to 100000 characters")
+
+        def remember(current: dict[str, Any]) -> dict[str, Any]:
+            self._check_turn(request, current)
+            current["runtime"].setdefault("employeeMemory", {})[employee_id] = body
+            return {"employeeId": employee_id, "body": body}
+
+        self.store.mutate(request.project, request.oid, request.actor, "memory_updated", remember)
+        return {"saved": True}
+
+    @staticmethod
+    def _check_turn(request: ActionCall, current: dict[str, Any]) -> None:
+        """Refuse a change from a worker run the organization has since revoked."""
+        run_id = request.run_id
+        claimed = run_id is None or any(t["claim"] == run_id for t in current["runtime"]["tasks"])
+        if not claimed or (
+            request.employee_id
+            and (
+                current["runtime"]["generation"] != request.generation
+                or current["runtime"]["state"] != "running"
+            )
+        ):
+            raise OrganizationConflict("This worker turn has been revoked")
+
+    def _wake_worker(self, request: ActionCall) -> dict[str, Any]:
+        """wake: queue a ticket for a worker; its idempotency key stays the wake's own."""
+        params = request.params
+        ticket = {
+            "title": params.get("message", "Employee heartbeat"),
+            "assignee": params["employeeId"],
+            **({"idempotencyKey": params["idempotencyKey"]} if "idempotencyKey" in params else {}),
+        }
+        return self._change_task(replace(request, action="task_create", params=ticket), "wake")
+
+    def _change_task(self, request: ActionCall, asked_as: str | None = None) -> dict[str, Any]:
+        """Create, update, comment on, approve, review or reopen one ticket.
+
+        ``asked_as`` is the action the caller named when it differs (wake creates a
+        ticket); a retry's idempotency key is matched within it.
+        """
+        params = request.params
+        for root in request.org["config"].get("projectRoots", []):
             project_identity(root)
         proposed_root = params.get("workspacePath") or (params.get("changes") or {}).get(
             "workspacePath"
         )
         if isinstance(proposed_root, str):
             project_identity(proposed_root)
-        result_task: dict[str, Any] = {}
-        revoked: list[str] = []
         request_key = params.get("idempotencyKey")
         if request_key is not None and (
             not isinstance(request_key, str) or not 1 <= len(request_key) <= 200
         ):
             raise ValueError("Idempotency key must be between 1 and 200 characters")
-        request_hash = hashlib.sha256(
-            json.dumps([request_action, params], sort_keys=True).encode()
-        ).hexdigest()
-
-        def update(current: dict[str, Any]) -> dict[str, Any]:
-            if employee_id and (
-                current["runtime"]["generation"] != generation
-                or current["runtime"]["state"] != "running"
-                or (
-                    run_id is not None
-                    and not any(t["claim"] == run_id for t in current["runtime"]["tasks"])
-                )
-            ):
-                raise OrganizationConflict("This employee turn has been revoked")
-            if run_id is not None and not any(
-                t["claim"] == run_id for t in current["runtime"]["tasks"]
-            ):
-                raise OrganizationConflict("This employee turn has been revoked")
-            requests = current["runtime"].setdefault("requests", {})
-            scoped_key = f"{actor}:{request_action}:{request_key}"
-            if request_key and scoped_key in requests:
-                saved = requests[scoped_key]
-                if saved["hash"] != request_hash:
-                    raise OrganizationConflict(
-                        "Idempotency key was already used with different parameters"
-                    )
-                result_task.update(saved["result"])
-                return {}
-            tasks = current["runtime"]["tasks"]
-            # A check-in, or work it created, is self-work and stays in assigned projects.
-            self_run = next(
-                (
-                    t
-                    for t in tasks
-                    if employee_id and run_id and t["claim"] == run_id and self_directed(t)
-                ),
-                None,
-            )
-            # A worker the user gave projects to stays inside them in every run, like a
-            # check-in does; workers saved before that keep their old reach.
-            scoped = bool(employee_id and (self_run or has_assignment(current, employee_id)))
-            if action == "task_create":
-                task = Task.model_validate(creatable_fields(params)).model_dump()
-                if self_run and employee_id:
-                    task["selfWork"] = True
-                    if not task.get("workspacePath") and not task.get("project"):
-                        task["workspacePath"] = task_root(current["config"], self_run)
-                check_recurring(None, task, employee_id)
-                if employee_id:
-                    task["parentRunId"] = run_id
-                    task["proposedBy"] = employee_id
-                    if task["status"] not in {"backlog", "todo"}:
-                        raise ValueError("Employees must create pending work")
-                    # Work created during a run inherits the rules of the run's own ticket,
-                    # whatever parent the worker names, so naming an older ticket can't
-                    # shed approval or review, or reset the delegation depth.
-                    origin = next((t for t in tasks if run_id and t["claim"] == run_id), None)
-                    named = next((t for t in tasks if t["id"] == task.get("parentId")), None)
-                    if origin and not task.get("parentId"):
-                        task["parentId"] = origin["id"]
-                    for parent in (origin, named):
-                        if parent:
-                            task["approvalRequired"] = (
-                                task["approvalRequired"] or parent["approvalRequired"]
-                            )
-                            task["reviewRequired"] = task["reviewRequired"] or parent.get(
-                                "reviewRequired", False
-                            )
-                    self._limit_delegation(current, task, run_id, origin["id"] if origin else None)
-                self._validate_workspace(current, task, employee_id)
-                validate_execution(current, task)
-                self.store.validate_task(task, current["config"], tasks)
-                if scoped and employee_id:
-                    # After validation, which can give the ticket its epic's project.
-                    self._within_assigned(current, employee_id, task)
-                if employee_id:
-                    self._handover_checked(current, {}, task, scoped)
-                if employee_id:
-                    self._ticket_access(current, employee_id, task.get("project"), "create")
-                tasks.append(task)
-                number_tickets(tasks)
-            else:
-                found = next((t for t in tasks if t["id"] == params.get("taskId")), None)
-                if found is None:
-                    raise ValueError("Task not found")
-                task = found
-                before = dict(task)
-                if (
-                    scoped
-                    and employee_id
-                    and task is not self_run
-                    # A worker may always talk about its own tickets.
-                    and (
-                        action != "comment"
-                        or params.get("unblock")
-                        or task["assignee"] != employee_id
-                    )
-                ):
-                    self._within_assigned(current, employee_id, task)
-                if action == "comment":
-                    body = params.get("body")
-                    if not isinstance(body, str) or not body.strip() or len(body) > 100_000:
-                        raise ValueError("Supply a comment between 1 and 100000 characters")
-                    task["comments"].append({"actor": actor, "at": now(), "body": body})
-                    if params.get("unblock"):
-                        if employee_id and not self._owns(current, employee_id, task):
-                            raise ValueError("Only an owner or manager may unblock work")
-                        if employee_id:
-                            self._ticket_access(current, employee_id, task.get("project"), "move")
-                        if employee_id and not employee_may_unblock(task):
-                            raise ValueError(
-                                "Raticode, the user or Rem blocked this task for review; "
-                                "ask them to reopen it"
-                            )
-                        if task["status"] != "blocked" or task["claim"]:
-                            raise ValueError("Only stopped blocked work can be unblocked")
-                        task.update(status="todo", blockReason="")
-                        if self_run:
-                            task["selfWork"] = True
-                    task["revision"] += 1
-                else:
-                    if task["revision"] != params.get("expectedRevision", -1):
-                        raise OrganizationConflict("Task changed. Read it before updating.")
-                    if action in {"approve", "review"} and employee_id:
-                        if employee_id == task["assignee"] or employee_id != task.get("reviewer"):
-                            raise ValueError(
-                                "Only the designated independent reviewer or the user can approve"
-                            )
-                    elif (
-                        employee_id
-                        and not self._owns(current, employee_id, task)
-                        and not takes_unassigned(task, params, employee_id)
-                    ):
-                        raise ValueError("Only the assignee or their manager can change this task")
-                    if action in {"approve", "review"} and task["status"] == "cancelled":
-                        raise ValueError("Cancelled work must be reopened first")
-                    if action in {"approve", "review", "reopen"}:
-                        # Decided on the ticket itself, so Auto mode's request for it is moot
-                        # and mustn't wait in Needs you as a second copy.
-                        for waiting in (current["runtime"].get("consentRequests") or {}).values():
-                            if (
-                                waiting.get("status") == "pending"
-                                and queued_for_ticket(waiting)
-                                and (waiting.get("params") or {}).get("taskId") == task["id"]
-                            ):
-                                withdraw(waiting, "Decided on the ticket itself.")
-                    if action == "approve":
-                        task["approvedRevision"] = task.get("planRevision", 1)
-                    elif action == "review":
-                        if task["claim"] or task["status"] != "in_review":
-                            raise ValueError("Wait for the run to finish before reviewing")
-                        decision = params.get("decision")
-                        if decision not in {"accept", "revise", "reject"}:
-                            raise ValueError("Choose accept, revise or reject")
-                        if not str(params.get("body", "")).strip():
-                            raise ValueError("Review needs a reason")
-                        if (
-                            decision != "accept"
-                            and (employee_id or actor == AUTO_ACTOR)
-                            and send_backs_spent(current, task)
-                        ):
-                            raise ValueError(
-                                f"Reviewers sent this result back {MAX_SEND_BACKS} times in a "
-                                "row already, so the user reviews it now. Accept it, or leave "
-                                "it for the user."
-                            )
-                        task["comments"].append(
-                            {
-                                "actor": actor,
-                                "at": now(),
-                                "body": params["body"],
-                                "decision": decision,
-                            }
-                        )
-                        if limit_note := count_send_back(current["runtime"], task, actor, decision):
-                            task["comments"].append(
-                                {"actor": "system", "at": now(), "body": limit_note}
-                            )
-                        task["acceptedAt"] = now() if decision == "accept" else None
-                        if decision != "accept":
-                            supersede_claims(current, task["id"], actor)
-                        elif not task["evidence"].strip():
-                            # The accepted claims and their checked states become the record.
-                            task["evidence"] = acceptance_evidence(current, task, params["body"])
-                        if self_run and decision == "revise":
-                            # Sending work back starts it again, so it's this check-in's doing.
-                            task["selfWork"] = True
-                        task.update(
-                            acceptedRevision=task["revision"] if decision == "accept" else None,
-                            status={"accept": "done", "revise": "todo", "reject": "blocked"}[
-                                decision
-                            ],
-                        )
-                        if decision == "reject":
-                            task["blockReason"] = (
-                                f"Rejected in review by {actor_label(current, actor)}; "
-                                "the user or Rem can reopen it"
-                            )
-                        self.store.validate_task(task, current["config"], tasks, before)
-                    elif action == "reopen":
-                        if task["claim"] or task["status"] not in {"done", "cancelled", "blocked"}:
-                            raise ValueError("Only stopped work can be reopened")
-                        if employee_id:
-                            self._ticket_access(current, employee_id, task.get("project"), "move")
-                        if employee_id and (
-                            task["status"] == "cancelled"
-                            or (task["status"] == "blocked" and not employee_may_unblock(task))
-                        ):
-                            raise ValueError(
-                                "Only the user or Rem can reopen work that was cancelled or "
-                                "blocked for review"
-                            )
-                        target = params.get("status", "todo")
-                        if target not in {"todo", "backlog"}:
-                            raise ValueError("Reopen into To do or Backlog")
-                        task.update(
-                            status=target,
-                            cancellation=None,
-                            blockReason="",
-                            acceptedRevision=None,
-                            pulledAt=None,
-                            selfWork=bool(employee_id and (self_run or task.get("selfWork"))),
-                        )
-                        # Only the user's reopen grants a fresh run allowance, and lets
-                        # reviewers send the result back again.
-                        if actor == "user" and task["turns"] >= current["config"]["maxTaskTurns"]:
-                            task["turns"] = 0
-                        if actor == "user":
-                            (current["runtime"].get("sendBacks") or {}).pop(task["id"], None)
-                    else:
-                        changes = params.get("changes", {})
-                        if not isinstance(changes, dict) or set(changes) - TASK_EDIT_FIELDS:
-                            raise ValueError("Unsupported task fields")
-                        # Moving a ticket someone pulled back to To do or Backlog takes it out of
-                        # the front of the queue, even though its status doesn't change.
-                        unpull = bool(
-                            task.get("pulledAt")
-                            and not task["claim"]
-                            and changes.get("status") in {"todo", "backlog"}
-                        )
-                        changes = {
-                            key: value for key, value in changes.items() if task.get(key) != value
-                        }
-                        if (
-                            employee_id
-                            and task["status"] == "blocked"
-                            and (
-                                changes.get("status") not in {None, "blocked", "cancelled"}
-                                or "blockReason" in changes
-                            )
-                            and not employee_may_unblock(task)
-                        ):
-                            raise ValueError(
-                                "Raticode, the user or Rem blocked this task for review; "
-                                "ask them to reopen it"
-                            )
-                        if task["claim"] and set(changes) - {"status", "evidence"}:
-                            raise OrganizationConflict(
-                                "Pause and wait for the turn before editing its plan"
-                            )
-                        check_recurring(task, {**task, **changes}, employee_id)
-                        if employee_id and set(changes) & {
-                            "approvalRequired",
-                            "reviewRequired",
-                            "reviewer",
-                        }:
-                            raise ValueError("Employees cannot change approval or review policy")
-                        if employee_id and "artifacts" in changes:
-                            # artifact_add checks the file; a direct edit would skip that.
-                            raise ValueError("Record files with artifact_add")
-                        if (
-                            task["status"] == "cancelled"
-                            and changes.get("status", "cancelled") != "cancelled"
-                        ):
-                            raise ValueError("Use reopen to retry cancelled work")
-                        # Raticode starts work itself, so moving a ticket to In progress
-                        # means "work on this next": it waits at the front of the queue.
-                        pulled = changes.get("status") == "in_progress" and not task["claim"]
-                        if pulled:
-                            changes = {**changes, "status": "todo"}
-                        candidate = Task.model_validate({**task, **changes}).model_dump()
-                        waits_for_start = False
-                        if pulled:
-                            candidate["pulledAt"] = now()
-                            if candidate.get("dueAt") and datetime.fromisoformat(
-                                candidate["dueAt"]
-                            ) > datetime.now(UTC):
-                                # Only the user or Rem can skip a start date someone set;
-                                # a worker's pull still waits for it.
-                                if employee_id and "dueAt" not in changes:
-                                    waits_for_start = True
-                                else:
-                                    candidate["dueAt"] = None
-                        context = {"knowledge"} if actor == "user" else set()
-                        if (
-                            set(changes)
-                            - {"status", "evidence", "artifacts", "blockReason"}
-                            - context
-                        ):
-                            candidate["approvedRevision"] = None
-                            candidate["workflowAuthorization"] = None
-                            candidate["planRevision"] += 1
-                        if set(changes) - {"status", "blockReason"} or changes.get(
-                            "status"
-                        ) not in {
-                            None,
-                            "done",
-                        }:
-                            candidate["acceptedRevision"] = None
-                        if changes.get("status") == "in_review":
-                            candidate["reviewRequestedAt"] = now()
-                        if changes.get("status") == "blocked" and not candidate["blockReason"]:
-                            who = (
-                                "you"
-                                if actor == "user"
-                                else "Rem"
-                                if actor.startswith("Rem")
-                                else actor_name(current, actor)
-                            )
-                            candidate["blockReason"] = f"Blocked by {who}; see the conversation"
-                        elif changes.get("status") not in {None, "blocked"} and (
-                            "blockReason" not in changes
-                        ):
-                            candidate["blockReason"] = ""
-                        if changes.get("status") == "cancelled" and task["claim"]:
-                            revoked.append(task["claim"])
-                            candidate.update(claim=None, cancellation="requested")
-                        self._validate_workspace(current, candidate, employee_id)
-                        validate_execution(current, candidate)
-                        self.store.validate_task(candidate, current["config"], tasks, before)
-                        if scoped and employee_id:
-                            # Where the ticket would run after this change, not just before.
-                            self._within_assigned(current, employee_id, candidate)
-                        if employee_id:
-                            self._handover_checked(current, before, candidate, scoped)
-                            reassigned = self._reassignment_note(
-                                current, employee_id, before, candidate, params
-                            )
-                            if reassigned:
-                                candidate["comments"].append(reassigned)
-                        if self_run and employee_id:
-                            # Taking it, or starting it up, makes it this check-in's own work.
-                            # Requested work that is only updated stays requested.
-                            if (not before.get("assignee") and candidate.get("assignee")) or (
-                                before["status"] != "todo" and candidate["status"] == "todo"
-                            ):
-                                candidate["selfWork"] = True
-                        if employee_id:
-                            needed = set()
-                            if "status" in changes:
-                                needed.add("cancel" if changes["status"] == "cancelled" else "move")
-                            # Evidence and artifacts are a run's own output, not plan edits.
-                            if set(changes) - {"status", "evidence", "artifacts", "blockReason"}:
-                                needed.add("edit")
-                            for where in {task.get("project"), candidate.get("project")}:
-                                for permission in sorted(needed):
-                                    self._ticket_access(current, employee_id, where, permission)
-                        task.update(candidate)
-                        if not employee_id and {"status", "assignee"} & set(changes):
-                            # Someone took it over, so it's no longer the worker's own idea.
-                            task["selfWork"] = False
-                        if unpull and not pulled:
-                            task["pulledAt"] = None
-                        if pulled:
-                            who = (
-                                "You"
-                                if actor == "user"
-                                else "Rem"
-                                if actor.startswith("Rem")
-                                else actor_name(current, actor)
-                            )
-                            task["comments"].append(
-                                {
-                                    "actor": "system",
-                                    "at": now(),
-                                    "body": f"{who} moved this to In progress. It starts as soon "
-                                    "as its worker is free and working hours allow"
-                                    + (", on or after its start date." if waits_for_start else "."),
-                                }
-                            )
-                    task["revision"] += 1
-                    if (
-                        task["status"] == "done"
-                        and task["recurring"]
-                        and task["intervalSeconds"]
-                        and not task["claim"]
-                    ):
-                        self._record_occurrence(current, task)
-                        task["comments"].append(
-                            {
-                                "actor": actor,
-                                "at": now(),
-                                "body": "Completed occurrence: " + task["evidence"],
-                            }
-                        )
-                        task.update(
-                            status="todo",
-                            turns=0,
-                            dueAt=(
-                                datetime.now(UTC) + timedelta(seconds=task["intervalSeconds"])
-                            ).isoformat(),
-                        )
-            if task["status"] == "cancelled":
-                parents = {task["id"]}
-                while True:
-                    parent_runs = {
-                        a["id"]
-                        for a in current["runtime"].get("attempts", {}).values()
-                        if a["taskId"] in parents
-                    }
-                    children = {
-                        t["id"]
-                        for t in tasks
-                        if t.get("parentId") in parents or t.get("parentRunId") in parent_runs
-                    } - parents
-                    if not children:
-                        break
-                    parents |= children
-                for child in tasks:
-                    if child["id"] in parents - {task["id"]} and child["status"] not in {
-                        "done",
-                        "cancelled",
-                    }:
-                        if child["claim"]:
-                            revoked.append(child["claim"])
-                        child.update(
-                            status="cancelled",
-                            cancellation="requested" if child["claim"] else "acknowledged",
-                            claim=None,
-                            revision=child["revision"] + 1,
-                        )
-            self._unblock(current)
-            result_task.update(copy.deepcopy(task))
-            result_task["key"] = ticket_key(current["config"], task)
-            if request_key and action == "comment":
-                result_task.clear()
-                result_task.update(id=task["id"], revision=task["revision"], status=task["status"])
-            if request_key:
-                # Retries arrive within minutes; a month is ample and keeps the table bounded.
-                cutoff = (datetime.now(UTC) - REQUEST_RETENTION).isoformat()
-                for stale in [k for k, v in requests.items() if v.get("at", "") < cutoff]:
-                    requests.pop(stale)
-                requests[scoped_key] = {
-                    "hash": request_hash,
-                    "result": copy.deepcopy(result_task),
-                    "at": now(),
-                }
-            return {
-                "taskId": task["id"],
-                "revision": task["revision"],
-                "status": task["status"],
-                **({"comment": task["comments"][-1]} if action == "comment" else {}),
-                **({"changes": params["changes"]} if action == "task_update" else {}),
-                **(
-                    {"decision": params["decision"], "body": params["body"]}
-                    if action == "review"
-                    else {}
-                ),
-            }
-
+        asked_as = asked_as or request.action
+        change = TicketChange(
+            request=request,
+            key=f"{request.actor}:{asked_as}:{request_key}" if request_key else None,
+            request_hash=hashlib.sha256(
+                json.dumps([asked_as, params], sort_keys=True).encode()
+            ).hexdigest(),
+        )
         with self._lock:
-            self.store.mutate(project, oid, actor, action, update)
-            for claim_id in revoked:
+            self.store.mutate(
+                request.project,
+                request.oid,
+                request.actor,
+                request.action,
+                lambda current: self._apply_ticket_change(change, current),
+            )
+            for claim_id in change.revoked:
                 if claim_id in self._active:
                     self._active[claim_id][1].set()
-        if action in {"review", "task_update"} and result_task.get("sharedWorktree"):
+        result_task = change.result
+        if request.action in {"review", "task_update"} and result_task.get("sharedWorktree"):
             # Accepting merges the ticket's shared changes right away.
-            self.release_shared(self.store.get(project, oid))
+            self.release_shared(self.store.get(request.project, request.oid))
             result_task.update(
                 next(
                     t
-                    for t in self.store.get(project, oid)["runtime"]["tasks"]
+                    for t in self.store.get(request.project, request.oid)["runtime"]["tasks"]
                     if t["id"] == result_task["id"]
                 ),
                 key=result_task.get("key"),
             )
         self._wake.set()
         return result_task
+
+    def _apply_ticket_change(self, change: TicketChange, current: dict[str, Any]) -> dict[str, Any]:
+        """_change_task's store transaction: the action's ticket change and its effects."""
+        request = change.request
+        employee_id, run_id, params = request.employee_id, request.run_id, request.params
+        self._check_turn(request, current)
+        requests = current["runtime"].setdefault("requests", {})
+        if change.key and change.key in requests:
+            # A retry of a change that already happened gets the first answer again.
+            saved = requests[change.key]
+            if saved["hash"] != change.request_hash:
+                raise OrganizationConflict(
+                    "Idempotency key was already used with different parameters"
+                )
+            change.result.update(saved["result"])
+            return {}
+        tasks = current["runtime"]["tasks"]
+        change.current = current
+        # A check-in, or work it created, is self-work and stays in assigned projects.
+        change.self_run = next(
+            (
+                t
+                for t in tasks
+                if employee_id and run_id and t["claim"] == run_id and self_directed(t)
+            ),
+            None,
+        )
+        # A worker the user gave projects to stays inside them in every run, like a
+        # check-in does; workers saved before that keep their old reach.
+        change.scoped = bool(
+            employee_id and (change.self_run or has_assignment(current, employee_id))
+        )
+        task = TICKET_CHANGES[request.action](self, change)
+        if task["status"] == "cancelled":
+            self._cancel_descendants(change, task)
+        self._unblock(current)
+        self._ticket_result(change, task, requests)
+        action = request.action
+        return {
+            "taskId": task["id"],
+            "revision": task["revision"],
+            "status": task["status"],
+            **({"comment": task["comments"][-1]} if action == "comment" else {}),
+            **({"changes": params["changes"]} if action == "task_update" else {}),
+            **(
+                {"decision": params["decision"], "body": params["body"]}
+                if action == "review"
+                else {}
+            ),
+        }
+
+    @staticmethod
+    def _ticket_result(
+        change: TicketChange, task: dict[str, Any], requests: dict[str, Any]
+    ) -> None:
+        """Set the action's answer and keep it for retries that reuse the idempotency key."""
+        result = change.result
+        result.update(copy.deepcopy(task))
+        result["key"] = ticket_key(change.current["config"], task)
+        if not change.key:
+            return
+        if change.request.action == "comment":
+            result.clear()
+            result.update(id=task["id"], revision=task["revision"], status=task["status"])
+        # Retries arrive within minutes; a month is ample and keeps the table bounded.
+        cutoff = (datetime.now(UTC) - REQUEST_RETENTION).isoformat()
+        for stale in [k for k, v in requests.items() if v.get("at", "") < cutoff]:
+            requests.pop(stale)
+        requests[change.key] = {
+            "hash": change.request_hash,
+            "result": copy.deepcopy(result),
+            "at": now(),
+        }
+
+    @staticmethod
+    def _cancel_descendants(change: TicketChange, task: dict[str, Any]) -> None:
+        """Cancel the work a cancelled ticket and its runs created, and revoke its runs."""
+        current = change.current
+        tasks = current["runtime"]["tasks"]
+        parents = {task["id"]}
+        while True:
+            parent_runs = {
+                a["id"]
+                for a in current["runtime"].get("attempts", {}).values()
+                if a["taskId"] in parents
+            }
+            children = {
+                t["id"]
+                for t in tasks
+                if t.get("parentId") in parents or t.get("parentRunId") in parent_runs
+            } - parents
+            if not children:
+                break
+            parents |= children
+        for child in tasks:
+            if child["id"] in parents - {task["id"]} and child["status"] not in {
+                "done",
+                "cancelled",
+            }:
+                if child["claim"]:
+                    change.revoked.append(child["claim"])
+                child.update(
+                    status="cancelled",
+                    cancellation="requested" if child["claim"] else "acknowledged",
+                    claim=None,
+                    revision=child["revision"] + 1,
+                )
+
+    def _create_ticket(self, change: TicketChange) -> dict[str, Any]:
+        request, current, self_run = change.request, change.current, change.self_run
+        employee_id, run_id = request.employee_id, request.run_id
+        tasks = current["runtime"]["tasks"]
+        task = Task.model_validate(creatable_fields(request.params)).model_dump()
+        if self_run and employee_id:
+            task["selfWork"] = True
+            if not task.get("workspacePath") and not task.get("project"):
+                task["workspacePath"] = task_root(current["config"], self_run)
+        check_recurring(None, task, employee_id)
+        if employee_id:
+            task["parentRunId"] = run_id
+            task["proposedBy"] = employee_id
+            if task["status"] not in {"backlog", "todo"}:
+                raise ValueError("Workers must create pending work")
+            # Work created during a run inherits the rules of the run's own ticket,
+            # whatever parent the worker names, so naming an older ticket can't
+            # shed approval or review, or reset the delegation depth.
+            origin = next((t for t in tasks if run_id and t["claim"] == run_id), None)
+            named = next((t for t in tasks if t["id"] == task.get("parentId")), None)
+            if origin and not task.get("parentId"):
+                task["parentId"] = origin["id"]
+            for parent in (origin, named):
+                if parent:
+                    task["approvalRequired"] = (
+                        task["approvalRequired"] or parent["approvalRequired"]
+                    )
+                    task["reviewRequired"] = task["reviewRequired"] or parent.get(
+                        "reviewRequired", False
+                    )
+            self._limit_delegation(current, task, run_id, origin["id"] if origin else None)
+        self._validate_workspace(current, task, employee_id)
+        validate_execution(current, task)
+        self.store.validate_task(task, current["config"], tasks)
+        if change.scoped and employee_id:
+            # After validation, which can give the ticket its epic's project.
+            self._within_assigned(current, employee_id, task)
+        if employee_id:
+            self._handover_checked(current, {}, task, change.scoped)
+        if employee_id:
+            self._ticket_access(current, employee_id, task.get("project"), "create")
+        tasks.append(task)
+        number_tickets(tasks)
+        return task
+
+    def _found_ticket(self, change: TicketChange) -> dict[str, Any]:
+        """The ticket an existing-ticket action names, inside the worker's projects."""
+        request, current = change.request, change.current
+        employee_id, params = request.employee_id, request.params
+        task: dict[str, Any] | None = next(
+            (t for t in current["runtime"]["tasks"] if t["id"] == params.get("taskId")), None
+        )
+        if task is None:
+            raise ValueError("Task not found")
+        change.before = dict(task)
+        if (
+            change.scoped
+            and employee_id
+            and task is not change.self_run
+            # A worker may always talk about its own tickets.
+            and (
+                request.action != "comment"
+                or params.get("unblock")
+                or task["assignee"] != employee_id
+            )
+        ):
+            self._within_assigned(current, employee_id, task)
+        return task
+
+    def _comment_ticket(self, change: TicketChange) -> dict[str, Any]:
+        request, current = change.request, change.current
+        employee_id, params = request.employee_id, request.params
+        task = self._found_ticket(change)
+        body = params.get("body")
+        if not isinstance(body, str) or not body.strip() or len(body) > 100_000:
+            raise ValueError("Supply a comment between 1 and 100000 characters")
+        task["comments"].append({"actor": request.actor, "at": now(), "body": body})
+        if params.get("unblock"):
+            if employee_id and not self._owns(current, employee_id, task):
+                raise ValueError("Only an owner or manager may unblock work")
+            if employee_id:
+                self._ticket_access(current, employee_id, task.get("project"), "move")
+            if employee_id and not employee_may_unblock(task):
+                raise ValueError(
+                    "Raticode, the user or Rem blocked this task for review; ask them to reopen it"
+                )
+            if task["status"] != "blocked" or task["claim"]:
+                raise ValueError("Only stopped blocked work can be unblocked")
+            task.update(status="todo", blockReason="")
+            if change.self_run:
+                task["selfWork"] = True
+        task["revision"] += 1
+        return task
+
+    def _changeable_ticket(self, change: TicketChange) -> dict[str, Any]:
+        """The ticket an approve, review, reopen or update names, once the actor may change it."""
+        request, current = change.request, change.current
+        action, employee_id, params = request.action, request.employee_id, request.params
+        task = self._found_ticket(change)
+        if task["revision"] != params.get("expectedRevision", -1):
+            raise OrganizationConflict("Task changed. Read it before updating.")
+        if action in {"approve", "review"} and employee_id:
+            if employee_id == task["assignee"] or employee_id != task.get("reviewer"):
+                raise ValueError("Only the designated independent reviewer or the user can approve")
+        elif (
+            employee_id
+            and not self._owns(current, employee_id, task)
+            and not takes_unassigned(task, params, employee_id)
+        ):
+            raise ValueError("Only the assignee or their manager can change this task")
+        if action in {"approve", "review"} and task["status"] == "cancelled":
+            raise ValueError("Cancelled work must be reopened first")
+        if action in {"approve", "review", "reopen"}:
+            # Decided on the ticket itself, so Auto mode's request for it is moot
+            # and mustn't wait in Needs you as a second copy.
+            for waiting in (current["runtime"].get("consentRequests") or {}).values():
+                if (
+                    waiting.get("status") == "pending"
+                    and queued_for_ticket(waiting)
+                    and (waiting.get("params") or {}).get("taskId") == task["id"]
+                ):
+                    withdraw(waiting, "Decided on the ticket itself.")
+        return task
+
+    def _ticket_changed(self, change: TicketChange, task: dict[str, Any]) -> dict[str, Any]:
+        """Count the change; a finished recurring ticket records the occurrence and repeats."""
+        task["revision"] += 1
+        if (
+            task["status"] == "done"
+            and task["recurring"]
+            and task["intervalSeconds"]
+            and not task["claim"]
+        ):
+            self._record_occurrence(change.current, task)
+            task["comments"].append(
+                {
+                    "actor": change.request.actor,
+                    "at": now(),
+                    "body": "Completed occurrence: " + task["evidence"],
+                }
+            )
+            task.update(
+                status="todo",
+                turns=0,
+                dueAt=(datetime.now(UTC) + timedelta(seconds=task["intervalSeconds"])).isoformat(),
+            )
+        return task
+
+    def _approve_ticket(self, change: TicketChange) -> dict[str, Any]:
+        task = self._changeable_ticket(change)
+        task["approvedRevision"] = task.get("planRevision", 1)
+        return self._ticket_changed(change, task)
+
+    def _review_ticket(self, change: TicketChange) -> dict[str, Any]:
+        request, current = change.request, change.current
+        actor, params = request.actor, request.params
+        task = self._changeable_ticket(change)
+        if task["claim"] or task["status"] != "in_review":
+            raise ValueError("Wait for the run to finish before reviewing")
+        decision = params.get("decision")
+        if decision not in {"accept", "revise", "reject"}:
+            raise ValueError("Choose accept, revise or reject")
+        if not str(params.get("body", "")).strip():
+            raise ValueError("Review needs a reason")
+        if (
+            decision != "accept"
+            and (request.employee_id or actor == AUTO_ACTOR)
+            and send_backs_spent(current, task)
+        ):
+            raise ValueError(
+                f"Reviewers sent this result back {MAX_SEND_BACKS} times in a "
+                "row already, so the user reviews it now. Accept it, or leave "
+                "it for the user."
+            )
+        task["comments"].append(
+            {"actor": actor, "at": now(), "body": params["body"], "decision": decision}
+        )
+        if limit_note := count_send_back(current["runtime"], task, actor, decision):
+            task["comments"].append({"actor": "system", "at": now(), "body": limit_note})
+        task["acceptedAt"] = now() if decision == "accept" else None
+        if decision != "accept":
+            supersede_claims(current, task["id"], actor)
+        elif not task["evidence"].strip():
+            # The accepted claims and their checked states become the record.
+            task["evidence"] = acceptance_evidence(current, task, params["body"])
+        if change.self_run and decision == "revise":
+            # Sending work back starts it again, so it's this check-in's doing.
+            task["selfWork"] = True
+        task.update(
+            acceptedRevision=task["revision"] if decision == "accept" else None,
+            status={"accept": "done", "revise": "todo", "reject": "blocked"}[decision],
+        )
+        if decision == "reject":
+            task["blockReason"] = (
+                f"Rejected in review by {actor_label(current, actor)}; "
+                "the user or Rem can reopen it"
+            )
+        self.store.validate_task(
+            task, current["config"], current["runtime"]["tasks"], change.before
+        )
+        return self._ticket_changed(change, task)
+
+    def _reopen_ticket(self, change: TicketChange) -> dict[str, Any]:
+        request, current = change.request, change.current
+        actor, employee_id = request.actor, request.employee_id
+        task = self._changeable_ticket(change)
+        if task["claim"] or task["status"] not in {"done", "cancelled", "blocked"}:
+            raise ValueError("Only stopped work can be reopened")
+        if employee_id:
+            self._ticket_access(current, employee_id, task.get("project"), "move")
+        if employee_id and (
+            task["status"] == "cancelled"
+            or (task["status"] == "blocked" and not employee_may_unblock(task))
+        ):
+            raise ValueError(
+                "Only the user or Rem can reopen work that was cancelled or blocked for review"
+            )
+        target = request.params.get("status", "todo")
+        if target not in {"todo", "backlog"}:
+            raise ValueError("Reopen into To do or Backlog")
+        task.update(
+            status=target,
+            cancellation=None,
+            blockReason="",
+            acceptedRevision=None,
+            pulledAt=None,
+            selfWork=bool(employee_id and (change.self_run or task.get("selfWork"))),
+        )
+        # Only the user's reopen grants a fresh run allowance, and lets
+        # reviewers send the result back again.
+        if actor == "user" and task["turns"] >= current["config"]["maxTaskTurns"]:
+            task["turns"] = 0
+        if actor == "user":
+            (current["runtime"].get("sendBacks") or {}).pop(task["id"], None)
+        return self._ticket_changed(change, task)
+
+    def _update_ticket(self, change: TicketChange) -> dict[str, Any]:
+        request, current = change.request, change.current
+        actor, employee_id = request.actor, request.employee_id
+        task = self._changeable_ticket(change)
+        before = change.before
+        changes = request.params.get("changes", {})
+        if not isinstance(changes, dict) or set(changes) - TASK_EDIT_FIELDS:
+            raise ValueError("Unsupported task fields")
+        # Moving a ticket someone pulled back to To do or Backlog takes it out of
+        # the front of the queue, even though its status doesn't change.
+        unpull = bool(
+            task.get("pulledAt")
+            and not task["claim"]
+            and changes.get("status") in {"todo", "backlog"}
+        )
+        changes = {key: value for key, value in changes.items() if task.get(key) != value}
+        self._check_ticket_edit(change, task, changes)
+        # Raticode starts work itself, so moving a ticket to In progress
+        # means "work on this next": it waits at the front of the queue.
+        pulled = changes.get("status") == "in_progress" and not task["claim"]
+        if pulled:
+            changes = {**changes, "status": "todo"}
+        candidate = Task.model_validate({**task, **changes}).model_dump()
+        waits_for_start = False
+        if pulled:
+            candidate["pulledAt"] = now()
+            if candidate.get("dueAt") and datetime.fromisoformat(candidate["dueAt"]) > datetime.now(
+                UTC
+            ):
+                # Only the user or Rem can skip a start date someone set;
+                # a worker's pull still waits for it.
+                if employee_id and "dueAt" not in changes:
+                    waits_for_start = True
+                else:
+                    candidate["dueAt"] = None
+        context = {"knowledge"} if actor == "user" else set()
+        if set(changes) - {"status", "evidence", "artifacts", "blockReason"} - context:
+            candidate["approvedRevision"] = None
+            candidate["workflowAuthorization"] = None
+            candidate["planRevision"] += 1
+        if set(changes) - {"status", "blockReason"} or changes.get("status") not in {
+            None,
+            "done",
+        }:
+            candidate["acceptedRevision"] = None
+        if changes.get("status") == "in_review":
+            candidate["reviewRequestedAt"] = now()
+        if changes.get("status") == "blocked" and not candidate["blockReason"]:
+            candidate["blockReason"] = (
+                f"Blocked by {named_actor(current, actor)}; see the conversation"
+            )
+        elif changes.get("status") not in {None, "blocked"} and "blockReason" not in changes:
+            candidate["blockReason"] = ""
+        if changes.get("status") == "cancelled" and task["claim"]:
+            change.revoked.append(task["claim"])
+            candidate.update(claim=None, cancellation="requested")
+        self._validate_workspace(current, candidate, employee_id)
+        validate_execution(current, candidate)
+        self.store.validate_task(candidate, current["config"], current["runtime"]["tasks"], before)
+        if employee_id:
+            self._worker_update(change, task, candidate, changes)
+        task.update(candidate)
+        if not employee_id and {"status", "assignee"} & set(changes):
+            # Someone took it over, so it's no longer the worker's own idea.
+            task["selfWork"] = False
+        if unpull and not pulled:
+            task["pulledAt"] = None
+        if pulled:
+            mover = "You" if actor == "user" else named_actor(current, actor)
+            task["comments"].append(
+                {
+                    "actor": "system",
+                    "at": now(),
+                    "body": f"{mover} moved this to In progress. It starts as soon "
+                    "as its worker is free and working hours allow"
+                    + (", on or after its start date." if waits_for_start else "."),
+                }
+            )
+        return self._ticket_changed(change, task)
+
+    @staticmethod
+    def _check_ticket_edit(
+        change: TicketChange, task: dict[str, Any], changes: dict[str, Any]
+    ) -> None:
+        """Refuse an update to fields its actor or the ticket's state doesn't allow."""
+        employee_id = change.request.employee_id
+        if (
+            employee_id
+            and task["status"] == "blocked"
+            and (
+                changes.get("status") not in {None, "blocked", "cancelled"}
+                or "blockReason" in changes
+            )
+            and not employee_may_unblock(task)
+        ):
+            raise ValueError(
+                "Raticode, the user or Rem blocked this task for review; ask them to reopen it"
+            )
+        if task["claim"] and set(changes) - {"status", "evidence"}:
+            raise OrganizationConflict("Pause and wait for the turn before editing its plan")
+        check_recurring(task, {**task, **changes}, employee_id)
+        if employee_id and set(changes) & {"approvalRequired", "reviewRequired", "reviewer"}:
+            raise ValueError("Workers cannot change approval or review policy")
+        if employee_id and "artifacts" in changes:
+            # artifact_add checks the file; a direct edit would skip that.
+            raise ValueError("Record files with artifact_add")
+        if task["status"] == "cancelled" and changes.get("status", "cancelled") != "cancelled":
+            raise ValueError("Use reopen to retry cancelled work")
+
+    def _worker_update(
+        self,
+        change: TicketChange,
+        task: dict[str, Any],
+        candidate: dict[str, Any],
+        changes: dict[str, Any],
+    ) -> None:
+        """Check a worker's update against its projects, handovers and ticket permissions."""
+        request, current, before = change.request, change.current, change.before
+        employee_id = str(request.employee_id)
+        if change.scoped:
+            # Where the ticket would run after this change, not just before.
+            self._within_assigned(current, employee_id, candidate)
+        self._handover_checked(current, before, candidate, change.scoped)
+        reassigned = self._reassignment_note(
+            current, employee_id, before, candidate, request.params
+        )
+        if reassigned:
+            candidate["comments"].append(reassigned)
+        if change.self_run:
+            # Taking it, or starting it up, makes it this check-in's own work.
+            # Requested work that is only updated stays requested.
+            if (not before.get("assignee") and candidate.get("assignee")) or (
+                before["status"] != "todo" and candidate["status"] == "todo"
+            ):
+                candidate["selfWork"] = True
+        needed = set()
+        if "status" in changes:
+            needed.add("cancel" if changes["status"] == "cancelled" else "move")
+        # Evidence and artifacts are a run's own output, not plan edits.
+        if set(changes) - {"status", "evidence", "artifacts", "blockReason"}:
+            needed.add("edit")
+        for where in {task.get("project"), candidate.get("project")}:
+            for permission in sorted(needed):
+                self._ticket_access(current, employee_id, where, permission)
 
     @staticmethod
     def _ticket_access(
@@ -2944,7 +3201,7 @@ class OrganizationManager:
         def update(current: dict[str, Any]) -> dict[str, Any]:
             employee = next((e for e in current["config"]["employees"] if e["id"] == eid), None)
             if employee is None:
-                raise ValueError("Unknown employee")
+                raise ValueError("Unknown worker")
             runtime = current["runtime"]
             saved = self_work_assignment(runtime, eid)
             if params["expectedRevision"] != saved["revision"]:
@@ -3007,7 +3264,7 @@ class OrganizationManager:
                 employee = next(e for e in org["config"]["employees"] if e["id"] == eid)
                 grants = employee.get("workspacePaths")
                 if grants is not None and root not in grants:
-                    raise ValueError("Task workspace is outside employee grants")
+                    raise ValueError("Task workspace is outside the worker's grants")
 
     @staticmethod
     def _limit_delegation(
@@ -3201,7 +3458,7 @@ class OrganizationManager:
         def record(current: dict[str, Any]) -> dict[str, Any]:
             existing = next(t for t in current["runtime"]["tasks"] if t["id"] == task["id"])
             if existing["claim"] != turn_id:
-                raise OrganizationConflict("This employee turn has been revoked")
+                raise OrganizationConflict("This worker turn has been revoked")
             if existing.get("worktree") == worktree:
                 return {}
             existing["worktree"] = worktree
@@ -3252,7 +3509,7 @@ class OrganizationManager:
         def record(current: dict[str, Any]) -> dict[str, Any]:
             found = next(t for t in current["runtime"]["tasks"] if t["id"] == task["id"])
             if found["claim"] != turn_id:
-                raise OrganizationConflict("This employee turn has been revoked")
+                raise OrganizationConflict("This worker turn has been revoked")
             if found.get("sharedWorktree") == worktree:
                 return {}
             found["sharedWorktree"] = worktree
@@ -3614,7 +3871,7 @@ class OrganizationManager:
                     if task["turns"] >= config["maxTaskTurns"]:
                         self._block(
                             task,
-                            "Run limit for this task reached. Reopen it to allow more runs.",
+                            "Run limit for this ticket reached. Reopen it to allow more runs.",
                         )
                         continue
                     task_project: dict[str, Any] = next(
@@ -3940,15 +4197,18 @@ class OrganizationManager:
         found = suggest(snapshot, organization_start(config, task, root))
         return found.public() if found is not None else None
 
-    def _run_there(
-        self, project: str, org: dict[str, Any], params: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _run_there(self, request: ActionCall) -> dict[str, Any]:
         """Point a waiting ticket at the owner's fleet target on its suggested desktop.
 
         The pick only sets ``execution`` to a target the owner already made on that
         desktop for the ticket's worker; ``validate_execution`` still applies, and
         nothing is granted. Without such a target it is refused with what to grant.
+        Only the user's own pick of a suggested desktop: never Rem, Auto mode, a consent
+        request or a worker, so nothing goes to another computer unpicked.
         """
+        if request.actor != "user" or request.consented:
+            raise ValueError(RUN_THERE_USER_ONLY)
+        project, org, params = request.project, request.org, request.params
         task_id, computer = params.get("taskId"), params.get("computerId")
         if not isinstance(task_id, str) or not isinstance(computer, str) or not computer:
             raise ValueError("Choose a ticket and the computer its suggestion names")
@@ -4088,746 +4348,932 @@ class OrganizationManager:
         return self.store.mutate(project, oid, "system", "backlog_pull", pull)
 
     def _run(self, chosen: dict[str, Any], cancel: threading.Event) -> None:
+        run = WorkerRun()
+        try:
+            run = self._run_workspace(chosen)
+            asyncio.run(self._run_turn(chosen, run, cancel))
+            # A stop that arrives after the provider has already finished doesn't undo the
+            # finished run.
+            run.stream_finished = True
+        except Exception as exc:
+            run.error = self._redact(str(exc)) or type(exc).__name__
+        finally:
+            self._run_cleanup(chosen, run, self._run_finisher(chosen, run, cancel))
+
+    def _run_workspace(self, chosen: dict[str, Any]) -> WorkerRun:
+        """Where a worker run works and which folders it may open, before the provider starts.
+
+        A worker with assigned projects gets only those. An isolated run gets its own git
+        worktree; otherwise a git project with uncommitted changes is refused.
+        """
         org, task, employee = chosen["org"], chosen["task"], chosen["employee"]
         project, oid, turn_id = org["projectRoot"], org["id"], task["claim"]
-        error: str | None = None
-        final = ""
-        stream_finished = False
         working_root = chosen["working_root"]
-        usage: dict[str, Any] = {}
-        managed_turns: int | None = None
-        # Fingerprint of exactly what the employee was given, and where its work ended up.
+        if chosen.get("setup_error"):
+            raise RuntimeError(chosen["setup_error"])
+        workspace_paths = sorted(
+            {
+                *org["config"].get("projectRoots", []),
+                *(
+                    p.get("workspacePath")
+                    for p in org["config"]["projects"]
+                    if p.get("workspacePath") and self.store.owns_project(oid, p["workspacePath"])
+                ),
+            }
+        )
+        runtime_dir = self.data_dir.parent / ".raticode-employee-runtime" / oid / employee["id"]
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        if employee.get("workspacePaths") is not None:
+            workspace_paths = [
+                root for root in workspace_paths if root in employee["workspacePaths"]
+            ]
+        assigned_roots = self_work_roots(org, employee["id"])
+        if has_assignment(org, employee["id"]):
+            # A worker with assigned projects can open threads only in those.
+            workspace_paths = [
+                root for root in workspace_paths if within_self_work(org, employee["id"], root)
+            ]
+        schedule = schedule_state(org["config"])
+
+        operation(self, org, "memory_check", {}, "system", employee["id"])
+        fresh = self.store.get(project, oid)
+        verified_memory = [
+            m["body"]
+            for m in fresh["runtime"].get("memories", {}).values()
+            if m["employeeId"] == employee["id"] and not m["stale"]
+        ]
+        run_root = working_root
+        workspace_note = ""
+        if not task.get("execution"):
+            if chosen.get("isolated"):
+                worktree = self._task_worktree(project, oid, task, working_root, turn_id)
+                run_root = worktree["root"]
+                workspace_note = (
+                    f"Work only in your task's git worktree at {run_root}, on branch "
+                    f"{worktree['branch']}. It was created from the project's commit "
+                    f"{worktree['base'][:12]}. Never edit {working_root} itself. Commit "
+                    "finished changes to your branch; the user reviews and merges it.\n"
+                )
+                setup = task.get("worktreeSetup")
+                if setup and setup.get("status") != "passed":
+                    workspace_note += (
+                        f"{setup.get('summary')} Prepare what your checks need yourself, "
+                        "and don't change the project's setup file to get around the "
+                        "approval.\n"
+                    )
+            elif project_identity(working_root)[0].startswith("git:") and _dirty(working_root):
+                raise ValueError(
+                    "The project folder has uncommitted changes. Commit or stash them, or "
+                    "switch the organization to worktree isolation, then reopen this task."
+                )
+            shared = self._shared_worktree(project, oid, task, turn_id)
+            if shared:
+                shared_root = str(Path(shared["root"]).resolve())
+                workspace_paths = sorted({*workspace_paths, shared_root})
+                workspace_note += (
+                    f"The organization's shared repository is checked out for this ticket at "
+                    f"{shared_root} on branch {shared['branch']}. Put organization-wide "
+                    "decisions, notes and files every project should share there, and commit "
+                    "them; they merge into the shared repository when the user accepts this "
+                    "ticket. Raticode writes knowledge/ from knowledge entries, so use "
+                    "knowledge_save for notes instead of editing that folder.\n"
+                )
+        if org["config"].get("blockGitPush", True):
+            workspace_note += "git push is blocked in this run. Leave publishing to the user.\n"
+        account: dict[str, Any] = {}
         provenance: dict[str, Any] = {}
-        try:
-            if chosen.get("setup_error"):
-                raise RuntimeError(chosen["setup_error"])
-            workspace_paths = sorted(
+        if not task.get("execution"):
+            # The worker's own account, or the default sign-in when it has none or it
+            # was removed or signed out since. The run records which, and why.
+            account = pick_worker_account(employee, self.data_dir)
+            provenance["account"] = account
+            if account["accountId"] and not account["name"]:
+                log.warning(
+                    "ORGANIZATION_ACCOUNT_FALLBACK organization=%s employee=%s",
+                    oid,
+                    employee["id"],
+                )
+        run_root = str(Path(run_root).resolve())
+        if run_root not in workspace_paths:
+            workspace_paths = sorted({*workspace_paths, run_root})
+        return WorkerRun(
+            run_root=run_root,
+            workspace_paths=workspace_paths,
+            workspace_note=workspace_note,
+            assigned_roots=assigned_roots,
+            schedule=schedule,
+            fresh=fresh,
+            verified_memory=verified_memory,
+            runtime_dir=runtime_dir,
+            account=account,
+            provenance=provenance,
+        )
+
+    async def _run_turn(
+        self, chosen: dict[str, Any], run: WorkerRun, cancel: threading.Event
+    ) -> None:
+        """The provider turn: give the worker what it needs and record what it does.
+
+        Its final message, usage and managed turn count land on ``run``.
+        """
+        org, task, employee = chosen["org"], chosen["task"], chosen["employee"]
+        project, oid, turn_id = org["projectRoot"], org["id"], task["claim"]
+        run.provenance["runRoot"] = run.run_root
+        with self.session(
+            project,
+            f"employee:{employee['id']}",
+            employee_id=employee["id"],
+            bound_org=oid,
+            generation=org["runtime"]["generation"],
+            run_id=turn_id,
+            read_only=employee["permissionMode"] in {"read-only", "plan"},
+        ) as url:
+            resources = self._run_resources(chosen, run, url)
+            identity = self._run_instructions(chosen, run)
+            workflow = {
+                "id": f"organization:{oid}:{employee['id']}:{task['id']}",
+                "chatThreadId": f"organization:{oid}:{employee['id']}:{task['id']}",
+                "projectRoot": run.run_root,
+                "remBlockGitPush": org["config"].get("blockGitPush", True),
+                "organizationWorkspacePaths": run.workspace_paths,
+                "organizationRun": {
+                    "organizationId": oid,
+                    "taskId": task["id"],
+                    "parentRunId": turn_id,
+                },
+                "remResources": resources,
+                "remSecondBrain": org["config"]["remSecondBrain"],
+                "remReportTheme": org["config"]["remReportTheme"],
+            }
+            messages = self._run_messages(chosen, run)
+            self._save_run_input(chosen, run, identity, messages, resources)
+            source = self._run_source(
+                chosen,
+                run,
+                cancel,
+                url=url,
+                identity=identity,
+                messages=messages,
+                workflow=workflow,
+            )
+
+            # Watch for cancellation even while a provider is silent.
+            consumer = asyncio.ensure_future(self._consume_run(chosen, run, cancel, source))
+            limit = org["config"]["turnTimeoutSeconds"]
+            timed_out = False
+            try:
+                async with asyncio.timeout(limit):
+                    while not consumer.done():
+                        if cancel.is_set():
+                            consumer.cancel()
+                            break
+                        await asyncio.wait({consumer}, timeout=0.25)
+            except TimeoutError:
+                timed_out = True
+            finally:
+                if not consumer.done():
+                    consumer.cancel()
+                try:
+                    await consumer
+                except asyncio.CancelledError:
+                    # Stopping the provider at the time limit is expected; only an
+                    # unexplained cancellation is passed on.
+                    if not cancel.is_set() and not timed_out:
+                        raise
+            if timed_out:
+                raise TimeoutError(
+                    f"The run took longer than its {limit}-second limit and was stopped"
+                )
+
+    def _run_resources(self, chosen: dict[str, Any], run: WorkerRun, url: str) -> dict[str, Any]:
+        """The worker's resources for this run: its own, the organization tools and skills."""
+        org, task, employee = chosen["org"], chosen["task"], chosen["employee"]
+        oid, turn_id = org["id"], task["claim"]
+        resources: dict[str, Any] = copy.deepcopy(employee["resources"])
+        secret_values = resolve_secrets(run.fresh, employee, resources)
+        with self._lock:
+            self._secret_values[turn_id] = secret_values
+        resources.setdefault("mcpServers", []).append(
+            {"name": "organizations", "type": "http", "url": url}
+        )
+        if employee["skills"]:
+            skills = self.data_dir / "organization-skills" / oid / str(org["revision"])
+            for name, content in org["config"]["packageFiles"].items():
+                safe_path(name)
+                if not name.startswith("skills/"):
+                    continue
+                with atomic_binary_output(skills / name) as output:
+                    output.write(base64.b64decode(content, validate=True))
+            # Older revisions' copies are no longer used by any run.
+            copies = self.data_dir / "organization-skills" / oid
+            for child in copies.iterdir() if copies.is_dir() else []:
+                if child.name.isdigit() and int(child.name) < org["revision"] - 1:
+                    shutil.rmtree(child, ignore_errors=True)
+            resources.setdefault("skills", []).extend(
+                {"path": str(skills / "skills" / skill / "SKILL.md")}
+                for skill in employee["skills"]
+            )
+        return resources
+
+    def _run_instructions(self, chosen: dict[str, Any], run: WorkerRun) -> str:
+        """Who the worker is, where it works, and how it works inside the organization."""
+        org, employee = chosen["org"], chosen["employee"]
+        persona = (f"Persona: {employee['persona']}\n" if employee.get("persona") else "") + (
+            "Responsibilities: " + "; ".join(employee["responsibilities"]) + "\n"
+            if employee.get("responsibilities")
+            else ""
+        )
+        identity: str = (
+            f"You are {employee['name']}, a Rem employee of {org['config']['name']}.\n"
+            f"Role: {employee['role']}. Title: {employee['title']}. "
+            f"Manager: {employee['reportsTo'] or 'organization owner'}.\n"
+            + persona
+            + (
+                f"Organization mission: {org['config']['mission']}\n"
+                if org["config"].get("mission")
+                else ""
+            )
+            + f"Organization purpose: {org['config']['description']}\n"
+            f"Organization instructions: {org['config']['instructions']}\n"
+            f"Your instructions: {employee['instructions']}\n"
+            + run.workspace_note
+            + mini_rem_brief(run.assigned_roots)
+            + run_brief(run.schedule)
+            + (AUTO_MODE_BRIEF + "\n" if auto_on(org) else "")
+            + f"Persistent memory: {employee['memory']}\n"
+            "Working memory: "
+            + org["runtime"].get("employeeMemory", {}).get(employee["id"], "")
+            + "\nVerified source-linked memory: "
+            + "\n".join(run.verified_memory)
+            + "\n"
+            + "You have coding and research tools. "
+            "Delegate through organization tasks. "
+            "For swarm, fleet or remote work, create an organization task with "
+            "execution={targetId: owner-granted destination ID}. "
+            "Use organization tools to read assignments, delegate, and save evidence. "
+            "You cannot configure any organization. "
+            "Ask Rem or the user for configuration changes. Never edit organization "
+            "databases, history or configuration files through shell. "
+            "Do not delegate configuration changes to other agents. "
+            "Record findings as task comments; update task status with evidence. "
+            "Use action=memory for useful knowledge to retain across assignments. "
+            "If you finish without updating status, your work goes to review.\n" + RUN_GUIDE
+        )
+        return identity
+
+    def _run_messages(self, chosen: dict[str, Any], run: WorkerRun) -> list[dict[str, Any]]:
+        """The run's one message: the ticket, its latest comments, the plan and the schedule."""
+        org, task = chosen["org"], chosen["task"]
+        schedule = run.schedule
+        task_context = copy.deepcopy(task)
+        task_context["comments"] = task_context["comments"][-20:]
+        remaining = 48000
+        for comment in reversed(task_context["comments"]):
+            comment["body"] = comment["body"][-max(0, remaining) :] if remaining > 0 else ""
+            remaining -= len(comment["body"])
+        body = {
+            "organizationId": org["id"],
+            "goals": org["config"]["goals"],
+            "task": task_context,
+            "plan": run_context(run.fresh, task),
+            **(
                 {
-                    *org["config"].get("projectRoots", []),
-                    *(
-                        p.get("workspacePath")
-                        for p in org["config"]["projects"]
-                        if p.get("workspacePath")
-                        and self.store.owns_project(oid, p["workspacePath"])
+                    "workSchedule": {
+                        "timezone": schedule["timezone"],
+                        "current": schedule["current"],
+                        "next": schedule["next"],
+                        "changesAt": schedule["changesAt"],
+                        "handoff": HANDOFF,
+                    }
+                }
+                if schedule["configured"]
+                else {}
+            ),
+        }
+        return [{"role": "user", "body": json.dumps(body, ensure_ascii=False)}]
+
+    def _save_run_input(
+        self,
+        chosen: dict[str, Any],
+        run: WorkerRun,
+        identity: str,
+        messages: list[dict[str, Any]],
+        resources: dict[str, Any],
+    ) -> None:
+        """Keep exactly what the worker was given, so the run can be inspected or repeated.
+
+        The fingerprint covers the stored bytes.
+        """
+        employee = chosen["employee"]
+        granted = copy.deepcopy(resources)
+        granted["mcpServers"] = [
+            server
+            for server in granted.get("mcpServers", [])
+            if server.get("name") != "organizations"
+        ]
+        for server in granted["mcpServers"]:
+            server.pop("env", None)
+        run_input = self._redact(
+            json.dumps(
+                {
+                    "provider": employee["provider"],
+                    "model": employee["model"],
+                    "effort": employee["effort"],
+                    "permissionMode": employee["permissionMode"],
+                    "instructions": identity,
+                    "messages": messages,
+                    "resources": granted,
+                    "workingDirectory": run.run_root,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+                default=str,
+            )
+        ).encode()
+        run.provenance["inputSha256"] = hashlib.sha256(run_input).hexdigest()
+        write_run_input(
+            self.run_input_path(chosen["org"]["id"], chosen["task"]["claim"]), run_input
+        )
+
+    async def _run_source(
+        self,
+        chosen: dict[str, Any],
+        run: WorkerRun,
+        cancel: threading.Event,
+        *,
+        url: str,
+        identity: str,
+        messages: list[dict[str, Any]],
+        workflow: dict[str, Any],
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """The run's events: from a delegated execution, or from the worker's provider."""
+        task, employee = chosen["task"], chosen["employee"]
+        if task.get("execution"):
+            async with aclosing(self.executions.stream(chosen, cancel)) as managed:
+                async for item in managed:
+                    yield item
+            return
+        async with aclosing(
+            self.stream(
+                provider=employee["provider"],
+                model=employee["model"],
+                effort=employee["effort"],
+                permission_mode=employee["permissionMode"],
+                messages=messages,
+                workflow=workflow,
+                trusted_organization_url=url,
+                agent_instructions=identity,
+                data_dir=run.runtime_dir,
+                working_dir=Path(run.run_root),
+                cancel_event=cancel,
+                # Which brains are private is in Raticode's data folder.
+                library_data_dir=self.data_dir,
+                **(
+                    {
+                        "provider_profile": run.account["name"],
+                        # Accounts live in Raticode's data folder, not
+                        # the worker's runtime folder.
+                        "account_data_dir": self.data_dir,
+                    }
+                    if run.account.get("name")
+                    else {}
+                ),
+            )
+        ) as direct:
+            async for item in direct:
+                yield item
+
+    async def _consume_run(
+        self,
+        chosen: dict[str, Any],
+        run: WorkerRun,
+        cancel: threading.Event,
+        source: AsyncGenerator[dict[str, Any], None],
+    ) -> None:
+        """Read the run's events into ``run`` and store the durable ones."""
+        org, task, employee = chosen["org"], chosen["task"], chosen["employee"]
+        project, oid, turn_id = org["projectRoot"], org["id"], task["claim"]
+
+        def owned_root(path: str) -> str:
+            # Follow-ups from the task's worktree belong to the original project.
+            inside = Path(path).resolve().is_relative_to(run.run_root)
+            return chosen["working_root"] if inside else path
+
+        async with aclosing(source) as stream:
+            async for event in stream:
+                if type(event.get("managedTurns")) is int:
+                    run.managed_turns = event["managedTurns"]
+                if isinstance(event.get("usage"), dict):
+                    run.usage = (
+                        event["usage"]
+                        if task.get("execution")
+                        else normalize_usage(employee["provider"], event["usage"])
+                    )
+                if cancel.is_set():
+                    return
+                if event.get("type") == "new-thread":
+                    self.call(
+                        project,
+                        f"employee:{employee['id']}",
+                        {
+                            "action": "task_create",
+                            "organizationId": oid,
+                            "params": {
+                                "title": "Follow-up thread",
+                                "description": event["message"],
+                                "assignee": employee["id"],
+                                "workspacePath": owned_root(event["projectRoot"]),
+                                "parentId": task["id"],
+                                "project": next(
+                                    (
+                                        p["id"]
+                                        for p in org["config"]["projects"]
+                                        if p.get("workspacePath") == event["projectRoot"]
+                                    ),
+                                    None,
+                                ),
+                            },
+                        },
+                        employee_id=employee["id"],
+                        bound_org=oid,
+                        generation=org["runtime"]["generation"],
+                        run_id=turn_id,
+                    )
+                if event.get("type") == "error":
+                    raise ValueError(str(event.get("error", "Provider failed")))
+                if event.get("type") == "final":
+                    run.final = str((event.get("message") or {}).get("body", ""))
+                # Store durable events, not ephemeral capability URLs.
+                run.stored += 1
+                if run.stored > MAX_TURN_EVENTS and event.get("type") not in {
+                    "final",
+                    "error",
+                    "usage",
+                }:
+                    continue
+                clean = self._clean(event)
+                with self.store.connect() as db:
+                    self.store.event(
+                        db,
+                        oid,
+                        f"employee:{employee['id']}",
+                        "turn_event",
+                        {"turnId": turn_id, "taskId": task["id"], "event": clean},
+                    )
+
+    def _run_finisher(
+        self, chosen: dict[str, Any], run: WorkerRun, cancel: threading.Event
+    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
+        """How the run's end changes its ticket, attempt and usage, as a store.mutate callback."""
+        task, employee = chosen["task"], chosen["employee"]
+        turn_id = task["claim"]
+        run.final = self._redact(run.final)
+        run.cancelled = cancel.is_set() and not (
+            run.stream_finished and bool(run.final) and not run.error
+        )
+        if chosen.get("isolated") and run.provenance.get("runRoot"):
+            run.provenance.update(_worktree_state(run.provenance["runRoot"]))
+        with self._lock:
+            run.cancel_reason = self._cancel_reasons.pop(turn_id, "cancelled")
+        # Delegated executions may have external effects, so they stay blocked for review.
+        run.paused = (
+            run.cancelled
+            and run.cancel_reason in {"paused", "hours", "restart", "held"}
+            and not task.get("execution")
+        )
+
+        def finish(current: dict[str, Any]) -> dict[str, Any]:
+            existing = next(t for t in current["runtime"]["tasks"] if t["id"] == task["id"])
+            used, cost = self._charge_run(current, existing, chosen, run)
+            attempt = self._close_attempt(current, turn_id, run, used, cost)
+            if existing["status"] == "cancelled" and existing.get("cancellation") == "requested":
+                existing["cancellation"] = (
+                    "acknowledged"
+                    if not attempt
+                    or not attempt.get("executionHandle")
+                    or attempt["executionHandle"].get("settled")
+                    else "requested"
+                )
+            if existing["claim"] != turn_id:
+                return {"turnId": turn_id, "discarded": True, "reason": "Configuration changed"}
+            author = f"employee:{employee['id']}"
+            started = str((attempt or {}).get("startedAt") or "")
+            final, error = run.final, run.error
+            # A worker that already posted its report as a comment during this run
+            # doesn't get the same words added again as its final message.
+            if final and not any(
+                c.get("actor") == author
+                and c.get("kind") != "status"
+                and str(c.get("body") or "").strip() == final.strip()
+                and started
+                and str(c.get("at") or "") >= started
+                for c in existing["comments"]
+            ):
+                existing["comments"].append({"actor": author, "at": now(), "body": final})
+            failed = error or run.cancelled or not final
+            # A worker that already marked its ticket Done or ready for review keeps that
+            # result when the run ends badly afterwards; the conversation says so.
+            settled = existing["status"] in {"done", "in_review"}
+            if failed and settled:
+                existing["comments"].append(
+                    {
+                        "actor": "system",
+                        "at": now(),
+                        "body": "The run stopped after the worker set this ticket to "
+                        + ("Done" if existing["status"] == "done" else "Review")
+                        + (f": {error}" if error else ".")
+                        + " Its status was kept.",
+                    }
+                )
+            if run.paused and existing["status"] == "in_progress":
+                self._park_ticket(existing, attempt, employee, run.cancel_reason, used)
+            elif failed and not settled:
+                self._fail_ticket(current, existing, employee, run)
+            else:
+                self._complete_ticket(current, existing, employee, turn_id, final)
+            if not failed:
+                # A good run: the next failure gets a fresh set of tries and reopens.
+                finished_well(current["runtime"], existing["id"])
+            existing.update(claim=None, revision=existing["revision"] + 1)
+            self._unblock(current)
+            return {
+                "turnId": turn_id,
+                "taskId": task["id"],
+                "error": error,
+                "usage": run.usage,
+                "status": existing["status"],
+            }
+
+        return finish
+
+    @staticmethod
+    def _charge_run(
+        current: dict[str, Any], existing: dict[str, Any], chosen: dict[str, Any], run: WorkerRun
+    ) -> tuple[int, float | None]:
+        """Return unused reserved turns and add the run's cost and tokens to the month.
+
+        Gives the turns the run used and its cost, or None when the cost isn't known.
+        """
+        task, employee = chosen["task"], chosen["employee"]
+        accounts = current["runtime"].setdefault("usage", {}).setdefault(chosen["month"], {})
+        reserved = chosen.get("reserved", 1)
+        # Only a completed execution proves unused reservations can be returned.
+        used = (
+            run.managed_turns
+            if run.final and not run.error and not run.cancelled and run.managed_turns is not None
+            else reserved
+        )
+        used = min(reserved, max(0, used))
+        existing["turns"] -= reserved - used
+        cost = run.usage.get("cost_usd", run.usage.get("total_cost_usd"))
+        known_cost = (
+            isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and math.isfinite(cost)
+            and cost >= 0
+        )
+        for account_id in (
+            "company",
+            f"employee:{employee['id']}",
+            f"initiative:{task['project']}",
+        ):
+            account = accounts.setdefault(account_id, {})
+            account["turns"] = max(0, account.get("turns", reserved) - (reserved - used))
+            account["costUsd"] = account.get("costUsd", 0) + (cost if known_cost else 0)
+            account["unknownCostTurns"] = account.get("unknownCostTurns", 0) + int(not known_cost)
+            tokens = run.usage.get("total_tokens")
+            if type(tokens) is int and tokens >= 0:
+                account["tokens"] = account.get("tokens", 0) + tokens
+            else:
+                account["unknownTokenTurns"] = account.get("unknownTokenTurns", 0) + 1
+        return used, cost if known_cost else None
+
+    @staticmethod
+    def _close_attempt(
+        current: dict[str, Any], turn_id: str, run: WorkerRun, used: int, cost: float | None
+    ) -> dict[str, Any] | None:
+        """Record how the run's attempt ended. Gives the attempt, or None when there is none."""
+        attempt: dict[str, Any] | None = current["runtime"].setdefault("attempts", {}).get(turn_id)
+        if not attempt:
+            return attempt
+        completed = run.final and not run.error and not run.cancelled
+        if attempt.get("executionHandle") and (
+            completed or attempt["executionHandle"]["kind"] == "workflow"
+        ):
+            attempt["executionHandle"]["settled"] = True
+        attempt.update(
+            finishedAt=now(),
+            elapsedSeconds=(
+                datetime.now(UTC) - datetime.fromisoformat(attempt["startedAt"])
+            ).total_seconds(),
+            status="paused"
+            if run.paused
+            else "cancelled"
+            if run.cancelled
+            else "failed"
+            if run.error or not run.final
+            else "completed",
+            error=run.error,
+            costUsd=cost,
+            **{k: v for k, v in run.provenance.items() if k != "runRoot"},
+            usage=run.usage,
+            usedTurns=used,
+        )
+        return attempt
+
+    @staticmethod
+    def _park_ticket(
+        existing: dict[str, Any],
+        attempt: dict[str, Any] | None,
+        employee: dict[str, Any],
+        cancel_reason: str,
+        used: int,
+    ) -> None:
+        """A run held, paused, stopped by closing time or by Raticode quitting waits to rerun."""
+        if cancel_reason == "held":
+            # Holding a worker is not a failure either. A check-in closes (the next
+            # one takes its place); other work goes back to To do, first in line
+            # for when the worker is back, and the stopped run isn't charged.
+            if is_heartbeat(existing):
+                existing.update(status="cancelled", cancellation="acknowledged")
+            else:
+                existing.update(
+                    status="todo",
+                    turns=max(0, existing["turns"] - used),
+                    pulledAt=existing.get("pulledAt")
+                    or (attempt["startedAt"] if attempt else now()),
+                )
+            existing["comments"].append(
+                {
+                    "actor": "system",
+                    "at": now(),
+                    "body": f"{employee['name']} was held before this run finished. "
+                    + (
+                        "The next check-in takes its place."
+                        if is_heartbeat(existing)
+                        else "It runs again, first in line, when they're back."
                     ),
                 }
             )
-            runtime_dir = self.data_dir.parent / ".raticode-employee-runtime" / oid / employee["id"]
-            runtime_dir.mkdir(parents=True, exist_ok=True)
-            if employee.get("workspacePaths") is not None:
-                workspace_paths = [
-                    root for root in workspace_paths if root in employee["workspacePaths"]
-                ]
-            assigned_roots = self_work_roots(org, employee["id"])
-            if has_assignment(org, employee["id"]):
-                # A worker with assigned projects can open threads only in those.
-                workspace_paths = [
-                    root for root in workspace_paths if within_self_work(org, employee["id"], root)
-                ]
-            schedule = schedule_state(org["config"])
+            return
+        # Pausing is not a failure: the task waits, blocked, for the next Start or
+        # for hours to open, then goes back to To do by itself, and the
+        # interrupted run doesn't count against its run limit.
+        existing.update(
+            status="blocked",
+            blockReason=HOURS_REASON if cancel_reason == "hours" else PAUSED_REASON,
+            turns=max(0, existing["turns"] - used),
+        )
+        if cancel_reason in {"hours", "restart"}:
+            # Work cut off by closing time or by Raticode quitting goes first
+            # when work starts again, in the order it originally started.
+            existing["pulledAt"] = existing.get("pulledAt") or (
+                attempt["startedAt"] if attempt else now()
+            )
+        existing["comments"].append(
+            {
+                "actor": "system",
+                "at": now(),
+                "body": "Working hours ended before this run finished. It runs "
+                "again when hours resume."
+                if cancel_reason == "hours"
+                else "Raticode closed before this run finished. The task runs "
+                "again when the organization runs again."
+                if cancel_reason == "restart"
+                else "The organization was paused before this run finished. "
+                "The task runs again when the organization starts.",
+            }
+        )
 
-            operation(self, org, "memory_check", {}, "system", employee["id"])
-            fresh = self.store.get(project, oid)
-            verified_memory = [
-                m["body"]
-                for m in fresh["runtime"].get("memories", {}).values()
-                if m["employeeId"] == employee["id"] and not m["stale"]
-            ]
-            run_root = working_root
-            workspace_note = ""
-            if not task.get("execution"):
-                if chosen.get("isolated"):
-                    worktree = self._task_worktree(project, oid, task, working_root, turn_id)
-                    run_root = worktree["root"]
-                    workspace_note = (
-                        f"Work only in your task's git worktree at {run_root}, on branch "
-                        f"{worktree['branch']}. It was created from the project's commit "
-                        f"{worktree['base'][:12]}. Never edit {working_root} itself. Commit "
-                        "finished changes to your branch; the user reviews and merges it.\n"
-                    )
-                    setup = task.get("worktreeSetup")
-                    if setup and setup.get("status") != "passed":
-                        workspace_note += (
-                            f"{setup.get('summary')} Prepare what your checks need yourself, "
-                            "and don't change the project's setup file to get around the "
-                            "approval.\n"
-                        )
-                elif project_identity(working_root)[0].startswith("git:") and _dirty(working_root):
-                    raise ValueError(
-                        "The project folder has uncommitted changes. Commit or stash them, or "
-                        "switch the organization to worktree isolation, then reopen this task."
-                    )
-                shared = self._shared_worktree(project, oid, task, turn_id)
-                if shared:
-                    shared_root = str(Path(shared["root"]).resolve())
-                    workspace_paths = sorted({*workspace_paths, shared_root})
-                    workspace_note += (
-                        f"The organization's shared repository is checked out for this ticket at "
-                        f"{shared_root} on branch {shared['branch']}. Put organization-wide "
-                        "decisions, notes and files every project should share there, and commit "
-                        "them; they merge into the shared repository when the user accepts this "
-                        "ticket. Raticode writes knowledge/ from knowledge entries, so use "
-                        "knowledge_save for notes instead of editing that folder.\n"
-                    )
-            if org["config"].get("blockGitPush", True):
-                workspace_note += "git push is blocked in this run. Leave publishing to the user.\n"
-            account: dict[str, Any] = {}
-            if not task.get("execution"):
-                # The worker's own account, or the default sign-in when it has none or it
-                # was removed or signed out since. The run records which, and why.
-                account = pick_worker_account(employee, self.data_dir)
-                provenance["account"] = account
-                if account["accountId"] and not account["name"]:
-                    log.warning(
-                        "ORGANIZATION_ACCOUNT_FALLBACK organization=%s employee=%s",
-                        oid,
-                        employee["id"],
-                    )
-            run_root = str(Path(run_root).resolve())
-            if run_root not in workspace_paths:
-                workspace_paths = sorted({*workspace_paths, run_root})
+    @staticmethod
+    def _fail_ticket(
+        current: dict[str, Any],
+        existing: dict[str, Any],
+        employee: dict[str, Any],
+        run: WorkerRun,
+    ) -> None:
+        """A run that failed: a temporary problem retries or backs off, anything else blocks."""
+        error, final, cancelled = run.error, run.final, run.cancelled
+        if (
+            not cancelled
+            and existing["status"] == "in_progress"
+            and is_heartbeat(existing)
+            and temporary(error, final)
+        ):
+            # A check-in that hit a temporary provider problem closes, and check-ins
+            # back off until one works. It isn't a failed check-in, so a provider
+            # outage never stalls check-ins until the user resumes them.
+            existing.update(status="cancelled", cancellation="acknowledged")
+            quiet = current["runtime"].setdefault("quietCheckins", {})
+            quiet[employee["id"]] = quiet.get(employee["id"], 0) + 1
+            existing["comments"].append(
+                {
+                    "actor": "system",
+                    "at": now(),
+                    "body": f"{error or 'The provider ended without an answer'}. "
+                    "This looks temporary: the next check-in takes its place, and "
+                    "check-ins come less often until one works.",
+                }
+            )
+            return
+        # A temporary provider problem tries again by itself after a short
+        # wait. Delegated executions may have had outside effects and a failed
+        # check-in is replaced by the next one, so neither retries here.
+        may_retry = (
+            not cancelled
+            and existing["status"] == "in_progress"
+            and not existing.get("execution")
+            and not is_heartbeat(existing)
+            and temporary(error, final)
+        )
+        retry = schedule_retry(current["runtime"], existing, error) if may_retry else None
+        gave_up = may_retry and retry is None
+        existing.update(
+            status="blocked",
+            blockReason=(
+                RETRY_REASON
+                if retry
+                else "The last run failed; see the conversation"
+                if error
+                else RESTART_REVIEW_REASON
+                if cancelled and run.cancel_reason == "restart"
+                else "Cancelled before it finished"
+                if cancelled
+                else "The last run ended without a final response"
+            ),
+        )
+        existing["comments"].append(
+            {
+                "actor": "system",
+                "at": now(),
+                "body": retry_note(retry, error)
+                if retry
+                else (error or "Turn ended without a final response")
+                + (
+                    f". Raticode already tried again {len(RETRY_SECONDS)} times "
+                    "after temporary provider problems."
+                    if gave_up
+                    else ""
+                )
+                + ("" if error or gave_up else "; review before retrying"),
+            }
+        )
 
-            async def execute() -> None:
-                nonlocal final, usage, managed_turns
-                provenance["runRoot"] = run_root
-                with self.session(
-                    project,
-                    f"employee:{employee['id']}",
-                    employee_id=employee["id"],
-                    bound_org=oid,
-                    generation=org["runtime"]["generation"],
-                    run_id=turn_id,
-                    read_only=employee["permissionMode"] in {"read-only", "plan"},
-                ) as url:
-                    resources = copy.deepcopy(employee["resources"])
-                    secret_values = resolve_secrets(fresh, employee, resources)
-                    with self._lock:
-                        self._secret_values[turn_id] = secret_values
-                    resources.setdefault("mcpServers", []).append(
-                        {"name": "organizations", "type": "http", "url": url}
-                    )
-                    if employee["skills"]:
-                        for name, content in org["config"]["packageFiles"].items():
-                            safe_path(name)
-                            if not name.startswith("skills/"):
-                                continue
-                            destination = (
-                                self.data_dir
-                                / "organization-skills"
-                                / oid
-                                / str(org["revision"])
-                                / name
-                            )
-                            with atomic_binary_output(destination) as output:
-                                output.write(base64.b64decode(content, validate=True))
-                        # Older revisions' copies are no longer used by any run.
-                        copies = self.data_dir / "organization-skills" / oid
-                        for child in copies.iterdir() if copies.is_dir() else []:
-                            if child.name.isdigit() and int(child.name) < org["revision"] - 1:
-                                shutil.rmtree(child, ignore_errors=True)
-                        resources.setdefault("skills", []).extend(
-                            {
-                                "path": str(
-                                    self.data_dir
-                                    / "organization-skills"
-                                    / oid
-                                    / str(org["revision"])
-                                    / "skills"
-                                    / skill
-                                    / "SKILL.md"
-                                )
-                            }
-                            for skill in employee["skills"]
-                        )
-                    persona = (
-                        f"Persona: {employee['persona']}\n" if employee.get("persona") else ""
-                    ) + (
-                        "Responsibilities: " + "; ".join(employee["responsibilities"]) + "\n"
-                        if employee.get("responsibilities")
-                        else ""
-                    )
-                    identity = (
-                        f"You are {employee['name']}, a Rem employee of {org['config']['name']}.\n"
-                        f"Role: {employee['role']}. Title: {employee['title']}. "
-                        f"Manager: {employee['reportsTo'] or 'organization owner'}.\n"
-                        + persona
-                        + (
-                            f"Organization mission: {org['config']['mission']}\n"
-                            if org["config"].get("mission")
-                            else ""
-                        )
-                        + f"Organization purpose: {org['config']['description']}\n"
-                        f"Organization instructions: {org['config']['instructions']}\n"
-                        f"Your instructions: {employee['instructions']}\n"
-                        + workspace_note
-                        + mini_rem_brief(assigned_roots)
-                        + run_brief(schedule)
-                        + (AUTO_MODE_BRIEF + "\n" if auto_on(org) else "")
-                        + f"Persistent memory: {employee['memory']}\n"
-                        "Working memory: "
-                        + org["runtime"].get("employeeMemory", {}).get(employee["id"], "")
-                        + "\nVerified source-linked memory: "
-                        + "\n".join(verified_memory)
-                        + "\n"
-                        + "You have coding and research tools. "
-                        "Delegate through organization tasks. "
-                        "For swarm, fleet or remote work, create an organization task with "
-                        "execution={targetId: owner-granted destination ID}. "
-                        "Use organization tools to read assignments, delegate, and save evidence. "
-                        "You cannot configure any organization. "
-                        "Ask Rem or the user for configuration changes. Never edit organization "
-                        "databases, history or configuration files through shell. "
-                        "Do not delegate configuration changes to other agents. "
-                        "Record findings as task comments; update task status with evidence. "
-                        "Use action=memory for useful knowledge to retain across assignments. "
-                        "If you finish without updating status, your work goes to review.\n"
-                        + RUN_GUIDE
-                    )
-                    workflow = {
-                        "id": f"organization:{oid}:{employee['id']}:{task['id']}",
-                        "chatThreadId": f"organization:{oid}:{employee['id']}:{task['id']}",
-                        "projectRoot": run_root,
-                        "remBlockGitPush": org["config"].get("blockGitPush", True),
-                        "organizationWorkspacePaths": workspace_paths,
-                        "organizationRun": {
-                            "organizationId": oid,
-                            "taskId": task["id"],
-                            "parentRunId": turn_id,
-                        },
-                        "remResources": resources,
-                        "remSecondBrain": org["config"]["remSecondBrain"],
-                        "remReportTheme": org["config"]["remReportTheme"],
-                    }
-                    task_context = copy.deepcopy(task)
-                    task_context["comments"] = task_context["comments"][-20:]
-                    remaining = 48000
-                    for comment in reversed(task_context["comments"]):
-                        comment["body"] = (
-                            comment["body"][-max(0, remaining) :] if remaining > 0 else ""
-                        )
-                        remaining -= len(comment["body"])
-                    messages = [
-                        {
-                            "role": "user",
-                            "body": json.dumps(
-                                {
-                                    "organizationId": oid,
-                                    "goals": org["config"]["goals"],
-                                    "task": task_context,
-                                    "plan": run_context(fresh, task),
-                                    **(
-                                        {
-                                            "workSchedule": {
-                                                "timezone": schedule["timezone"],
-                                                "current": schedule["current"],
-                                                "next": schedule["next"],
-                                                "changesAt": schedule["changesAt"],
-                                                "handoff": HANDOFF,
-                                            }
-                                        }
-                                        if schedule["configured"]
-                                        else {}
-                                    ),
-                                },
-                                ensure_ascii=False,
-                            ),
-                        }
-                    ]
+    def _complete_ticket(
+        self,
+        current: dict[str, Any],
+        existing: dict[str, Any],
+        employee: dict[str, Any],
+        turn_id: str,
+        final: str,
+    ) -> None:
+        """A run that ended well: a check-in closes, other work goes to review.
 
-                    granted = copy.deepcopy(resources)
-                    granted["mcpServers"] = [
-                        server
-                        for server in granted.get("mcpServers", [])
-                        if server.get("name") != "organizations"
-                    ]
-                    for server in granted["mcpServers"]:
-                        server.pop("env", None)
-                    # Keep exactly what the employee was given, so the run can be inspected,
-                    # compared or repeated. The fingerprint covers the stored bytes.
-                    run_input = self._redact(
-                        json.dumps(
-                            {
-                                "provider": employee["provider"],
-                                "model": employee["model"],
-                                "effort": employee["effort"],
-                                "permissionMode": employee["permissionMode"],
-                                "instructions": identity,
-                                "messages": messages,
-                                "resources": granted,
-                                "workingDirectory": run_root,
-                            },
-                            sort_keys=True,
-                            ensure_ascii=False,
-                            default=str,
-                        )
-                    ).encode()
-                    provenance["inputSha256"] = hashlib.sha256(run_input).hexdigest()
-                    write_run_input(self.run_input_path(oid, turn_id), run_input)
-
-                    async def source() -> AsyncGenerator[dict[str, Any], None]:
-                        if task.get("execution"):
-                            async with aclosing(self.executions.stream(chosen, cancel)) as managed:
-                                async for item in managed:
-                                    yield item
-                            return
-                        async with aclosing(
-                            self.stream(
-                                provider=employee["provider"],
-                                model=employee["model"],
-                                effort=employee["effort"],
-                                permission_mode=employee["permissionMode"],
-                                messages=messages,
-                                workflow=workflow,
-                                trusted_organization_url=url,
-                                agent_instructions=identity,
-                                data_dir=runtime_dir,
-                                working_dir=Path(run_root),
-                                cancel_event=cancel,
-                                # Which brains are private is in Raticode's data folder.
-                                library_data_dir=self.data_dir,
-                                **(
-                                    {
-                                        "provider_profile": account["name"],
-                                        # Accounts live in Raticode's data folder, not
-                                        # the worker's runtime folder.
-                                        "account_data_dir": self.data_dir,
-                                    }
-                                    if account.get("name")
-                                    else {}
-                                ),
-                            )
-                        ) as direct:
-                            async for item in direct:
-                                yield item
-
-                    def owned_root(path: str) -> str:
-                        # Follow-ups from the task's worktree belong to the original project.
-                        inside = Path(path).resolve().is_relative_to(run_root)
-                        return working_root if inside else path
-
-                    stored = 0
-
-                    async def consume() -> None:
-                        nonlocal final, usage, managed_turns, stored
-                        async with aclosing(source()) as stream:
-                            async for event in stream:
-                                if type(event.get("managedTurns")) is int:
-                                    managed_turns = event["managedTurns"]
-                                if isinstance(event.get("usage"), dict):
-                                    usage = (
-                                        event["usage"]
-                                        if task.get("execution")
-                                        else normalize_usage(employee["provider"], event["usage"])
-                                    )
-                                if cancel.is_set():
-                                    return
-                                if event.get("type") == "new-thread":
-                                    self.call(
-                                        project,
-                                        f"employee:{employee['id']}",
-                                        {
-                                            "action": "task_create",
-                                            "organizationId": oid,
-                                            "params": {
-                                                "title": "Follow-up thread",
-                                                "description": event["message"],
-                                                "assignee": employee["id"],
-                                                "workspacePath": owned_root(event["projectRoot"]),
-                                                "parentId": task["id"],
-                                                "project": next(
-                                                    (
-                                                        p["id"]
-                                                        for p in org["config"]["projects"]
-                                                        if p.get("workspacePath")
-                                                        == event["projectRoot"]
-                                                    ),
-                                                    None,
-                                                ),
-                                            },
-                                        },
-                                        employee_id=employee["id"],
-                                        bound_org=oid,
-                                        generation=org["runtime"]["generation"],
-                                        run_id=turn_id,
-                                    )
-                                if event.get("type") == "error":
-                                    raise ValueError(str(event.get("error", "Provider failed")))
-                                if event.get("type") == "final":
-                                    final = str((event.get("message") or {}).get("body", ""))
-                                # Store durable events, not ephemeral capability URLs.
-                                stored += 1
-                                if stored > MAX_TURN_EVENTS and event.get("type") not in {
-                                    "final",
-                                    "error",
-                                    "usage",
-                                }:
-                                    continue
-                                clean = self._clean(event)
-                                with self.store.connect() as db:
-                                    self.store.event(
-                                        db,
-                                        oid,
-                                        f"employee:{employee['id']}",
-                                        "turn_event",
-                                        {"turnId": turn_id, "taskId": task["id"], "event": clean},
-                                    )
-
-                    # Watch for cancellation even while a provider is silent.
-                    consumer = asyncio.ensure_future(consume())
-                    limit = org["config"]["turnTimeoutSeconds"]
-                    timed_out = False
-                    try:
-                        async with asyncio.timeout(limit):
-                            while not consumer.done():
-                                if cancel.is_set():
-                                    consumer.cancel()
-                                    break
-                                await asyncio.wait({consumer}, timeout=0.25)
-                    except TimeoutError:
-                        timed_out = True
-                    finally:
-                        if not consumer.done():
-                            consumer.cancel()
-                        try:
-                            await consumer
-                        except asyncio.CancelledError:
-                            # Stopping the provider at the time limit is expected; only an
-                            # unexplained cancellation is passed on.
-                            if not cancel.is_set() and not timed_out:
-                                raise
-                    if timed_out:
-                        raise TimeoutError(
-                            f"The run took longer than its {limit}-second limit and was stopped"
-                        )
-
-            asyncio.run(execute())
-            # A stop that arrives after the provider has already finished doesn't undo the
-            # finished run.
-            stream_finished = True
-        except Exception as exc:
-            error = self._redact(str(exc)) or type(exc).__name__
-        finally:
-            final = self._redact(final)
-            cancelled = cancel.is_set() and not (stream_finished and final and not error)
-            if chosen.get("isolated") and provenance.get("runRoot"):
-                provenance.update(_worktree_state(provenance["runRoot"]))
-            with self._lock:
-                cancel_reason = self._cancel_reasons.pop(turn_id, "cancelled")
-            # Delegated executions may have external effects, so they stay blocked for review.
-            paused = (
-                cancelled
-                and cancel_reason in {"paused", "hours", "restart", "held"}
-                and not task.get("execution")
+        A recurring ticket the worker marked Done comes back for its next time.
+        """
+        if existing["status"] == "in_progress" and existing.get("heartbeat"):
+            # A check-in is not deliverable work: it closes itself, so the next
+            # heartbeat isn't held up waiting for a review nobody asked for.
+            existing.update(status="done", evidence="Check-in: " + (final[:4000] or "finished"))
+            current["runtime"].setdefault("heartbeatFailures", {}).pop(employee["id"], None)
+            # A check-in that planned nothing new makes the next one wait longer.
+            quiet = current["runtime"].setdefault("quietCheckins", {})
+            if any(t.get("parentRunId") == turn_id for t in current["runtime"]["tasks"]):
+                quiet.pop(employee["id"], None)
+            else:
+                quiet[employee["id"]] = quiet.get(employee["id"], 0) + 1
+        elif existing["status"] == "in_progress":
+            existing["status"] = "in_review"
+            existing["reviewRequestedAt"] = now()
+        elif existing["status"] == "done" and existing["recurring"] and existing["intervalSeconds"]:
+            self._record_occurrence(current, existing)
+            existing.update(
+                status="todo",
+                turns=0,
+                dueAt=(
+                    datetime.now(UTC) + timedelta(seconds=existing["intervalSeconds"])
+                ).isoformat(),
             )
 
-            def finish(current: dict[str, Any]) -> dict[str, Any]:
-                existing = next(t for t in current["runtime"]["tasks"] if t["id"] == task["id"])
-                month = chosen["month"]
-                accounts = current["runtime"].setdefault("usage", {}).setdefault(month, {})
-                reserved = chosen.get("reserved", 1)
-                # Only a completed execution proves unused reservations can be returned.
-                used = (
-                    managed_turns
-                    if final and not error and not cancelled and managed_turns is not None
-                    else reserved
-                )
-                used = min(reserved, max(0, used))
-                existing["turns"] -= reserved - used
-                cost = usage.get("cost_usd", usage.get("total_cost_usd"))
-                known_cost = (
-                    isinstance(cost, (int, float))
-                    and not isinstance(cost, bool)
-                    and math.isfinite(cost)
-                    and cost >= 0
-                )
-                for account_id in (
-                    "company",
-                    f"employee:{employee['id']}",
-                    f"initiative:{task['project']}",
-                ):
-                    account = accounts.setdefault(account_id, {})
-                    account["turns"] = max(0, account.get("turns", reserved) - (reserved - used))
-                    account["costUsd"] = account.get("costUsd", 0) + (cost if known_cost else 0)
-                    account["unknownCostTurns"] = account.get("unknownCostTurns", 0) + int(
-                        not known_cost
-                    )
-                    tokens = usage.get("total_tokens")
-                    if type(tokens) is int and tokens >= 0:
-                        account["tokens"] = account.get("tokens", 0) + tokens
-                    else:
-                        account["unknownTokenTurns"] = account.get("unknownTokenTurns", 0) + 1
-                attempt = current["runtime"].setdefault("attempts", {}).get(turn_id)
-                if attempt:
-                    if attempt.get("executionHandle") and (
-                        final
-                        and not error
-                        and not cancelled
-                        or attempt["executionHandle"]["kind"] == "workflow"
-                    ):
-                        attempt["executionHandle"]["settled"] = True
-                    attempt.update(
-                        finishedAt=now(),
-                        elapsedSeconds=(
-                            datetime.now(UTC) - datetime.fromisoformat(attempt["startedAt"])
-                        ).total_seconds(),
-                        status="paused"
-                        if paused
-                        else "cancelled"
-                        if cancelled
-                        else "failed"
-                        if error or not final
-                        else "completed",
-                        error=error,
-                        costUsd=cost if known_cost else None,
-                        **{k: v for k, v in provenance.items() if k != "runRoot"},
-                        usage=usage,
-                        usedTurns=used,
-                    )
-                if (
-                    existing["status"] == "cancelled"
-                    and existing.get("cancellation") == "requested"
-                ):
-                    existing["cancellation"] = (
-                        "acknowledged"
-                        if not attempt
-                        or not attempt.get("executionHandle")
-                        or attempt["executionHandle"].get("settled")
-                        else "requested"
-                    )
-                if existing["claim"] != turn_id:
-                    return {"turnId": turn_id, "discarded": True, "reason": "Configuration changed"}
-                author = f"employee:{employee['id']}"
-                started = str((attempt or {}).get("startedAt") or "")
-                # A worker that already posted its report as a comment during this run
-                # doesn't get the same words added again as its final message.
-                if final and not any(
-                    c.get("actor") == author
-                    and c.get("kind") != "status"
-                    and str(c.get("body") or "").strip() == final.strip()
-                    and started
-                    and str(c.get("at") or "") >= started
-                    for c in existing["comments"]
-                ):
-                    existing["comments"].append({"actor": author, "at": now(), "body": final})
-                failed = error or cancelled or not final
-                # A worker that already marked its ticket Done or ready for review keeps that
-                # result when the run ends badly afterwards; the conversation says so.
-                settled = existing["status"] in {"done", "in_review"}
-                if failed and settled:
-                    existing["comments"].append(
-                        {
-                            "actor": "system",
-                            "at": now(),
-                            "body": "The run stopped after the worker set this ticket to "
-                            + ("Done" if existing["status"] == "done" else "Review")
-                            + (f": {error}" if error else ".")
-                            + " Its status was kept.",
-                        }
-                    )
-                if paused and cancel_reason == "held" and existing["status"] == "in_progress":
-                    # Holding a worker is not a failure either. A check-in closes (the next
-                    # one takes its place); other work goes back to To do, first in line
-                    # for when the worker is back, and the stopped run isn't charged.
-                    if is_heartbeat(existing):
-                        existing.update(status="cancelled", cancellation="acknowledged")
-                    else:
-                        existing.update(
-                            status="todo",
-                            turns=max(0, existing["turns"] - used),
-                            pulledAt=existing.get("pulledAt")
-                            or (attempt["startedAt"] if attempt else now()),
-                        )
-                    existing["comments"].append(
-                        {
-                            "actor": "system",
-                            "at": now(),
-                            "body": f"{employee['name']} was held before this run finished. "
-                            + (
-                                "The next check-in takes its place."
-                                if is_heartbeat(existing)
-                                else "It runs again, first in line, when they're back."
-                            ),
-                        }
-                    )
-                elif paused and existing["status"] == "in_progress":
-                    # Pausing is not a failure: the task waits, blocked, for the next Start or
-                    # for hours to open, then goes back to To do by itself, and the
-                    # interrupted run doesn't count against its run limit.
-                    existing.update(
-                        status="blocked",
-                        blockReason=HOURS_REASON if cancel_reason == "hours" else PAUSED_REASON,
-                        turns=max(0, existing["turns"] - used),
-                    )
-                    if cancel_reason in {"hours", "restart"}:
-                        # Work cut off by closing time or by Raticode quitting goes first
-                        # when work starts again, in the order it originally started.
-                        existing["pulledAt"] = existing.get("pulledAt") or (
-                            attempt["startedAt"] if attempt else now()
-                        )
-                    existing["comments"].append(
-                        {
-                            "actor": "system",
-                            "at": now(),
-                            "body": "Working hours ended before this run finished. It runs "
-                            "again when hours resume."
-                            if cancel_reason == "hours"
-                            else "Raticode closed before this run finished. The task runs "
-                            "again when the organization runs again."
-                            if cancel_reason == "restart"
-                            else "The organization was paused before this run finished. "
-                            "The task runs again when the organization starts.",
-                        }
-                    )
-                elif (
-                    failed
-                    and not settled
-                    and not cancelled
-                    and existing["status"] == "in_progress"
-                    and is_heartbeat(existing)
-                    and temporary(error, final)
-                ):
-                    # A check-in that hit a temporary provider problem closes, and check-ins
-                    # back off until one works. It isn't a failed check-in, so a provider
-                    # outage never stalls check-ins until the user resumes them.
-                    existing.update(status="cancelled", cancellation="acknowledged")
-                    quiet = current["runtime"].setdefault("quietCheckins", {})
-                    quiet[employee["id"]] = quiet.get(employee["id"], 0) + 1
-                    existing["comments"].append(
-                        {
-                            "actor": "system",
-                            "at": now(),
-                            "body": f"{error or 'The provider ended without an answer'}. "
-                            "This looks temporary: the next check-in takes its place, and "
-                            "check-ins come less often until one works.",
-                        }
-                    )
-                elif failed and not settled:
-                    # A temporary provider problem tries again by itself after a short
-                    # wait. Delegated executions may have had outside effects and a failed
-                    # check-in is replaced by the next one, so neither retries here.
-                    may_retry = (
-                        not cancelled
-                        and existing["status"] == "in_progress"
-                        and not existing.get("execution")
-                        and not is_heartbeat(existing)
-                        and temporary(error, final)
-                    )
-                    retry = (
-                        schedule_retry(current["runtime"], existing, error) if may_retry else None
-                    )
-                    gave_up = may_retry and retry is None
-                    existing.update(
-                        status="blocked",
-                        blockReason=(
-                            RETRY_REASON
-                            if retry
-                            else "The last run failed; see the conversation"
-                            if error
-                            else RESTART_REVIEW_REASON
-                            if cancelled and cancel_reason == "restart"
-                            else "Cancelled before it finished"
-                            if cancelled
-                            else "The last run ended without a final response"
-                        ),
-                    )
-                    existing["comments"].append(
-                        {
-                            "actor": "system",
-                            "at": now(),
-                            "body": retry_note(retry, error)
-                            if retry
-                            else (error or "Turn ended without a final response")
-                            + (
-                                f". Raticode already tried again {len(RETRY_SECONDS)} times "
-                                "after temporary provider problems."
-                                if gave_up
-                                else ""
-                            )
-                            + ("" if error or gave_up else "; review before retrying"),
-                        }
-                    )
-                elif existing["status"] == "in_progress" and existing.get("heartbeat"):
-                    # A check-in is not deliverable work: it closes itself, so the next
-                    # heartbeat isn't held up waiting for a review nobody asked for.
-                    existing.update(
-                        status="done", evidence="Check-in: " + (final[:4000] or "finished")
-                    )
-                    current["runtime"].setdefault("heartbeatFailures", {}).pop(employee["id"], None)
-                    # A check-in that planned nothing new makes the next one wait longer.
-                    quiet = current["runtime"].setdefault("quietCheckins", {})
-                    if any(t.get("parentRunId") == turn_id for t in current["runtime"]["tasks"]):
-                        quiet.pop(employee["id"], None)
-                    else:
-                        quiet[employee["id"]] = quiet.get(employee["id"], 0) + 1
-                elif existing["status"] == "in_progress":
-                    existing["status"] = "in_review"
-                    existing["reviewRequestedAt"] = now()
-                elif (
-                    existing["status"] == "done"
-                    and existing["recurring"]
-                    and existing["intervalSeconds"]
-                ):
-                    self._record_occurrence(current, existing)
-                    existing.update(
-                        status="todo",
-                        turns=0,
-                        dueAt=(
-                            datetime.now(UTC) + timedelta(seconds=existing["intervalSeconds"])
-                        ).isoformat(),
-                    )
-                if not failed:
-                    # A good run: the next failure gets a fresh set of tries and reopens.
-                    finished_well(current["runtime"], existing["id"])
-                existing.update(claim=None, revision=existing["revision"] + 1)
-                self._unblock(current)
-                return {
-                    "turnId": turn_id,
-                    "taskId": task["id"],
-                    "error": error,
-                    "usage": usage,
-                    "status": existing["status"],
-                }
-
+    def _run_cleanup(
+        self,
+        chosen: dict[str, Any],
+        run: WorkerRun,
+        finish: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> None:
+        """Save the run's end, start the checks it cited, record its usage, and forget it."""
+        org, task, employee = chosen["org"], chosen["task"], chosen["employee"]
+        project, oid, turn_id = org["projectRoot"], org["id"], task["claim"]
+        try:
+            self.store.mutate(project, oid, f"employee:{employee['id']}", "turn_finished", finish)
+            # Raticode reruns the project checks this run cited, in its worktree.
             try:
-                self.store.mutate(
-                    project, oid, f"employee:{employee['id']}", "turn_finished", finish
+                start_checks(self, project, oid, task["id"])
+            except Exception:  # noqa: BLE001 - checks never decide the run's outcome
+                log.exception("ORGANIZATION_CHECKS_FAILED organization=%s", oid)
+            execution_kind = None
+            if task.get("execution"):
+                execution_kind = task["execution"].get("kind") or target_for(org, task)["kind"]
+            # Local managed providers record each invocation in their own runtime.
+            # Keep organization aggregates in attempts without double-counting the ledger.
+            # The employee's chat keeps its own ledger in its runtime folder, so this is the
+            # run's entry in Raticode's ledger, with the run and thread it belongs to.
+            if execution_kind not in {"swarm", "workflow"}:
+                record_invocation(
+                    invocation_id=f"organization:{turn_id}",
+                    provider=employee["provider"] if execution_kind is None else execution_kind,
+                    # Counted against the worker's account, so its usage and limits
+                    # show there.
+                    profile=(run.provenance.get("account") or {}).get("name") or None,
+                    model=employee["model"] if execution_kind is None else None,
+                    metadata=run.usage,
+                    run_id=turn_id,
+                    thread_id=f"organization:{oid}:{employee['id']}:{task['id']}",
+                    status="stopped"
+                    if run.cancelled
+                    else "failed"
+                    if run.error or not run.final
+                    else "completed",
+                    data_dir=self.data_dir,
                 )
-                # Raticode reruns the project checks this run cited, in its worktree.
-                try:
-                    start_checks(self, project, oid, task["id"])
-                except Exception:  # noqa: BLE001 - checks never decide the run's outcome
-                    log.exception("ORGANIZATION_CHECKS_FAILED organization=%s", oid)
-                execution_kind = None
-                if task.get("execution"):
-                    execution_kind = task["execution"].get("kind") or target_for(org, task)["kind"]
-                # Local managed providers record each invocation in their own runtime.
-                # Keep organization aggregates in attempts without double-counting the ledger.
-                # The employee's chat keeps its own ledger in its runtime folder, so this is the
-                # run's entry in Raticode's ledger, with the run and thread it belongs to.
-                if execution_kind not in {"swarm", "workflow"}:
-                    record_invocation(
-                        invocation_id=f"organization:{turn_id}",
-                        provider=employee["provider"] if execution_kind is None else execution_kind,
-                        # Counted against the worker's account, so its usage and limits
-                        # show there.
-                        profile=(provenance.get("account") or {}).get("name") or None,
-                        model=employee["model"] if execution_kind is None else None,
-                        metadata=usage,
-                        run_id=turn_id,
-                        thread_id=f"organization:{oid}:{employee['id']}:{task['id']}",
-                        status="stopped"
-                        if cancelled
-                        else "failed"
-                        if error or not final
-                        else "completed",
-                        data_dir=self.data_dir,
-                    )
-            finally:
-                with self._lock:
-                    self._secret_values.pop(turn_id, None)
-                    self._cancel_reasons.pop(turn_id, None)
-                    self._active_tasks.pop(turn_id, None)
-                    self._active.pop(turn_id, None)
-                    self._active_roots.pop(turn_id, None)
-                    self._fleet_runs.discard(turn_id)
-                self._wake.set()
+        finally:
+            with self._lock:
+                self._secret_values.pop(turn_id, None)
+                self._cancel_reasons.pop(turn_id, None)
+                self._active_tasks.pop(turn_id, None)
+                self._active.pop(turn_id, None)
+                self._active_roots.pop(turn_id, None)
+                self._fleet_runs.discard(turn_id)
+            self._wake.set()
+
+
+# Each ticket action's change, made inside OrganizationManager._change_task's transaction.
+TICKET_CHANGES: dict[str, Callable[[OrganizationManager, TicketChange], dict[str, Any]]] = {
+    "task_create": OrganizationManager._create_ticket,
+    "task_update": OrganizationManager._update_ticket,
+    "comment": OrganizationManager._comment_ticket,
+    "approve": OrganizationManager._approve_ticket,
+    "review": OrganizationManager._review_ticket,
+    "reopen": OrganizationManager._reopen_ticket,
+}
+
+ActionHandler = Callable[[OrganizationManager, ActionCall], Any]
+
+
+def _action_table(
+    entries: list[tuple[str | set[str], Needs, ActionHandler]],
+) -> dict[str, tuple[Needs, ActionHandler]]:
+    table: dict[str, tuple[Needs, ActionHandler]] = {}
+    for names, needs, handler in entries:
+        for name in [names] if isinstance(names, str) else sorted(names):
+            if name in table:
+                raise RuntimeError(f"Organization action {name} has two handlers")
+            table[name] = (needs, handler)
+    return table
+
+
+# Every organization action: what it needs first, and the handler that runs it.
+# tests/unit/test_organization_tools.py keeps this and ACTION_HELP the same actions.
+ORGANIZATION_ACTIONS = _action_table(
+    [
+        ("help", Needs.NOTHING, OrganizationManager._help),
+        ("list", Needs.NOTHING, OrganizationManager._list),
+        ("providers", Needs.NOTHING, OrganizationManager._providers),
+        (
+            {"import_github", "import_github_preview"},
+            Needs.NOTHING,
+            OrganizationManager._import_github,
+        ),
+        ({"import", "import_preview"}, Needs.NOTHING, OrganizationManager._import),
+        ("create", Needs.NOTHING, OrganizationManager._create),
+        ("read", Needs.ID, OrganizationManager._read),
+        ("self_work_projects", Needs.ORGANIZATION, OrganizationManager._self_work_projects),
+        ("request_decide", Needs.ORGANIZATION, OrganizationManager._request_decide),
+        ("request_approve_all", Needs.ORGANIZATION, OrganizationManager._request_approve_all),
+        ("auto_mode", Needs.ORGANIZATION, OrganizationManager._auto_mode),
+        ("run_there", Needs.ORGANIZATION, OrganizationManager._run_there),
+        ("land", Needs.ORGANIZATION, OrganizationManager._land),
+        ("ticket_patch", Needs.ORGANIZATION, OrganizationManager._ticket_patch),
+        ("archive", Needs.CONSENT, OrganizationManager._archive),
+        ("audit_verify", Needs.CONSENT, OrganizationManager._audit_verify),
+        ("run_input", Needs.CONSENT, OrganizationManager._run_input),
+        ("run_events", Needs.CONSENT, OrganizationManager._run_events),
+        ("execution_reconcile", Needs.CONSENT, OrganizationManager._execution_reconcile),
+        ("execution_resolve", Needs.CONSENT, OrganizationManager._execution_resolve),
+        ("webhook_save", Needs.CONSENT, OrganizationManager._webhook_save),
+        ("backup", Needs.CONSENT, OrganizationManager._backup),
+        ("secret_store", Needs.CONSENT, OrganizationManager._secret_store),
+        ("workflow_launch", Needs.CONSENT, OrganizationManager._workflow_launch),
+        (READ_OPERATIONS | WRITE_OPERATIONS, Needs.CONSENT, OrganizationManager._operation),
+        (KNOWLEDGE_ACTIONS, Needs.CONSENT, OrganizationManager._knowledge),
+        ("history", Needs.CONSENT, OrganizationManager._history),
+        ("events", Needs.CONSENT, OrganizationManager._events),
+        ("export", Needs.CONSENT, OrganizationManager._export),
+        ("configure", Needs.CONSENT, OrganizationManager._configure),
+        ("restore", Needs.CONSENT, OrganizationManager._restore),
+        ("control", Needs.CONSENT, OrganizationManager._control),
+        ("memory", Needs.CONSENT, OrganizationManager._memory),
+        ("wake", Needs.CONSENT, OrganizationManager._wake_worker),
+        (set(TICKET_CHANGES), Needs.CONSENT, OrganizationManager._change_task),
+    ]
+)

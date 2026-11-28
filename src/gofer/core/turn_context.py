@@ -76,6 +76,7 @@ REM_CALLS: dict[str, str] = {
     "self_work_plan": "Self-work objective planning",
     "self_work_fit": "Self-work objective check",
     "self_work_stop": "Self-work stop check",
+    "objective_ideas": "Ask Rem for a project's objectives",
     "organization": "Organization request review",
 }
 # Kinds no longer recorded, still named in the records kept from before (KEEP_DAYS).

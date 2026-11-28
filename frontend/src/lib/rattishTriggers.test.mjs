@@ -75,6 +75,7 @@ test("triggers describe what starts them and what happens on overlap", () => {
   assert.equal(triggerTitle(cron), "Schedule");
   assert.equal(triggerTitle({ ...cron, label: "Morning digest" }), "Morning digest");
   assert.equal(triggerDetail(cron), "0 9 * * 1-5 · America/New_York");
+  assert.equal(triggerDetail({ ...cron, summary: "Weekdays at 9:00" }), "Weekdays at 9:00 · America/New_York");
   assert.equal(
     triggerPolicyText(cron),
     "If already running: run once after it finishes · catches up one missed run · time limit: 6 h",

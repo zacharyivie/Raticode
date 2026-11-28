@@ -2,6 +2,8 @@
 // one choice per provider in accountsByProvider, so switching providers and back keeps
 // it. No entry means Rem's setting (Settings > Rem > Accounts) decides.
 
+import { timeAgo } from "./timeText.js";
+
 // The provider's default sign-in. Account names start with a letter or digit, so no
 // account can be called this; the backend reads it as "no account".
 export const DEFAULT_SIGN_IN = "@default";
@@ -39,19 +41,8 @@ export function readingLabel(reading, now = Date.now()) {
   if (typeof reading.seven_day === "number") parts.push(`Week ${Math.round(reading.seven_day)}%`);
   if (typeof reading.five_hour === "number") parts.push(`5h ${Math.round(reading.five_hour)}%`);
   if (!parts.length) return "";
-  const observed = Date.parse(reading.observed_at || "");
-  const age = Number.isFinite(observed) ? ageLabel(now - observed) : "";
+  const age = timeAgo(reading.observed_at, now);
   return `${parts.join(" · ")} used${age ? `, ${age}` : ""}`;
-}
-
-function ageLabel(ms) {
-  if (ms < 0) return "";
-  const minutes = Math.floor(ms / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)} days ago`;
 }
 
 /**

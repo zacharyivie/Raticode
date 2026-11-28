@@ -404,3 +404,29 @@ async def test_worker_sessions_keep_claude_codes_own_cache_lifetime(
     )
     # A worker resumes its session, so the one-hour cache Claude Code picks still pays off.
     assert "CLAUDE_CODE_PROMPT_CACHE_TTL" not in seen["env"]
+
+
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        ("Roughly yes: 14 runs against 11.", "Roughly yes: 14 runs against 11."),
+        ("```\nRoughly yes.\n```", "Roughly yes."),
+        # Cut-off JSON shows its reply so far, never the raw object.
+        ('{"reply": "Roughly yes, 14 against', "Roughly yes, 14 against"),
+        ('Here it is: {"reply": "Roughly yes.", "tasks": [', "Roughly yes."),
+        ('{"tasks": [{"title": "Fix', ""),
+        ("   ", ""),
+        ("", ""),
+    ],
+)
+def test_plain_reply_keeps_what_a_reply_said_to_the_user(text: str, said: str):
+    assert provider_module.plain_reply(text) == said
+
+
+def test_reformat_request_quotes_the_reply_that_was_not_json():
+    note = provider_module.reformat_request('I\'ll check the runs "first".')
+    assert "not the requested JSON object" in note
+    assert json.dumps('I\'ll check the runs "first".') in note
+    assert provider_module.reformat_request("  ").strip().endswith("before or after it.")
+    long = provider_module.reformat_request("x" * 50_000)
+    assert len(long) < provider_module.PREVIOUS_REPLY_CHARS + 500

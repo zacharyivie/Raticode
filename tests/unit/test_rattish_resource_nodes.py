@@ -9,6 +9,7 @@ from gofer.rattish.compiler import CompileContext, RattishCompiler
 from gofer.rattish.preflight import run_preflight
 from gofer.rattish.runtime import execute_node
 from gofer.rattish.workflow_runtime import execute_workflow
+from gofer.utils.process import CapturedOutput
 
 PROJECT_ROOT = Path(__file__).parents[2]
 RATTISH_ROOT = PROJECT_ROOT / "rattish"
@@ -111,12 +112,12 @@ async def test_open_resource_normalizes_type_and_dispatches_platform_opener(
 ) -> None:
     calls: list[list[str]] = []
 
-    async def fake_run_subprocess(command, **kwargs):
+    async def fake_run_command_capture(command, **kwargs):
         _ = kwargs
         calls.append(command)
-        return 0, "", ""
+        return CapturedOutput(0, "", "")
 
-    monkeypatch.setattr("gofer.rattish.runtime.run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr("gofer.rattish.runtime.run_command_capture", fake_run_command_capture)
     source = """Rattish: 1
 Workflow:
   name: Open URL

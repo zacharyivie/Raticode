@@ -1,6 +1,6 @@
 {
   "$schema": "../schemas/node-contract.schema.json",
-  "contract_version": 1,
+  "contract_version": 2,
   "node_type": "python-script",
   "runtime_handler": "raticode.python_script",
   "catalog": {"category": "code", "summary": "Run a Python script kept in the project", "docs_path": "/docs/nodes/python-script"},
@@ -8,12 +8,14 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "script_path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "script_path": {"description": "Readable script source path.", "type": "string", "minLength": 1, "x-rattish-type": "Path"},
       "args": {
+        "description": "Ordered argument strings.",
         "type": "array",
         "items": {"type": "string"}
       },
       "env": {
+        "description": "Additional string environment values.",
         "type": "object",
         "additionalProperties": {"type": "string"}
       }
@@ -58,9 +60,10 @@
         "stdout": {"type": "string"},
         "stderr": {"type": "string"},
         "exit_code": {"type": "integer"},
-        "script_path": {"type": "string"}
+        "script_path": {"type": "string"},
+        "truncated": {"type": "boolean"}
       },
-      "required": ["stdout", "stderr", "exit_code", "script_path"],
+      "required": ["stdout", "stderr", "exit_code", "script_path", "truncated"],
       "additionalProperties": false
     }
   },

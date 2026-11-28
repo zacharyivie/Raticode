@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +15,12 @@ from gofer.rattish import run_service
 from gofer.rattish.run_service import process_start_token
 from gofer.ui import scratch_cleanup
 from gofer.ui.rem_home_store import RemHomeStore
-from gofer.ui.scratch_cleanup import STALE_SECONDS, clean_stale_scratch
+from gofer.ui.scratch_cleanup import (
+    EVIDENCE_FOLDER,
+    STALE_SECONDS,
+    clean_stale_scratch,
+    clear_turn_scratch,
+)
 
 DAY = STALE_SECONDS
 DEAD_PID = 2147483647
@@ -31,19 +37,28 @@ def _folder(path: Path, *, age: float, size: int = 4096) -> Path:
     return path
 
 
-def _rem_run(data: Path, run_id: str, state: str, turn: str | None = None) -> None:
+def _rem_run(
+    data: Path, run_id: str, state: str, turn: str | None = None, finished_at: str | None = None
+) -> None:
     RemHomeStore(data)
+    body = {"id": run_id, "state": state, "active_turn_id": turn, "finished_at": finished_at}
     with sqlite3.connect(data / "rem-home.sqlite3") as db:
         db.execute(
             "INSERT INTO runs VALUES(?,?,?,?,?)",
-            (
-                run_id,
-                "task",
-                f"occurrence-{run_id}",
-                state,
-                json.dumps({"id": run_id, "state": state, "active_turn_id": turn}),
-            ),
+            (run_id, "task", f"occurrence-{run_id}", state, json.dumps(body)),
         )
+
+
+def _evidence(folder: Path, *, age: float) -> Path:
+    """A shot.png in the turn folder's evidence folder, saved ``age`` seconds ago."""
+    evidence = folder / EVIDENCE_FOLDER
+    evidence.mkdir()
+    shot = evidence / "shot.png"
+    shot.write_bytes(b"png")
+    stamp = time.time() - age
+    for item in (shot, evidence, folder):
+        os.utime(item, (stamp, stamp))
+    return shot
 
 
 def _workflow_record(data: Path, run_id: str, **fields: object) -> None:
@@ -195,6 +210,59 @@ def test_links_are_removed_without_following_them(tmp_path: Path) -> None:
     assert not stale.exists()
     assert (outside / "keep").read_text() == "mine"
     assert result.removed == 1
+
+
+def test_an_ended_runs_evidence_stays_for_thirty_days(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    clock = time.time()
+    turns = data / "rem-work" / "turn-scratch"
+    shots = {}
+    for days in (29, 31):
+        ended = datetime.fromtimestamp(clock - days * DAY, UTC).isoformat()
+        _rem_run(data, f"run-{days}", "succeeded", finished_at=ended)
+        # A cache the turn left behind beside its evidence.
+        folder = _folder(turns / f"run-{days}-execute", age=2 * DAY)
+        shots[days] = _evidence(folder, age=days * DAY)
+    # A paused run has no finish time: its evidence counts from its last change.
+    _rem_run(data, "run-paused", "paused")
+    paused = _evidence(_folder(turns / "run-paused-execute", age=2 * DAY), age=2 * DAY)
+    # A deleted run's thread is gone, so its evidence goes with the rest.
+    deleted = _evidence(_folder(turns / "gone-run-execute", age=2 * DAY), age=2 * DAY)
+
+    result = clean_stale_scratch(data, now=clock)
+
+    assert shots[29].read_bytes() == b"png" and paused.exists()
+    # The rest of a kept folder still goes after a day.
+    assert not (turns / "run-29-execute" / "cache").exists()
+    assert not (turns / "run-paused-execute" / "cache").exists()
+    assert not (turns / "run-31-execute").exists()
+    assert not deleted.parent.parent.exists()
+    assert result.removed == 2 and result.kept == 2
+
+
+def test_a_turn_end_keeps_only_real_evidence(tmp_path: Path) -> None:
+    turns = tmp_path / "data" / "rem-work" / "turn-scratch"
+    kept = _folder(turns / "run-a-execute", age=60)
+    shot = _evidence(kept, age=60)
+    (kept / "claude-1000").mkdir()
+    (kept / "claude-1000" / "diff").write_text("x")
+    clear_turn_scratch(kept)
+    assert [p.name for p in kept.iterdir()] == [EVIDENCE_FOLDER] and shot.exists()
+
+    # An empty evidence folder leaves nothing behind.
+    empty = _folder(turns / "run-b-execute", age=60)
+    (empty / EVIDENCE_FOLDER).mkdir()
+    clear_turn_scratch(empty)
+    assert not empty.exists()
+
+    # An evidence link to another folder is removed without touching what it names.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("mine")
+    linked = _folder(turns / "run-c-execute", age=60)
+    (linked / EVIDENCE_FOLDER).symlink_to(outside, target_is_directory=True)
+    clear_turn_scratch(linked)
+    assert not linked.exists() and (outside / "keep").read_text() == "mine"
 
 
 def test_no_scratch_folders_is_a_quiet_no_op(tmp_path: Path) -> None:

@@ -32,7 +32,8 @@ from gofer.ui.rem_worker_background import (
 from tests.unit.test_rem_home import home, recipe, wait_run  # noqa: F401
 
 REVIEWER = "independent read-only reviewer"
-FILE = re.compile(r"file (\S+background-[0-9a-f]{16}\.json) \(JSON\)")
+# The path may hold spaces, so the match runs from "the file " to the name.
+FILE = re.compile(r"the file (.+?background-[0-9a-f]{16}\.json) \(JSON\)")
 MEMORY = "Prefers short commit subjects."
 FINISHED = {"succeeded", "blocked", "failed", "needs_user"}
 

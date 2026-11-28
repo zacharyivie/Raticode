@@ -19,7 +19,6 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
-import os
 import re
 import threading
 import time
@@ -31,6 +30,7 @@ from urllib.parse import urlsplit
 
 from gofer.core.http import HttpRequest, HttpResponse, UrllibHttpClient
 from gofer.core.provider_profiles import ResolvedProviderSettings, resolved_provider_env
+from gofer.utils.atomic_output import replace_file
 
 LIST_TIMEOUT_SECONDS = 5.0
 # The model list changes when a provider launches or retires a model, a few times a year.
@@ -472,11 +472,7 @@ def _write_disk(data_dir: Path, key: str, models: list[str]) -> None:
             and now - float(entry.get("fetchedAt") or 0) < LIST_CACHE_SECONDS
         }
         entries[key] = {"fetchedAt": now, "models": models}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
-        temporary.write_text(json.dumps(entries), encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
+        replace_file(path, json.dumps(entries).encode("utf-8"))
     except OSError:
         pass
 

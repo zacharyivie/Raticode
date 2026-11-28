@@ -2,8 +2,8 @@
 // Reads only saved settings: Rem's choice (settings.assistant.providerAccounts) and
 // self-work's own choice (self-work settings' provider_accounts). Nothing here is stored.
 
-export const REM_USE = "Threads, tasks and Rem’s replies";
-export const SELF_WORK_USE = "Self-work";
+const REM_USE = "Threads, tasks and Rem’s replies";
+const SELF_WORK_USE = "Self-work";
 
 /**
  * Where a choice points: { kind: "default" | "auto" | "account" | "removed", account }.

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, Brain, Check, ChevronDown, ChevronRight, FlaskConical, Play, GitBranch, Network, Plus, SquareKanban, Trash2, X } from "lucide-react";
 import {
-  COLUMN_LABELS, EVIDENCE_LABELS, KINDS, describeHours, entity, epicProgress, epicsOfMilestone, evidenceState, formatDate, knowledgeEdges,
+  COLUMN_LABELS, EVIDENCE_LABELS, KINDS, describeHours, entity, epicProgress, epicsOfMilestone, evidenceState, knowledgeEdges,
   milestoneProgress, milestonesOfProject, milestonesServing, openTickets, orgMilestoneProgress, reviewCaution, runSteps,
-  removeWorker, startHint, ticketsOfEpic, visibleCommand, zoneTime, ago, timeAgo, usedBy, workerStatus,
+  removeWorker, startHint, ticketsOfEpic, visibleCommand, zoneTime, usedBy, workerStatus,
 } from "../lib/organizationModel.js";
+import { compactAge, dateTime, localTimeZone, shortDate, timeAgo } from "../lib/timeText.js";
 import { dangerousPermission, organizationRequest, plural, runProvenance, transcriptEntries } from "../lib/organizations.js";
 import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
 import { CADENCES, DAY_NAMES, LONG_DAYS, ORDINALS, blockId, blockProblem, cleanBlock, describeBlock, keywordsText, parseKeywords, scheduleProblem, withCadence } from "../lib/organizationSchedule.js";
@@ -73,7 +74,7 @@ function ClaimSheet({ model, claim, ctx }) {
     {evidence.kind === "check" && <>
       <Rec label="Command"><CommandText command={evidence.command} />{evidence.checkName ? <small className="oh-faint">Project check “{evidence.checkName}”</small> : <small className="oh-faint">Written by the worker. It isn&apos;t one of the project&apos;s checks, so Raticode didn&apos;t run it on its own.</small>}</Rec>
       {evidence.reported && <Rec label="Agent said"><Muted>{evidence.reported}</Muted></Rec>}
-      {"exitCode" in evidence && <Rec label="Result"><span className={`oh-ev ${evidence.exitCode ? "bad" : "ok"}`}>Exit {evidence.exitCode}</span> <Muted>{evidence.ranBy === "you" ? "You ran it" : "Raticode reran it"} in the ticket&apos;s worktree, {ago(evidence.ranAt)}{evidence.seconds != null ? `, ${evidence.seconds}s` : ""}</Muted></Rec>}
+      {"exitCode" in evidence && <Rec label="Result"><span className={`oh-ev ${evidence.exitCode ? "bad" : "ok"}`}>Exit {evidence.exitCode}</span> <Muted>{evidence.ranBy === "you" ? "You ran it" : "Raticode reran it"} in the ticket&apos;s worktree, {timeAgo(evidence.ranAt)}{evidence.seconds != null ? `, ${evidence.seconds}s` : ""}</Muted></Rec>}
       {evidence.output && <Rec label="Output"><pre className="oh-out">{evidence.output}</pre></Rec>}
       {state !== "running" && <Rec label="You"><Confirm busy={ctx.busy} danger={!evidence.checkName} label={<><FlaskConical size={14} />{"exitCode" in evidence ? "Run again" : "Run this check"}</>}
         confirmLabel={evidence.checkName ? "Run it" : "Run the worker's command"}
@@ -84,7 +85,7 @@ function ClaimSheet({ model, claim, ctx }) {
     </>}
     {evidence.kind === "quote" && <>
       <Rec label="Source"><Chip model={model} refId={`kb:${evidence.entryId}`} onOpen={ctx.onOpen} /></Rec>
-      <Rec label="Quoted"><p className={`oh-quote ${state === "warn" ? "old" : ""}`}>{evidence.quote}</p><small className="oh-faint">Version {evidence.version}, quoted {ago(claim.at)}</small></Rec>
+      <Rec label="Quoted"><p className={`oh-quote ${state === "warn" ? "old" : ""}`}>{evidence.quote}</p><small className="oh-faint">Version {evidence.version}, quoted {timeAgo(claim.at)}</small></Rec>
       {state === "warn" && <Rec label="Now says"><p className="oh-quote new">{evidence.now}</p><small className="oh-faint">The note changed after the agent quoted it.</small></Rec>}
     </>}
     {evidence.kind === "commit" && <>
@@ -198,7 +199,7 @@ function TicketSheet({ model, ticket, ctx }) {
     <details className="oh-fold oh-conversation"><summary>Conversation ({conversation.length})</summary>
       {conversation.slice(-12).map((item, index) => item.kind === "status"
         ? <StatusEntry key={index} model={model} item={item} />
-        : <div key={index} className="oh-comment"><b>{actorName(model, item.actor)}</b> <time>{timeAgo(item.at)}</time>{item.decision && <> <Pill state={item.decision === "accept" ? "done" : "review"}>{item.decision}</Pill></>}<p className="oh-prose">{item.body}</p></div>)}
+        : <div key={index} className="oh-comment"><b>{actorName(model, item.actor)}</b> <time>{compactAge(item.at)}</time>{item.decision && <> <Pill state={item.decision === "accept" ? "done" : "review"}>{item.decision}</Pill></>}<p className="oh-prose">{item.body}</p></div>)}
       <form className="oh-row" onSubmit={async event => { event.preventDefault(); if (comment.trim() && await ctx.onAct("comment", { taskId: ticket.id, body: comment.trim() }, "Comment saved")) setComment(""); }}>
         <label className="oh-sr" htmlFor="oh-comment">Comment</label><input id="oh-comment" className="oh-note-input" placeholder="Comment for the worker" value={comment} onChange={e => setComment(e.target.value)} /><button className="oh-btn small" type="submit" disabled={ctx.busy || !comment.trim()}>Send</button>
       </form>
@@ -210,7 +211,7 @@ function TicketSheet({ model, ticket, ctx }) {
 function StatusEntry({ model, item }) {
   const { title, move } = statusLine(item);
   const who = item.actor && item.actor !== "system" ? ` · ${actorName(model, item.actor)}` : "";
-  return <div className="oh-comment oh-status-entry"><span className="oh-status-title">{title}</span> <time>{timeAgo(item.at)}{who}</time>
+  return <div className="oh-comment oh-status-entry"><span className="oh-status-title">{title}</span> <time>{compactAge(item.at)}{who}</time>
     {move && <span className="oh-muted"> · {move}</span>}{item.body && <p className="oh-prose">{item.body}</p>}</div>;
 }
 
@@ -420,7 +421,7 @@ function KnowledgeSheet({ model, entry, ctx }) {
       {entry.runId && model.runs[entry.runId] && <><Chip model={model} refId={`run:${entry.runId}`} onOpen={ctx.onOpen} /><span className="oh-link-kind">observed</span></>}</div>
       {entry.source && <small className="oh-faint"><Brain size={12} /> Second Brain: {entry.source.path}{entry.sourceMissing ? " (missing)" : ""}</small>}
       {entry.mirror && <small className="oh-faint">Also saved to the Second Brain: {entry.mirror.path}</small>}
-      <small className="oh-faint">Version {entry.version}, updated {ago(entry.updatedAt)}{entry.changedAt ? "; changed in the Second Brain" : ""}</small></Rec>
+      <small className="oh-faint">Version {entry.version}, updated {timeAgo(entry.updatedAt)}{entry.changedAt ? "; changed in the Second Brain" : ""}</small></Rec>
     <Rec label="Project">{entry.projectId ? <Chip model={model} refId={`project:${entry.projectId}`} onOpen={ctx.onOpen} /> : <Muted>Whole organization</Muted>}</Rec>
     <Rec label="Used by"><div className="oh-chips">{usedBy(model, entry.id).map(t => <Chip key={t.id} model={model} refId={`ticket:${t.id}`} onOpen={ctx.onOpen} />)}{!usedBy(model, entry.id).length && <Muted>No tickets yet</Muted>}</div></Rec>
     <Rec label="Links">{edges.length ? edges.map(([a, b, kind, link]) => <div className="oh-link-row" key={`${a}${b}${kind}`}><span className="oh-link-kind">{{ written: "In the note", asserted: link?.state === "warn" ? "Quote changed" : "Quoted link", suggested: "Suggested" }[kind]}</span><Chip model={model} refId={`kb:${a === entry.id ? b : a}`} onOpen={ctx.onOpen} />
@@ -477,13 +478,12 @@ const CHECK_INS = [[0, "Automatic"], [900, "Every 15 minutes"], [1800, "Every 30
 // A saved interval that isn't one of the usual choices stays selectable.
 const checkInOptions = current => (CHECK_INS.some(([value]) => value === current) ? CHECK_INS : [...CHECK_INS, [current, `Every ${Math.round(current / 60)} minutes`]]);
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const localZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; } };
 const zones = () => { try { return Intl.supportedValuesOf("timeZone"); } catch { return []; } };
 
 // Working hours: around the clock, or weekly windows in one time zone.
 function HoursEditor({ model, ctx }) {
   const saved = model.config.operatingHours || { mode: "always", timezone: "UTC", windows: [], atClose: "stop" };
-  const start = () => ({ ...saved, timezone: saved.mode === "scheduled" ? saved.timezone : localZone(), windows: saved.windows?.length ? saved.windows : [{ days: [0, 1, 2, 3, 4], start: "09:00", end: "17:00" }], atClose: saved.atClose || "stop" });
+  const start = () => ({ ...saved, timezone: saved.mode === "scheduled" ? saved.timezone : localTimeZone(), windows: saved.windows?.length ? saved.windows : [{ days: [0, 1, 2, 3, 4], start: "09:00", end: "17:00" }], atClose: saved.atClose || "stop" });
   const [draft, setDraft] = useState(start);
   const [resume, setResume] = useState(model.config.resumeAfterRestart === true);
   const [touched, setTouched] = useState(false);
@@ -572,7 +572,7 @@ function ScheduleEditor({ model, ctx, suggested }) {
   const hours = model.config.operatingHours || { mode: "always", timezone: "UTC", windows: [], atClose: "stop" };
   const [blocks, setBlocks] = useState(() => structuredClone(suggested && !saved.length ? template : saved));
   // With no schedule and no working hours yet, start from this computer's time zone.
-  const [zone, setZone] = useState(() => (!saved.length && hours.mode !== "scheduled" ? localZone() : hours.timezone || "UTC"));
+  const [zone, setZone] = useState(() => (!saved.length && hours.mode !== "scheduled" ? localTimeZone() : hours.timezone || "UTC"));
   const [openRow, setOpenRow] = useState(suggested ? null : saved.length ? null : 0);
   const problem = scheduleProblem(blocks) || (zone.trim() ? "" : "Choose a time zone.");
   const change = (index, block) => setBlocks(current => current.map((b, i) => (i === index ? block : b)));
@@ -702,13 +702,13 @@ function renderSheet(model, ref, ctx) {
   const index = ref.indexOf(":");
   const type = ref.slice(0, index), id = ref.slice(index + 1);
   if (type === "ticket") { const t = model.tickets[id]; return t && { title: t.title, sub: <><span className="oh-key">{t.key}</span><Pill state={t.column} /><Avatar model={model} id={t.assignee} /><span>{model.workers[t.assignee]?.name || "Unassigned"}</span></>, body: <TicketSheet key={id} model={model} ticket={t} ctx={ctx} /> }; }
-  if (type === "run") { const r = model.runs[id]; const t = r && model.tickets[r.taskId]; return r && { title: `${model.workers[r.employeeId]?.name?.split(" ")[0] || "A worker"}'s run on ${t?.key || "a ticket"}`, sub: <><Avatar model={model} id={r.employeeId} /><span>{new Date(r.startedAt).toLocaleString()}</span>{r.finishedAt ? <><span>{Math.round((r.elapsedSeconds || 0) / 60)} min</span>{r.usage?.total_tokens ? <span>{Math.round(r.usage.total_tokens / 1000)}k tokens</span> : null}<Pill state={r.status === "completed" ? "done" : "blocked"}>{r.status}</Pill></> : <Pill state="running">Running</Pill>}</>, body: <RunSheet key={id} model={model} run={r} ctx={ctx} /> }; }
+  if (type === "run") { const r = model.runs[id]; const t = r && model.tickets[r.taskId]; return r && { title: `${model.workers[r.employeeId]?.name?.split(" ")[0] || "A worker"}'s run on ${t?.key || "a ticket"}`, sub: <><Avatar model={model} id={r.employeeId} /><span>{dateTime(r.startedAt)}</span>{r.finishedAt ? <><span>{Math.round((r.elapsedSeconds || 0) / 60)} min</span>{r.usage?.total_tokens ? <span>{Math.round(r.usage.total_tokens / 1000)}k tokens</span> : null}<Pill state={r.status === "completed" ? "done" : "blocked"}>{r.status}</Pill></> : <Pill state="running">Running</Pill>}</>, body: <RunSheet key={id} model={model} run={r} ctx={ctx} /> }; }
   if (type === "claim") { const c = model.runtime.claims?.[id]; return c && { title: `${{ check: "Check", quote: "Quote", commit: "Commit", file: "File" }[c.evidence?.kind] || "Claim"} for ${model.tickets[c.taskId]?.key || "a ticket"}`, sub: <span>Evidence</span>, body: <ClaimSheet model={model} claim={c} ctx={ctx} /> }; }
   if (type === "epic") { const e = model.epics[id]; return e && { title: e.title, sub: <><span>Epic</span><Avatar model={model} id={e.owner} /><span>{pct(epicProgress(model, id))}% accepted</span></>, body: <EpicSheet key={id} model={model} epic={e} ctx={ctx} /> }; }
-  if (type === "ms") { const m = model.milestones[id]; return m && { title: m.title, sub: <><span>Milestone</span>{m.dueAt && <span>Due {formatDate(m.dueAt)}</span>}<span>{pct(milestoneProgress(model, id))}%</span></>, body: <MilestoneSheet key={id} model={model} milestone={m} ctx={ctx} /> }; }
-  if (type === "orgms") { const m = model.orgMilestones[id]; return m && { title: m.title, sub: <><span>Organization milestone</span>{m.dueAt && <span>Due {formatDate(m.dueAt)}</span>}</>, body: <OrgMilestoneSheet key={id} model={model} milestone={m} ctx={ctx} /> }; }
+  if (type === "ms") { const m = model.milestones[id]; return m && { title: m.title, sub: <><span>Milestone</span>{m.dueAt && <span>Due {shortDate(m.dueAt)}</span>}<span>{pct(milestoneProgress(model, id))}%</span></>, body: <MilestoneSheet key={id} model={model} milestone={m} ctx={ctx} /> }; }
+  if (type === "orgms") { const m = model.orgMilestones[id]; return m && { title: m.title, sub: <><span>Organization milestone</span>{m.dueAt && <span>Due {shortDate(m.dueAt)}</span>}</>, body: <OrgMilestoneSheet key={id} model={model} milestone={m} ctx={ctx} /> }; }
   if (type === "project") { const p = model.projects[id]; return p && { title: p.name, sub: <><span>Project</span>{p.workspacePath && <code>{p.workspacePath}</code>}</>, body: <ProjectSheet key={id} model={model} project={p} ctx={ctx} /> }; }
-  if (type === "kb") { const k = model.knowledge[id]; return k && { title: k.title, sub: <><span className="oh-kind"><i style={{ background: `var(--k-${k.kind})` }} />{KINDS[k.kind]}</span>{k.topic && <span>{k.topic}</span>}{k.changedAt && <span className="oh-ev warn"><AlertTriangle size={12} />Changed {ago(k.changedAt)}</span>}</>, body: <KnowledgeSheet key={id} model={model} entry={k} ctx={ctx} /> }; }
+  if (type === "kb") { const k = model.knowledge[id]; return k && { title: k.title, sub: <><span className="oh-kind"><i style={{ background: `var(--k-${k.kind})` }} />{KINDS[k.kind]}</span>{k.topic && <span>{k.topic}</span>}{k.changedAt && <span className="oh-ev warn"><AlertTriangle size={12} />Changed {timeAgo(k.changedAt)}</span>}</>, body: <KnowledgeSheet key={id} model={model} entry={k} ctx={ctx} /> }; }
   if (type === "worker") { const w = model.workers[id]; const [state, label] = workerStatus(model, id); const runs = Object.values(model.runs).filter(r => r.employeeId === id).length; return w && { title: w.name, sub: <><Avatar model={model} id={id} /><span>{w.title || w.role}</span><Pill state={state}>{label}</Pill><span>{plural(runs, "run")}</span></>, body: <WorkerEditor key={id} model={model} worker={w} ctx={ctx} /> }; }
   if (type === "new") {
     const [kind, context] = [id.split(":")[0], id.split(":").slice(1).join(":")];

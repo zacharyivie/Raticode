@@ -8,12 +8,12 @@ const SMALL_BUTTON_CLASS =
 const request = (workflowId, options) =>
   apiJson(`/rattish/cache?workflowId=${encodeURIComponent(workflowId)}`, { ...options, failure: status => `Request failed (${status}).` });
 
-export const resultCacheApi = {
+const resultCacheApi = {
   load: (workflowId) => request(workflowId),
   clear: (workflowId) => request(workflowId, { method: "DELETE" }),
 };
 
-export function formatCacheSize(bytes) {
+function formatCacheSize(bytes) {
   const value = Number(bytes) || 0;
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;

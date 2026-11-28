@@ -60,3 +60,25 @@ export function replacePathPrefix(path, sourcePath, destinationPath, isDirectory
   const separator = destinationPath.includes("\\") && !destinationPath.includes("/") ? "\\" : "/";
   return `${destinationPath.replace(/[\\/]+$/, "")}${separator}${suffix.replaceAll("/", separator)}`;
 }
+
+export function mergeCodeOpenPaths(current = [], additions = []) {
+  return [...new Set([...current, ...additions].filter(Boolean))];
+}
+
+export function joinWorkspacePath(directory = "", name = "") {
+  const separator = directory.includes("\\") && !directory.includes("/") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/, "")}${separator}${name.replace(/^[\\/]+/, "")}`;
+}
+
+export function parentWorkspacePath(value = "") {
+  const normalized = value.replace(/[\\/]+$/, "");
+  const index = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  if (index <= 0) return normalized.slice(0, Math.max(index, 1)) || normalized;
+  return normalized.slice(0, index);
+}
+
+export function workspaceBasename(value = "") {
+  const normalized = value.replace(/[\\/]+$/, "");
+  const index = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  return normalized.slice(index + 1);
+}

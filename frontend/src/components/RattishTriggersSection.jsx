@@ -16,7 +16,6 @@ import {
   draftFromTrigger,
   emptyTriggerDraft,
   fileChangeLabel,
-  formatWhen,
   isProblemStatus,
   modelNoticeText,
   modelNoticeTitle,
@@ -37,6 +36,8 @@ import {
   widenedStepText,
   widenedSteps,
 } from "../lib/rattishTriggers.js";
+import { dateTime } from "../lib/timeText.js";
+import { CronPreview } from "./CronPreview.jsx";
 import { SourceDiff } from "./SourceDiff.jsx";
 import { useRovingChoice } from "../lib/useRovingChoice.js";
 
@@ -135,34 +136,6 @@ function TokenReveal({ reveal, onDismiss }) {
         Send it as an <span className="font-mono">Authorization: Bearer</span> header. Only programs on this computer can reach the webhook.
       </p>
     </div>
-  );
-}
-
-function CronPreview({ expression, timezone }) {
-  const [result, setResult] = useState({ nextRuns: [], error: "" });
-  useEffect(() => {
-    if (!expression.trim()) {
-      setResult({ nextRuns: [], error: "" });
-      return undefined;
-    }
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      triggersApi.previewCron(expression, timezone).then(
-        (payload) => !cancelled && setResult({ nextRuns: payload.nextRuns, error: "" }),
-        (error) => !cancelled && setResult({ nextRuns: [], error: error.message }),
-      );
-    }, 300);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [expression, timezone]);
-  if (result.error) return <p className="text-xs leading-5 text-amber-700 dark:text-amber-300">{result.error}</p>;
-  if (!result.nextRuns.length) return null;
-  return (
-    <p className="text-xs leading-5 text-muted">
-      Next: {result.nextRuns.map(formatWhen).join(", ")}
-    </p>
   );
 }
 
@@ -785,12 +758,19 @@ function TriggerCard({ reviewing, scheduler, trigger, onChanged, onEdit, onRevie
           />
         </label>
       </div>
-      <p className="break-all font-mono text-[11px] leading-4 text-muted">{triggerDetail(trigger)}</p>
+      {trigger.summary ? (
+        <>
+          <p className="text-[11px] leading-4 text-ink">{triggerDetail(trigger)}</p>
+          <p className="break-all font-mono text-[10px] leading-4 text-muted">{trigger.config.expression}</p>
+        </>
+      ) : (
+        <p className="break-all font-mono text-[11px] leading-4 text-muted">{triggerDetail(trigger)}</p>
+      )}
       <p className="text-[11px] leading-4 text-muted">{triggerPolicyText(trigger)}</p>
       {trigger.enabled && scheduler?.paused ? (
         <p className="text-[11px] leading-4 text-amber-700 dark:text-amber-300">Paused with all triggers</p>
       ) : trigger.nextRunAt ? (
-        <p className="text-[11px] leading-4 text-slate-700">Next: {formatWhen(trigger.nextRunAt)}</p>
+        <p className="text-[11px] leading-4 text-slate-700">Next: {dateTime(trigger.nextRunAt, { weekday: true })}</p>
       ) : null}
       {trigger.dailyLimit ? (
         <p
@@ -803,7 +783,7 @@ function TriggerCard({ reviewing, scheduler, trigger, onChanged, onEdit, onRevie
       {latest ? (
         <div className="flex items-center gap-1.5 text-[11px] leading-4 text-muted">
           <StatusPill status={latest.status} />
-          <span>{formatWhen(latest.at)}</span>
+          <span>{dateTime(latest.at, { weekday: true })}</span>
         </div>
       ) : null}
       {trigger.runEditsWithoutApproval ? (
@@ -876,7 +856,7 @@ function ActivityList({ events, triggers }) {
             <div className="flex items-center gap-1.5">
               <StatusPill status={event.status} />
               <span className="min-w-0 flex-1 truncate font-medium text-ink">{titles[event.triggerId] ?? event.triggerId}</span>
-              <span className="shrink-0 text-muted">{formatWhen(event.at)}</span>
+              <span className="shrink-0 text-muted">{dateTime(event.at, { weekday: true })}</span>
             </div>
             {event.message ? <p className="mt-1 text-muted">{event.message}</p> : null}
           </li>

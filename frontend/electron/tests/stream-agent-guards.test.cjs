@@ -21,18 +21,8 @@ const { createFirefoxEngine, findFirefox } = require("../firefox-engine.cjs");
 const { FirefoxContents } = require("../firefox-contents.cjs");
 const { createAgentBrowserController } = require("../agent-browser.cjs");
 const { remSiteAllowed, sanitizeBrowserPolicy } = require("../browser-policy.cjs");
-
-function chromiumForTesting() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    for (const entry of fs.readdirSync(root).filter((name) => /^chromium-\d+$/.test(name)).sort().reverse()) {
-      for (const candidate of [path.join(root, entry, "chrome-linux64", "chrome"), path.join(root, entry, "chrome-linux", "chrome")]) {
-        if (fs.existsSync(candidate)) return candidate;
-      }
-    }
-  } catch { /* No Playwright downloads. */ }
-  return "";
-}
+const { chromiumForTesting, waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 10_000, interval: 50 };
 
 const EDGE_PATH = process.env.RATICODE_SKIP_EDGE_TESTS === "1" ? "" : (findBrowser(EDGE) || (process.platform === "linux" ? chromiumForTesting() : ""));
 const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromiumForTesting() : ""));
@@ -106,16 +96,6 @@ async function startSite() {
   return { server, base: `http://127.0.0.1:${server.address().port}` };
 }
 
-async function waitFor(check, message, timeout = 10000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(message);
-}
-
 for (const browser of BROWSERS) {
   test(`Rem's tools keep Raticode's rules and reach frames, dialogs and hidden tabs in ${/^[AEIOU]/.test(browser.name) ? "an" : "a"} ${browser.name} tab`, { skip: browser.skip, timeout: 180000 }, async () => {
     const { server, base } = await startSite();
@@ -171,12 +151,12 @@ for (const browser of BROWSERS) {
         const shown = await call("click", { ref: ref("Alert") });
         assert.equal(shown.dialog?.type, "alert");
         await call("dialog", { accept: true });
-        await waitFor(async () => (await out()) === "alerted", `out was ${await out()}`, 4000);
+        await waitFor(async () => (await out()) === "alerted", `out was ${await out()}`, { ...WAIT, timeout: 4000 });
       });
       await check("same-origin frame", async () => {
         ({ snapshot } = await call("snapshot"));
         await call("click", { ref: ref("Inside") });
-        await waitFor(async () => (await out()) === "framed:true", `out was ${await out()}`, 4000);
+        await waitFor(async () => (await out()) === "framed:true", `out was ${await out()}`, { ...WAIT, timeout: 4000 });
       });
       await check("frames inside frames load", async () => {
         const started = Date.now();
@@ -199,7 +179,7 @@ for (const browser of BROWSERS) {
       await check("pop-up", async () => {
         ({ snapshot } = await call("snapshot"));
         await call("click", { ref: ref("Pop") });
-        await waitFor(() => popups.includes(`${base}/two`), `pop-ups were ${JSON.stringify(popups)}`, 4000);
+        await waitFor(() => popups.includes(`${base}/two`), `pop-ups were ${JSON.stringify(popups)}`, { ...WAIT, timeout: 4000 });
       });
       await check("redirect to a blocked site", async () => {
         ({ snapshot } = await call("snapshot"));

@@ -14,15 +14,22 @@ same key raises at import.
 
 A ``Mount`` groups the routes under a prefix. It gives any request under the prefix
 that no route matches the answer the old hand-written dispatcher gave, and it maps
-the exceptions its handlers raise to answers. OPTIONS never matches: the preflight
-answer stays the same for every path.
+the exceptions its handlers raise to answers. Mounts may nest: the innermost one that
+covers a path answers for it, so ``/api/rem/kanban`` can keep a different miss answer
+from ``/api/rem``. A route can map exceptions of its own; those are checked before its
+Mount's. OPTIONS never matches: the preflight answer stays the same for every path.
 
 The CLI parity check (``tests/helpers/cli_parity.py``) reads ``Route.key`` from the
-table, so a route declared here is checked against ``docs/cli-parity.json``.
+table, so a route declared here is checked against ``docs/cli-parity.json``. A route
+moved from an old if-chain may keep the broader key that chain had, where ``*`` stood
+for any text, slashes included (``parity_key="GET /api/workflows/*/events"`` for
+``/api/workflows/{workflow_id}/logs/{run_id}/events``). The table refuses a parity key
+that doesn't cover the route's own path.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -45,6 +52,8 @@ class Route:
     handler: str  # the request handler's method name, looked up per request
     body: int | None = None  # None: reads no body; 0: the default limit; n: limit in bytes
     status: int = 200  # status of a successful answer
+    errors: ErrorMap = ()  # this route's own answers, checked before its Mount's
+    parity_key: str | None = None  # an old if-chain's broader key; see the module doc
 
     @property
     def segments(self) -> tuple[str | None, ...]:
@@ -58,6 +67,10 @@ class Route:
     @property
     def key(self) -> str:
         """The CLI parity manifest's key: ``POST /api/rattish/triggers/*/approve``."""
+        return self.parity_key or self.path_key
+
+    @property
+    def path_key(self) -> str:
         path = "/".join("*" if _is_param(part) else part for part in self.path.split("/"))
         return f"{self.method} {path}"
 
@@ -77,6 +90,14 @@ class RouteRequest:
     params: dict[str, str]  # {"trigger_id": "trg_0f3c..."}
     query: dict[str, list[str]]  # parse_qs of the query string
     body: dict[str, Any] | None  # the JSON body when the route reads one
+    # The version of a polled answer the client already has (X-Gofer-Known header, or
+    # the known query value from older clients); "" when it sent none.
+    known: str = ""
+
+
+# What a handler returns when it sent its own answer, such as a stream of events, so
+# the server sends nothing more.
+ANSWERED: Any = object()
 
 
 @dataclass(frozen=True)
@@ -99,6 +120,12 @@ def _is_param(part: str) -> bool:
     return len(part) > 2 and part.startswith("{") and part.endswith("}")
 
 
+def _covers(parity_key: str, path_key: str) -> bool:
+    """Whether a key whose ``*`` spans slashes matches the route's own key."""
+    pattern = ".+".join(re.escape(part) for part in parity_key.split("*"))
+    return re.fullmatch(pattern, path_key) is not None
+
+
 class RouteTable:
     def __init__(self) -> None:
         self._routes: dict[str, Route] = {}
@@ -109,8 +136,8 @@ class RouteTable:
         return tuple(self._routes.values())
 
     def mount(self, mount: Mount) -> Mount:
-        if any(mount.covers(other.prefix) or other.covers(mount.prefix) for other in self._mounts):
-            raise ValueError(f"Mount {mount.prefix} overlaps another mount")
+        if any(other.prefix == mount.prefix for other in self._mounts):
+            raise ValueError(f"Two mounts have the prefix {mount.prefix}")
         self._mounts.append(mount)
         return mount
 
@@ -124,18 +151,37 @@ class RouteTable:
                 raise ValueError(f"Route path has an unreadable segment: {route.path}")
         if len(set(route.params)) != len(route.params):
             raise ValueError(f"Route path repeats a parameter name: {route.path}")
+        if route.parity_key is not None and not _covers(route.parity_key, route.path_key):
+            raise ValueError(f"Parity key {route.parity_key} doesn't cover {route.path_key}")
         if route.key in self._routes:
             raise ValueError(f"Two routes have the key {route.key}")
         self._routes[route.key] = route
         return route
 
     def route(
-        self, method: str, path: str, *, body: int | None = None, status: int = 200
+        self,
+        method: str,
+        path: str,
+        *,
+        body: int | None = None,
+        status: int = 200,
+        errors: ErrorMap = (),
+        parity_key: str | None = None,
     ) -> Callable[[Handler], Handler]:
         """Register the decorated handler method for ``method`` and ``path``."""
 
         def register(handler: Handler) -> Handler:
-            self.add(Route(method, path, handler.__name__, body=body, status=status))
+            self.add(
+                Route(
+                    method,
+                    path,
+                    handler.__name__,
+                    body=body,
+                    status=status,
+                    errors=errors,
+                    parity_key=parity_key,
+                )
+            )
             return handler
 
         return register
@@ -144,7 +190,12 @@ class RouteTable:
         """The route for a request, a Mount's miss answer, or None to fall through."""
         if method == "OPTIONS":
             return None
-        mount = next((m for m in self._mounts if m.covers(path)), None)
+        # The innermost Mount that covers the path: the one with the longest prefix.
+        mount = max(
+            (m for m in self._mounts if m.covers(path)),
+            key=lambda m: len(m.prefix),
+            default=None,
+        )
         parts = path.split("/")
         best: tuple[tuple[int, ...], Route] | None = None
         for route in self._routes.values():
@@ -169,7 +220,7 @@ class RouteTable:
             return Found(
                 route,
                 dict(zip(route.params, values, strict=True)),
-                errors=mount.errors if mount else (),
+                errors=route.errors + (mount.errors if mount else ()),
             )
         if mount is not None:
             return Found(None, {}, miss=mount.miss)

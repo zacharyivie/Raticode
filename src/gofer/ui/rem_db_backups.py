@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from gofer.utils.atomic_output import replace_file
+
 if TYPE_CHECKING:
     from gofer.ui.rem_home_store import RemHomeStore
 
@@ -600,13 +602,7 @@ def _read_json(path: Path) -> Any:
 
 
 def _write_json(path: Path, value: Any) -> None:
-    partial = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    _private_file(partial)
-    try:
-        partial.write_text(json.dumps(value, indent=2), encoding="utf-8")
-        os.replace(partial, path)
-    finally:
-        partial.unlink(missing_ok=True)
+    replace_file(path, json.dumps(value, indent=2).encode("utf-8"))
 
 
 # Notices that couldn't be written to notices.json (a full disk), by data folder. This

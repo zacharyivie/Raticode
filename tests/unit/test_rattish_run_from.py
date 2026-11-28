@@ -212,7 +212,12 @@ class Fake:
         node_id = node["id"]
         self.calls[node_id] += 1
         self.inputs.append((node_id, dict(context.workflow_inputs)))
-        result = {"stdout": f"{node_id}-{self.calls[node_id]}", "stderr": "", "exit_code": 0}
+        result = {
+            "stdout": f"{node_id}-{self.calls[node_id]}",
+            "stderr": "",
+            "exit_code": 0,
+            "truncated": False,
+        }
         if node_id == "review" and "implement" in context.node_outputs:
             # The review cycle: ask for one more pass the first time only.
             self.reviews += 1

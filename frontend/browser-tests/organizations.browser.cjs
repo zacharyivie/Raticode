@@ -22,7 +22,7 @@ async function main() {
   });
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(root, "frontend"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", cacheDir: testViteCacheDir(), root: path.join(root, "frontend"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "organization-ui-test",
     resolveId(id) { if (["/organization-entry.jsx", "/organization-global-entry.jsx"].includes(id)) return id; },
     load(id) { if (id === "/organization-global-entry.jsx") return `import React, {useState} from "react"; import {createRoot} from "react-dom/client"; import OrganizationWorkspace from "/src/components/OrganizationWorkspace.jsx"; import OrganizationSidebar from "/src/components/OrganizationSidebar.jsx"; import "/src/styles/index.css";
@@ -57,17 +57,17 @@ async function main() {
   async function field(label, value) { await evaluate(`(() => { const label = [...document.querySelectorAll('label')].find(l => l.querySelector('span')?.textContent === ${JSON.stringify(label)}); const input = label.querySelector('input,textarea'); input.focus(); Object.getOwnPropertyDescriptor(input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', {bubbles:true})); })()`); }
   await wait("document.querySelector('.org-form') !== null");
   await field("Organization name", "Launch studio"); await field("Purpose", "Build and review releases");
-  await field("Maximum runs per task", "");
+  await field("Maximum runs per ticket", "");
   assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Maximum runs')).querySelector('input').value"), "");
-  await field("Maximum runs per task", "25"); await evaluate("document.activeElement.blur()");
+  await field("Maximum runs per ticket", "25"); await evaluate("document.activeElement.blur()");
   await click("Create organization"); await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Launch studio'");
   // Organization members are workers in anything users read (GLOSSARY.md), never employees.
   assert.equal(await evaluate("document.querySelector('.org-tabs button')?.textContent"), "Workers");
   assert.deepEqual(await evaluate("[...document.querySelectorAll('.org-tabs button, h1, h2, h3, h4, [aria-label]')].map(e => `${e.textContent} ${e.getAttribute('aria-label') || ''}`).filter(text => /\\bemployees?\\b/i.test(text))"), []);
   await click("Worker"); await field("Worker name", "Mira"); await field("Title", "Release engineer"); await field("Worker instructions", "Implement assigned releases and attach test evidence.");
-  await field("Check-in interval in seconds, 0 is automatic", "");
+  await field("Check-in interval, 0 is automatic", "");
   assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Check-in interval')).querySelector('input').value"), "");
-  await field("Check-in interval in seconds, 0 is automatic", "0"); await evaluate("document.activeElement.blur()");
+  await field("Check-in interval, 0 is automatic", "0"); await evaluate("document.activeElement.blur()");
   await click("Save worker"); await wait("document.querySelector('.org-person strong')?.textContent === 'Mira'");
   await field("Assignment for Mira", "Verify the release checks"); await click("Assign work");
   // Start asks for confirmation and summarizes what will run.
@@ -109,11 +109,11 @@ async function main() {
   await evaluate("document.querySelector('main').style.width = ''");
   await click("Cancel");
   // New-task forms cannot be replaced accidentally by selecting another row underneath them.
-  await click("Work"); await click("Back to work queue"); await click("New task");
+  await click("Work"); await click("Back to work queue"); await click("New ticket");
   assert.equal(await evaluate("document.querySelectorAll('.org-task').length"), 0);
-  await field("Task title", "Approval-gated follow-up");
+  await field("Ticket title", "Approval-gated follow-up");
   await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.includes('Require approval')).querySelector('input').click()");
-  await click("Save task"); await wait("document.querySelector('.org-conversation h3')?.textContent === 'Approval-gated follow-up'");
+  await click("Save ticket"); await wait("document.querySelector('.org-conversation h3')?.textContent === 'Approval-gated follow-up'");
   await click("Back to work queue");
   await wait("document.querySelector('.org-work-group h4')?.textContent.includes('Needs approval')");
   // Plans are approved from the task, where the description is visible.
@@ -275,13 +275,13 @@ async function main() {
   await field("Assumed seconds per run", "15"); await evaluate("document.activeElement.blur()");
   await click("Rehearse"); await wait("document.querySelector('.org-operation-table') !== null");
   await evaluate("[...document.querySelectorAll('summary')].find(s=>s.textContent==='Add a routine').click()");
-  await field("Routine name", "Daily review"); await field("Task title", "Review routine output");
+  await field("Routine name", "Daily review"); await field("Ticket title", "Review routine output");
   await field("Cron schedule, blank for API only", "");
   assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent==='Cron schedule, blank for API only').querySelector('input').value"), "");
   await field("Cron schedule, blank for API only", "0 9 * * 1-5"); await evaluate("document.activeElement.blur()");
   await click("Save routine"); await wait("document.querySelector('.org-routine strong')?.textContent === 'Daily review'");
   await click("Queue occurrence");
-  await wait("document.querySelector('.org-routine').textContent.includes('Previous task: todo')");
+  await wait("document.querySelector('.org-routine').textContent.includes('Previous ticket: todo')");
   await click("Refresh outcomes");
   await wait("document.querySelector('.org-operations').textContent.includes('Cost per accepted result')");
   await evaluate("[...document.querySelectorAll('summary')].find(s=>s.textContent==='Add or edit a destination').click()");
@@ -308,11 +308,11 @@ async function main() {
   await field("Search work", "routine output");
   assert.equal(await evaluate("document.querySelectorAll('.org-task').length"), 1);
   await field("Search work", "");
-  await click("New task"); await field("Task title", "Review acceptance test");
+  await click("New ticket"); await field("Ticket title", "Review acceptance test");
   await field("Evidence", "Saved test evidence");
   await select("Status", "In review");
   await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.includes('Require independent completion review')).querySelector('input').click()");
-  await click("Save task");
+  await click("Save ticket");
   await wait("document.querySelector('.org-conversation h3')?.textContent === 'Review acceptance test'");
   await field("Review reason", "Checked the result independently"); await click("Accept result");
   await wait("document.querySelector('.org-conversation .org-status')?.textContent === 'Done'");

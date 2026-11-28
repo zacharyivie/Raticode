@@ -29,7 +29,7 @@ object DesktopViews {
         Computers.PLACE -> Computers.PLACEMENT
         Kanban.TICKET, Kanban.PARTICIPANT -> Kanban.BOARD
         Kanban.TIMELINE -> Kanban.timelineKey(params)
-        Kanban.SETTINGS, Kanban.SEEN, Kanban.STOP -> Kanban.SELF_WORK
+        Kanban.SETTINGS, Kanban.SEEN, Kanban.STOP, Kanban.OBJECTIVES -> Kanban.SELF_WORK
         "media.image" -> ChatImages.KEY + params.optString("url")
         "media.preview" -> ChatPreviews.KEY + params.optString("url")
         "rem.draft" -> "rem.draft"
@@ -132,7 +132,8 @@ object DesktopViews {
         "rem.thread" -> RemThread(json.optString("thread_id"), json.optString("title"), json.optBoolean("running"), json.optInt("earlier"),
             json.objects("messages").map { RemThreadMessage(it.optString("id"), it.optString("role"), it.optString("body"), it.optString("kind"),
                 it.optInt("count"), it.objects("steps").map { s -> RemThreadStep(s.optString("kind"), s.optString("title"), s.optString("detail"),
-                    s.optString("body"), s.optString("command"), s.optString("status")) }, it.optString("sender")) })
+                    s.optString("body"), s.optString("command"), s.optString("status")) }, it.optString("sender"),
+                if (it.optString("role") == "user") emptyList() else linkedFiles(it)) })
         "organizations.list" -> json.objects("organizations").map { OrganizationSummary(it.optString("organization_id"), it.optString("name"),
             it.optString("state"), it.optInt("employees"), it.optInt("open_tasks"), it.strings("projects"), it.optInt("needs_you"),
             it.optString("pause_reason"), it.optBoolean("archived")) }
@@ -188,7 +189,15 @@ object DesktopViews {
         if (m.optString("role") == "user") m.strings("queued_after").filter { it.isNotBlank() }.take(10).map { it.take(160) } else emptyList(),
         if (m.optString("role") == "user") null else m.optJSONObject("self_work_report")?.let(::selfWorkReport),
         // Changes the user asked Rem for, each waiting for OK or settled; only on Rem's own replies.
-        if (m.optString("role") == "user") emptyList() else RemDecisions.parseEdits(m.optJSONArray("decision_edits")))
+        if (m.optString("role") == "user") emptyList() else RemDecisions.parseEdits(m.optJSONArray("decision_edits")),
+        if (m.optString("role") == "user") emptyList() else linkedFiles(m))
+
+    /** At most 8, each with a file link the phone may send back; instructions and the user's own messages have none. */
+    private fun linkedFiles(m: JSONObject) = m.objects("linked_files").mapNotNull { f ->
+        (ChatLinks.classify(f.optString("href")) as? ChatLink.File)?.let { link ->
+            RemLinkedFile(f.optString("name").take(160).ifBlank { link.name }, f.optLong("size").coerceAtLeast(0), link)
+        }
+    }.distinctBy { it.link.destination }.take(8)
 
     /** What one period of self-work did, under its report message. An older desktop sends none, and only the body shows. */
     private fun selfWorkReport(r: JSONObject) = RemSelfWorkReport(r.optString("period_id").take(128), r.optString("started_at").take(80),
@@ -234,11 +243,16 @@ object DesktopViews {
         } else null, TicketMentions.parseRefs(it.optJSONArray("tickets")), it.optString("step").take(20),
         RunPause.by(it.optString("paused_by")),
         RemSleep.parse(it.optJSONObject("sleep")),
-        RunThere.parse(it.optJSONObject("suggestion"))) }
+        RunThere.parse(it.optJSONObject("suggestion")),
+        // The review's notes, sent with the checks by a desktop that has them.
+        it.objects("review_notes").take(40).map { n ->
+            RemReviewNote(n.optString("severity").take(20), n.optString("axis").take(20), n.optString("file").take(500), n.optString("explanation").take(1500))
+        }) }
 
     private fun remTask(t: JSONObject) = RemTask(t.optString("task_id"), t.optString("title"), t.optString("type"), t.optString("state"),
         t.optLong("revision", 1), t.optJSONObject("schedule").let { s -> RemSchedule(s?.optString("kind") ?: "once", s?.optString("at").orEmpty(),
-            s?.optString("local_time").orEmpty(), s?.strings("weekdays").orEmpty(), s?.optInt("every_minutes") ?: 0) },
+            s?.optString("local_time").orEmpty(), s?.strings("weekdays").orEmpty(), s?.optInt("every_minutes") ?: 0,
+            s?.optString("cron").orEmpty().take(120), s?.optString("summary").orEmpty().take(120), s?.optString("timezone").orEmpty().take(80)) },
         t.optString("next_occurrence_at"), t.optString("project_name"), remRun(t.optJSONObject("active_run")), remRun(t.optJSONObject("last_run")),
         t.optString("prompt"), t.optString("provider"), t.optString("model"), t.strings("criteria"),
         t.objects("runs").mapNotNull { remRun(it) }, t.optString("ran_at"), (t.opt("listed") as? Boolean), t.optString("cleanup_at"),
@@ -422,7 +436,15 @@ data class RemMessage(val id: String, val role: String, val body: String, val cr
                       /** On the message posted when self-work stops: the tasks it started in that period. */
                       val selfWorkReport: RemSelfWorkReport? = null,
                       /** Changes to decisions the user asked Rem for in this chat, with before and after; OK applies one. */
-                      val decisionEdits: List<RemDecisionEdit> = emptyList())
+                      val decisionEdits: List<RemDecisionEdit> = emptyList(),
+                      /** Desktop files the message links to, shown under it like the user's attachments. */
+                      val linkedFiles: List<RemLinkedFile> = emptyList())
+/**
+ * A desktop file a Rem message links to. [link] is the link exactly as the message writes it: opening the file sends
+ * it with `files.link`, the same request as tapping the link, so the desktop checks the file again. Nothing is copied
+ * until then.
+ */
+data class RemLinkedFile(val name: String, val size: Long, val link: ChatLink.File)
 /**
  * One period of self-work, from when it started to when it stopped. [endedBy] is `window`, `user` or `condition`; [counts]
  * holds `started`, `finished`, `paused`, `blocked`, `tickets_created`, `tickets_moved` and `proposals`.
@@ -479,7 +501,9 @@ data class RemRun(val id: String, val state: String, val createdAt: String, val 
                   /** The worker's sleep while it waits for something outside Raticode; null when awake or from an older desktop. */
                   val sleep: RemSleep? = null,
                   /** A paired desktop with room while this run waits, offered as Run there; null otherwise or from an older desktop. */
-                  val suggestion: RunThere.Suggestion? = null) {
+                  val suggestion: RunThere.Suggestion? = null,
+                  /** Review findings that never sent the work back; empty from an older desktop or a task list. */
+                  val notes: List<RemReviewNote> = emptyList()) {
     /** Neither running nor finished: kept with its thread and worktree until it is resumed. */
     val paused get() = state == RunPause.PAUSED
     val active get() = state in setOf("queued", "executing", "verifying", "repairing", "cancelling")
@@ -499,7 +523,13 @@ data class RemSleep(val waitingFor: String, val until: String, val wakes: Int, v
         }
     }
 }
-data class RemSchedule(val kind: String, val at: String, val localTime: String, val weekdays: List<String>, val everyMinutes: Int)
+/**
+ * A task's schedule. [cron] is a Custom schedule's expression and [summary] the desktop's words for it, such as
+ * "Weekdays at 9:00", empty for an unusual expression; an older desktop sends neither. [timezone] is the zone
+ * [localTime] and [cron] are read in.
+ */
+data class RemSchedule(val kind: String, val at: String, val localTime: String, val weekdays: List<String>, val everyMinutes: Int,
+                       val cron: String = "", val summary: String = "", val timezone: String = "")
 data class RemTask(val id: String, val title: String, val type: String, val state: String, val revision: Long, val schedule: RemSchedule,
                    val nextAt: String, val project: String, val activeRun: RemRun?, val lastRun: RemRun?, val prompt: String = "",
                    val provider: String = "", val model: String = "", val criteria: List<String> = emptyList(), val runs: List<RemRun> = emptyList(),
@@ -604,7 +634,9 @@ data class RemThreadStep(val kind: String, val title: String, val detail: String
 data class RemThreadMessage(val id: String, val role: String, val body: String, val kind: String,
                             val count: Int = 0, val steps: List<RemThreadStep> = emptyList(),
                             /** Who wrote an instruction: `rem` or `user`; empty from an older desktop. */
-                            val sender: String = "")
+                            val sender: String = "",
+                            /** Desktop files a worker's reply links to, shown under it as in Rem's chat. */
+                            val linkedFiles: List<RemLinkedFile> = emptyList())
 data class RemThread(val id: String, val title: String, val running: Boolean, val earlier: Int, val messages: List<RemThreadMessage>)
 /** [needsYou] counts Rem's requests plus tickets to review, unblock or approve; 0 from an older desktop. */
 data class OrganizationSummary(val id: String, val name: String, val state: String, val employees: Int, val openTasks: Int, val projects: List<String>,

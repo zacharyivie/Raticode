@@ -48,7 +48,7 @@ function formatTriggerContextItems(triggerContext) {
 const JSON_PARAMETER_TYPES = new Set(["array", "object"]);
 
 // Text shown in a Run dialog field. List and object values are edited as JSON.
-export function runParameterDraftValue(spec, value) {
+function runParameterDraftValue(spec, value) {
   if (value === undefined || value === null) return "";
   if (JSON_PARAMETER_TYPES.has(spec?.type) && typeof value !== "string") {
     return JSON.stringify(value);
@@ -534,7 +534,7 @@ function RunParameterField({ error, name, onChange, spec, value }) {
 
 // A file input: Choose file, a drop zone and the path, which can also be typed.
 // The desktop sends the path; the run copies the file into its own folder when it starts.
-export function RunFileField({ error, name, onChange, spec, value }) {
+function RunFileField({ error, name, onChange, spec, value }) {
   const id = `run-param-${name}`;
   const pickerRef = useRef(null);
   const [dragging, setDragging] = useState(false);

@@ -6,10 +6,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from pathlib import Path
 from typing import Any
-
-import pytest
 
 from gofer.ui.brain_documents import (
     HTML_READER,
@@ -20,7 +17,7 @@ from gofer.ui.brain_documents import (
     html_text,
     validate_portable,
 )
-from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_task
 
 REPORT = """<!doctype html><html><head><title>Search report</title>
@@ -38,13 +35,6 @@ real search results.</div></div></section>
 <p>ReadableHTML turns headings into paragraph breaks and nothing else.</p></section>
 <h5>Not a section</h5><p>A level-five heading stays body text under the h3.</p>
 <p>Done</p></body></html>"""
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def by_text(blocks: list[dict[str, Any]]) -> dict[str, str]:

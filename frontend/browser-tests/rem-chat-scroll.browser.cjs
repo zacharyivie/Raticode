@@ -73,7 +73,7 @@ createRoot(document.getElementById("root")).render(<App />);`;
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root, logLevel: "error", cacheDir: testViteCacheDir("rem-chat-scroll"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", root, logLevel: "error", cacheDir: testViteCacheDir("rem-chat-scroll"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "rem-chat-scroll",
     resolveId(id) { if (id === "/rem-chat-scroll-entry.jsx") return id; },
     load(id) { if (id === "/rem-chat-scroll-entry.jsx") return entry; },

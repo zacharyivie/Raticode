@@ -15,6 +15,7 @@ def line(level: str, message: str, source: str = "backend", **extra: Any) -> str
     return json.dumps({**record, "message": message, **extra}) + "\n"
 
 
+# Appends log lines, unlike the shared write.
 def write(path: Path, *lines: str) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.writelines(lines)

@@ -9,12 +9,13 @@ from typing import Any
 
 import pytest
 
-from gofer.ui import brain_library as library_module
+from gofer.ui import brain_packages
 from gofer.ui.brain_backups import existing_backups
 from gofer.ui.brain_library import BrainLibrary
 from gofer.ui.case_twins import CaseTwinError, case_twins, existing_twin
 from gofer.ui.report_outputs import ReportTools
 from gofer.ui.second_brain import SecondBrain
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_task
 
 TWIN_ERROR = r"a/Note\.md and a/note\.md differ only by letter case"
@@ -27,13 +28,6 @@ def case_sensitive(folder: Path) -> bool:
         return not (folder / "CASE-PROBE").exists()
     finally:
         probe.unlink()
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 @pytest.fixture
@@ -53,13 +47,13 @@ def twin_brain(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
 
 def test_export_refuses_twins_before_reading_any_file(library, twin_brain, tmp_path, monkeypatch):
     reads: list[str] = []
-    real_read = library_module.read_source
+    real_read = brain_packages.read_source
 
     def counted(root: Path, relative: str, *args: Any) -> bytes:
         reads.append(relative)
         return real_read(root, relative, *args)
 
-    monkeypatch.setattr(library_module, "read_source", counted)
+    monkeypatch.setattr(brain_packages, "read_source", counted)
     for purpose in ("complete", "documents"):
         target = tmp_path / f"{purpose}.zip"
         with pytest.raises(CaseTwinError, match=TWIN_ERROR):

@@ -17,6 +17,7 @@ from gofer.rattish.editor import source_revision
 from gofer.rattish.run_service import rerun_rattish_run, resume_rattish_run, run_rattish_file
 from gofer.rattish.runtime import HandlerResult, NodeHandlerRegistry
 from gofer.rattish.workspaces import create_registered_workflow
+from gofer.ui.workflow_runs import run_error_message
 from tests.unit.test_device_application import application as application
 from tests.unit.test_device_application import event
 from tests.unit.test_device_desktop_control import phone as phone
@@ -45,7 +46,9 @@ def desk(phone, tmp_path, monkeypatch):
         ran.append(node["id"])
         while not release.is_set():
             await anyio.sleep(0.01)
-        return HandlerResult(True, {"stdout": "done", "stderr": "", "exit_code": 0})
+        return HandlerResult(
+            True, {"stdout": "done", "stderr": "", "exit_code": 0, "truncated": False}
+        )
 
     async def fake_run(*args, **kwargs):
         return await run_rattish_file(
@@ -664,6 +667,50 @@ def test_a_run_asked_to_stop_shows_stop_requested_on_the_phone():
     assert ended["status"] == "stopped"
 
 
+def test_a_failed_run_row_says_why_it_stopped(desk):
+    phone_workflows = desk[0].desktop.workflows
+    message = "Node test exited with code 1\n" + "x" * 400
+    cut = run_error_message({"error": {"message": message}})
+    assert len(cut) == 300
+    root = Path("/home/me/notes")
+    failed = phone_workflows._row({"id": "r1", "status": "error", "error": cut}, root, "Notes")
+    assert failed["status"] == "failed" and failed["error"] == cut
+    interrupted = {"id": "r2", "status": "disconnected", "error": f"Lost {root}/a.txt"}
+    assert phone_workflows._row(interrupted, root, "Notes")["error"] == "Lost Notes/a.txt"
+    stopped = phone_workflows._row({"id": "r3", "status": "stopped", "error": "Stopped"}, root, "N")
+    assert stopped["error"] == "Stopped"
+    # Succeeded and running rows say nothing, even if the record holds old text.
+    for status in ("success", "running"):
+        row = phone_workflows._row({"id": "r4", "status": status, "error": "old"}, root, "N")
+        assert "error" not in row
+    assert "error" not in phone_workflows._row({"id": "r5", "status": "error"}, root, "N")
+    # A list's error cut partway through the project's path doesn't show the part before the cut.
+    long = run_error_message({"error": {"message": "x" * 280 + f" missing {root}/a/b.txt"}})
+    row = phone_workflows._row({"id": "r6", "status": "error", "error": long}, root, "Notes")
+    assert "/home" not in row["error"] and row["error"].endswith("missing …")
+
+
+def test_all_runs_and_a_workflows_runs_carry_a_failed_runs_error(desk):
+    app, peer, context, send, add, release, ran, base = desk
+    root = context["projects"][0]["root"]
+    workflow = add(root, "Phone check")
+    release.set()
+    anyio.run(functools.partial(api.run_rattish_file, workflow.entrypoint, data_dir=base))
+    # Make the finished run a failed one, as a failing Node test step leaves it.
+    path = api._rattish_run_artifact_paths(base, workflow.workflow_id)[0]
+    document = json.loads(path.read_text(encoding="utf-8"))
+    message = f"Node test exited with code 1\nin {root}/tests\n" + "x" * 400
+    document.update(status="error", error={"message": message})
+    path.write_text(json.dumps(document), encoding="utf-8")
+    wanted = run_error_message(document).replace(root, "Notes")
+
+    listed = send("desktop.read", "workflows.runs", {"since": "24h"})["value"]["runs"]
+    assert [(r["status"], r["error"]) for r in listed] == [("failed", wanted)]
+    view = send("desktop.read", "workflows.read", {"workflow_id": workflow.workflow_id})["value"]
+    assert view["runs"][0]["error"] == wanted and view["latest_run"]["error"] == wanted
+    assert root not in json.dumps(listed)
+
+
 def test_all_runs_list_open_projects_newest_first_with_phone_starts(desk, tmp_path):
     app, peer, context, send, add, release, ran, base = desk
     root = context["projects"][0]["root"]
@@ -823,7 +870,7 @@ def test_phone_lists_a_workflows_triggers_and_turns_them_off_and_on(desk, tmp_pa
     assert list(listed) == [cron.id, files.id, hook.id]
     assert listed[cron.id]["kind"] == "cron" and listed[cron.id]["kind_label"] == "Schedule"
     assert listed[cron.id]["label"] == "Weekday digest"
-    assert listed[cron.id]["description"] == "0 9 * * 1-5 (UTC)"
+    assert listed[cron.id]["description"] == "Weekdays at 9:00 (UTC)"
     assert listed[cron.id]["next_run_at"]
     assert listed[cron.id]["last_result"]["status"] == "failed"
     assert listed[cron.id]["last_result"]["message"] == "Failed in Notes/build"

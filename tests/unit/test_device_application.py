@@ -749,3 +749,42 @@ def test_remove_revoked_does_not_unpair_active_device(application):
     with pytest.raises(PairingError, match="use_remove_revoked"):
         app.remove_peer(peer)
     assert app.registry.list()[0]["state"] == "revoked"
+
+
+def test_each_answered_phone_event_kind_routes_to_its_method():
+    from gofer.devices import application as module
+
+    assert set(module.EVENT_HANDLERS) <= module._EVENT_TYPES
+    assert {name: handler.__name__ for name, handler in module.EVENT_HANDLERS.items()} == {
+        "thread.create": "_thread_create",
+        "sync.request": "_sync_request",
+        "fleet.request": "_fleet_request",
+        **dict.fromkeys(
+            ("file.offer", "file.chunk", "file.request", "file.status", "file.cancel"),
+            "_file_event",
+        ),
+        "job.get": "_job_lookup",
+        "job.cancel": "_job_lookup",
+        "request.cancel": "_request_cancel",
+        "job.submit": "_job_submit",
+        "chat.submit": "_submit",
+    }
+    for handler in module.EVENT_HANDLERS.values():
+        assert getattr(DeviceApplication, handler.__name__) is handler
+
+
+def test_unanswered_event_kind_is_recorded_then_answered_unsupported(application):
+    app, peer = application
+    request = event("made.up")
+    first = app._handle(peer, request, "digest", None)
+    assert [answer["payload"] for answer in first] == [
+        {
+            "code": "unsupported",
+            "retryable": False,
+            "detail": "This application operation is not enabled",
+        }
+    ]
+    # The replay check still runs before any routing: a resend gets the same answer.
+    assert app._handle(peer, request, "digest", None) == first
+    with pytest.raises(PairingError, match="event_id_conflict"):
+        app._handle(peer, request, "other digest", None)

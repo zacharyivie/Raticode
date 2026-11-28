@@ -1,6 +1,9 @@
 // Turns an organization read result into the linked model behind the Organizations views:
 // projects, milestones, epics, tickets, runs, claims, knowledge and their links.
 
+import { clockTime, dateTime, weekdayName } from "./timeText.js";
+import { waitingReasonText } from "./organizations.js";
+
 export const COLUMNS = ["backlog", "todo", "running", "review", "done"];
 export const COLUMN_LABELS = { backlog: "Backlog", todo: "To do", running: "In progress", review: "Review", done: "Done" };
 export const KINDS = { decision: "Decision", note: "Note", report: "Report", spec: "Spec", finding: "Finding" };
@@ -8,7 +11,7 @@ export const EVIDENCE_LABELS = { ok: "Verified", warn: "Source changed", bad: "F
 const PROJECT_COLORS = ["#215879", "#17767b", "#6a4bb0", "#8f5d16", "#2f6fb3", "#a13c36", "#5f6f2a", "#4d5d6a"];
 const WORKER_COLORS = ["#6a4bb0", "#215879", "#17767b", "#2f6fb3", "#a13c36", "#8f5d16", "#5f6f2a", "#7a4a7f", "#3b6e5a", "#4d5d6a"];
 
-export function hashColor(id = "", palette = WORKER_COLORS) {
+function hashColor(id = "", palette = WORKER_COLORS) {
   let hash = 0;
   for (const char of String(id)) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   return palette[hash % palette.length];
@@ -79,7 +82,7 @@ export function buildModel(organization) {
       observed: new Set(reads),
       claims: claimsByTask[task.id] || [],
       runs: runsByTask[task.id] || [],
-      flag: task.status === "blocked" ? task.blockReason || "Blocked, with no reason recorded. Check its conversation, then reopen it." : task.approvalRequired && task.approvedRevision == null && task.status !== "done" ? "Needs your approval before it runs" : "",
+      flag: task.status === "blocked" ? waitingReasonText(task.blockReason) || "Blocked, with no reason recorded. Check its conversation, then reopen it." : task.approvalRequired && task.approvedRevision == null && task.status !== "done" ? "Needs your approval before it runs" : "",
     };
     tickets[task.id] = ticket;
     byKey[ticket.key] = task.id;
@@ -388,11 +391,12 @@ export function startHint(model, ticket) {
   if (reason === "Assign an employee") return { tone: "you", text: "No worker is assigned, so it won't run. Edit the ticket to assign one." };
   if (reason === "Employee is held") return { tone: "you", text: `${name} is held. Release the hold in their details to let it run.` };
   if (reason === "Waiting for plan approval") return { tone: "you", text: "Waiting for you to approve its plan." };
-  if (reason.startsWith("Scheduled for ")) return { tone: "wait", text: `Scheduled to start ${formatWhen(reason.slice(14))}.` };
+  if (reason.startsWith("Scheduled for ")) return { tone: "wait", text: `Scheduled to start ${dateTime(reason.slice(14))}.` };
   if (reason.startsWith("Queued: ")) return { tone: "wait", text: `${reason.slice(8)}; this one starts after.` };
   if (reason.startsWith("Waiting for monthly run capacity") || reason.startsWith("Monthly ")) return { tone: "you", text: `${reason}. Raise the limit or wait for next month.` };
   const yours = /cancelled|no longer exists|Reassign|Move the ticket|Reopen|reopen|Raise|unavailable|outside|Assign/.test(reason);
-  return reason ? { tone: yours ? "you" : "wait", text: reason.endsWith(".") ? reason : `${reason}.` } : null;
+  const text = waitingReasonText(reason);
+  return reason ? { tone: yours ? "you" : "wait", text: text.endsWith(".") ? text : `${text}.` } : null;
 }
 
 // Where a dragged card may go. Done always goes through review. Moving a card to In progress
@@ -414,7 +418,7 @@ export function moveRule(ticket, column) {
 }
 
 // Topic groups placed around the middle, largest first, so their outlines don't overlap.
-export function topicSpots(topics) {
+function topicSpots(topics) {
   const ring = [[0.5, 0.45], [0.16, 0.24], [0.84, 0.24], [0.16, 0.76], [0.84, 0.76], [0.5, 0.86], [0.5, 0.1], [0.33, 0.5], [0.67, 0.5]];
   const spots = {};
   topics.forEach((topic, index) => {
@@ -468,32 +472,6 @@ export function layoutGraph(nodes, edges, width, height, positions, topicOf) {
 
 export { shortTitle };
 
-// A date with its time, in your own time zone.
-export function formatWhen(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
-export function formatDate(value) {
-  if (!value) return "";
-  const date = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00` : value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-export function timeAgo(value, now = Date.now()) {
-  const seconds = Math.max(0, (now - Date.parse(value)) / 1000);
-  if (!Number.isFinite(seconds)) return "";
-  if (seconds < 60) return "now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} min`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h`;
-  return `${Math.floor(seconds / 86400)} d`;
-}
-
-// "just now", "5 min ago", "3 d ago".
-export function ago(value, now = Date.now()) {
-  const span = timeAgo(value, now);
-  return !span ? "" : span === "now" ? "just now" : `${span} ago`;
-}
 
 // Recent activity as one line each, with a reference to open.
 export function activityFeed(model, events = [], limit = 8) {
@@ -556,13 +534,12 @@ export function describeHours(hours) {
   return `${parts.join("; ")}, ${hours.timezone}`;
 }
 
-// A moment in the organization's time zone, such as "Mon 09:00".
+// A moment in the organization's time zone, such as "Mon 9:00 AM EST". The zone is named,
+// since the organization's hours may not be in your own time zone.
 export function zoneTime(value, timezone) {
-  if (!value) return "";
-  try {
-    // The zone is named, since the organization's hours may not be in your own time zone.
-    return new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: timezone, timeZoneName: "short" }).format(new Date(value));
-  } catch { return formatDate(value); }
+  const timeZone = timezone || undefined;
+  const day = weekdayName(value, { timeZone });
+  return day && `${day} ${clockTime(value, { timeZone, zoneName: true })}`;
 }
 
 // The header's working-hours state: null when the organization works around the clock.

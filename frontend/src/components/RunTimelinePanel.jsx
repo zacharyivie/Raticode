@@ -6,6 +6,8 @@ import { timelineRowCanAskRem } from "../lib/askRemAboutFailure.js";
 import { usageLimitWaitText } from "../lib/workflowRuns.js";
 import AskRemButton from "./AskRemButton.jsx";
 import { RunErrorReason, RunStatus } from "./RunSummary.jsx";
+import { useOffReason } from "./OffReason.jsx";
+import { dateTime } from "../lib/timeText.js";
 
 const DEFAULT_RETENTION_SETTINGS = {
   keepDays: 14,
@@ -34,6 +36,7 @@ export function RunTimelinePanel({
   onStopRun,
   onToggle,
   retentionSettings = DEFAULT_RETENTION_SETTINGS,
+  retentionWarning = null,
   text,
   title,
   usageSummary,
@@ -238,51 +241,17 @@ export function RunTimelinePanel({
                   <div className="workflow-scrollbar max-h-60 overflow-y-auto">
                     {runs.length ? (
                       runs.map((run) => (
-                        <div
+                        <PreviousRunRow
                           key={run.id}
-                          className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition hover:bg-slate-50 ${
-                            selectedRunId === run.id ? "bg-indigo-50" : ""
-                          }`}
-                        >
-                          <button
-                            className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                            type="button"
-                            onClick={() => {
-                              setHistoryOpen(false);
-                              onSelectRun?.(run.id);
-                            }}
-                          >
-                            <RunPickerLabel run={run}>
-                              {run.usage?.calls ? (
-                                <div className="truncate text-[11px] text-muted">
-                                  Tokens {run.usage.tokensLabel} · est. cost {run.usage.costLabel}
-                                </div>
-                              ) : null}
-                            </RunPickerLabel>
-                          </button>
-                          {run.status === "running" && run.stopRequested ? (
-                            <StopRequestedLabel />
-                          ) : run.status === "running" ? (
-                            <button
-                              className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-red-600 transition hover:border-red-200 hover:bg-red-50"
-                              title="Stop this run"
-                              type="button"
-                              onClick={() => onStopRun?.(run.id)}
-                            >
-                              <Square size={12} fill="currentColor" strokeWidth={1.7} />
-                            </button>
-                          ) : onResumeRun ? (
-                            <button
-                              className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-indigo-700 transition hover:border-indigo-200 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40"
-                              disabled={run.resume ? !run.resume.allowed : false}
-                              title={run.resume && !run.resume.allowed ? run.resume.reason : "Resume this run"}
-                              type="button"
-                              onClick={() => onResumeRun(run.id, {})}
-                            >
-                              <Repeat2 size={13} />
-                            </button>
-                          ) : null}
-                        </div>
+                          run={run}
+                          selected={selectedRunId === run.id}
+                          onResumeRun={onResumeRun}
+                          onSelect={() => {
+                            setHistoryOpen(false);
+                            onSelectRun?.(run.id);
+                          }}
+                          onStopRun={onStopRun}
+                        />
                       ))
                     ) : (
                       <div className="px-3 py-4 text-xs text-muted">No previous runs.</div>
@@ -309,6 +278,14 @@ export function RunTimelinePanel({
                     <div className="mt-1 text-muted">
                       Older runs are removed after each run. Preview or prune now.
                     </div>
+                    {retentionWarning ? (
+                      <div
+                        className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                        role="status"
+                      >
+                        {retentionWarning}
+                      </div>
+                    ) : null}
                     <div className="mt-3 grid gap-2">
                       <label className="grid gap-1">
                         <span className="font-medium text-muted">Keep latest runs</span>
@@ -768,6 +745,54 @@ function UsageLimitWaitLine({ run }) {
 
 // Shown in place of Stop until the run ends. Its owner may be another process,
 // such as the background trigger scheduler, which stops it on its next check.
+// One run in the Previous runs list, with its Stop or Resume button. An off
+// Resume keeps its name and says why in a line under the row.
+function PreviousRunRow({ onResumeRun, onSelect, onStopRun, run, selected }) {
+  const running = run.status === "running";
+  const resumeOff = useOffReason(
+    !running && onResumeRun && run.resume && !run.resume.allowed ? run.resume.reason || "This run can't resume." : "",
+  );
+  return (
+    <div className={`px-3 py-2 text-xs transition hover:bg-slate-50 ${selected ? "bg-indigo-50" : ""}`}>
+      <div className="flex w-full items-center gap-2 text-left">
+        <button className="flex min-w-0 flex-1 items-center gap-2 text-left" type="button" onClick={onSelect}>
+          <RunPickerLabel run={run}>
+            {run.usage?.calls ? (
+              <div className="truncate text-[11px] text-muted">
+                Tokens {run.usage.tokensLabel} · est. cost {run.usage.costLabel}
+              </div>
+            ) : null}
+          </RunPickerLabel>
+        </button>
+        {running && run.stopRequested ? (
+          <StopRequestedLabel />
+        ) : running ? (
+          <button
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-red-600 transition hover:border-red-200 hover:bg-red-50"
+            title="Stop this run"
+            type="button"
+            onClick={() => onStopRun?.(run.id)}
+          >
+            <Square size={12} fill="currentColor" strokeWidth={1.7} />
+          </button>
+        ) : onResumeRun ? (
+          <button
+            {...resumeOff.props}
+            aria-label="Resume this run"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-indigo-700 transition hover:border-indigo-200 hover:bg-indigo-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 aria-disabled:hover:border-line aria-disabled:hover:bg-white"
+            title="Resume this run"
+            type="button"
+            onClick={resumeOff.guard(() => onResumeRun(run.id, {}))}
+          >
+            <Repeat2 aria-hidden="true" size={13} />
+          </button>
+        ) : null}
+      </div>
+      {resumeOff.line ? <div className="mt-1">{resumeOff.line}</div> : null}
+    </div>
+  );
+}
+
 export function StopRequestedLabel() {
   return (
     <span className="shrink-0 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800" role="status">
@@ -794,7 +819,7 @@ export function RunStatusDot({ status }) {
         ? "bg-red-500"
         : status === "allowed_failure"
           ? "bg-orange-400"
-        : status === "stopped"
+        : status === "stopped" || status === "truncated"
           ? "bg-amber-500"
           : "bg-slate-400";
   return <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${color}`} />;
@@ -804,8 +829,5 @@ export function formatRunLabel(run) {
   if (!run?.startedAt) return "Run";
   const date = new Date(run.startedAt);
   if (Number.isNaN(date.getTime())) return run.startedAt;
-  return date.toLocaleString([], {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+  return dateTime(date);
 }

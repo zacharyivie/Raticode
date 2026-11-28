@@ -1,3 +1,4 @@
+require("./test-tmp.cjs");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -7,7 +8,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { pathToFileURL } = require("node:url");
 const { createIpcSecurity } = require("../security.cjs");
+const { inspectPath } = require("../path-info.cjs");
 const safeFiles = require("../safe-files.cjs");
+const { writeFileAtomicSync } = require("../atomic-file.cjs");
 const policy = require("../studio-policy.cjs");
 const corpus = require("../../../tests/fixtures/path-containment.json");
 const mainSource = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
@@ -457,10 +460,8 @@ test("Rem, Markdown and HTML shared file opener requests a user grant and uses i
     window: { goferDesktop: { workspace: {
       grantUserPath: target => security.grantUserPath(target),
       trustProjectRoot: () => { throw new Error("must not grant agent access"); },
-      getPathInfo: target => {
-        security.resolveAllowedPath(target, { grantId: security.userGrantForPath(target), mustExist: true });
-        return { path: target, isFile: true };
-      },
+      // Like main.js's pathInfo: it needs no grant, follows links and grants nothing.
+      getPathInfo: target => inspectPath(security.resolveDesktopPath(target, { mustExist: false })),
     } } },
     openCodeFile: (...args) => opened.push(args),
     setTopBarNotice: notice => notices.push(notice),
@@ -577,7 +578,7 @@ test("native selection, file project lookup and settings do not wait for backend
     registerBackendPathGrant: () => assert.fail("User actions must not contact the backend"),
     mainWindow: null, resolvePickerDefaultPath: () => inside,
     dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: [file] }) },
-    remSettings: () => ({}), app: { getPath: () => inside },
+    remSettings: () => ({}), app: { getPath: () => inside }, writeFileAtomicSync,
     // Choosing an archive folder checks archive retention, which is off unless the user sets an age.
     retentionRuns: 0, runArchiveRetention: () => { context.retentionRuns += 1; },
   };

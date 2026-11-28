@@ -44,24 +44,41 @@ npm run test:serial   # everything in one process
   repository root or worktree. It runs `ruff check src tests`, `mypy src tests`,
   the repository-wide test files in its `REPO_WIDE_TESTS` list (CLI parity, the
   scripting contract, the website address and mobile download, the phone
-  protocol, no credential on the command line),
-  `scripts/check-website-docs.py`, `scripts/check-commit-messages.py`,
+  protocol, no credential on the command line, `tests/unit/test_check_dev.py`),
+  the tests of changed modules, `scripts/check-website-docs.py`, `scripts/check-commit-messages.py`,
   `scripts/check-dead-code.py`, `mobile/android/scripts/check-contract.py` and
-  `scripts/check-protocol-compat.py`, and prints one PASS or FAIL line for each
-  (SKIP for the protocol compat check in a clone without `v*` tags). Don't land
-  while any line says FAIL. It takes about a minute. The phone's Gradle interop
-  tests in `contract-check.yml` stay CI-only.
+  `scripts/check-protocol-compat.py`, plus `npm run lint` in `frontend/` when
+  `git diff --name-only dev...HEAD` lists a file under `frontend/`, and prints one
+  PASS or FAIL line for each. SKIP marks the protocol compat check in a clone
+  without `v*` tags and the frontend lint when no frontend file changed. The
+  frontend lint fails when `frontend/node_modules` is missing: run `npm ci` in
+  `frontend/` first, or link the main checkout's `node_modules` into a worktree.
+  Don't land while any line says FAIL. It takes about a minute. The phone's
+  Gradle interop tests in `contract-check.yml` stay CI-only. It doesn't run
+  `npm audit`, which needs the network.
+- The "tests of changed modules" check runs, with the same pytest flags and
+  workers, every test file under `tests/` that imports a `src/gofer/**/*.py`
+  module `git diff --name-only dev...HEAD` lists (`import gofer.a.b`,
+  `from gofer.a.b import ...` or `from gofer.a import b`), less the files in
+  `REPO_WIDE_TESTS`. It prints SKIP when no such module changed or no test imports
+  one, and when more than 150 files match; then run the full suite (below).
 - `scripts/check-dead-code.py` fails when a function, class, method or UPPER_CASE
   module constant in `src/gofer`, an export in `frontend/src` or `frontend/electron`, or a frontend
   module has no callers anywhere in the repository (tests and browser tests
   count). Delete the unused code. Only when it's kept on purpose, add a line to
-  `scripts/dead-code-allowlist.txt` with the reason.
+  `scripts/dead-code-allowlist.txt` with the reason. A `path:name`, route or CSS
+  line there that no longer matches anything fails the check too
+  (`(allowlist line matches nothing)`); delete it with the code it excused.
 - It also fails on production code only tests call: a `src/gofer` definition or a
   frontend export whose name appears outside its own definition only in `tests/`,
   `*.test.*`, browser tests or `frontend/electron/tests` (printed with
   `(only tests use it)`). Point the tests at the production path, make the app
   call the helper it copies inline, or delete it with its tests. A helper kept
   for tests needs an allowlist reason that starts with `test seam:`.
+- It also fails on an export only its own file uses: an `export` in `frontend/src`
+  or `frontend/electron` (test files left out) whose name appears as a word in no
+  other file the check searches (printed with `(export only its own file uses)`).
+  Drop the `export` keyword.
 - It also fails on a dependency nothing uses: a package in `pyproject.toml`'s
   `[project].dependencies` or its `devices` or `xlsx` extra that no file under
   `src/gofer`, `scripts` or `packaging` imports and `raticode.spec` doesn't name
@@ -90,6 +107,16 @@ npm run test:serial   # everything in one process
   (`st-${state}` covers `.st-running`). Delete the rule, or the dead class's part
   of a shared selector. A class a library adds, such as `.xterm-*`, gets an
   allowlist line; CSS lines may use `*` patterns.
+- It also fails on scripts nothing runs (printed with `(script nothing runs)`): a
+  file directly under `scripts/` that no other file in the repository, `docs/`,
+  `benchmarks/` or the root Markdown names by file name, and a `*.browser.cjs` or
+  `run-*.cjs` file under `frontend/browser-tests` or `frontend/electron/tests`
+  that no non-test file names, either by file name or by its short name as a
+  quoted string (`"usage"` in `run-studio-browser.cjs`'s list covers
+  `usage.browser.cjs`), and no other browser test requires. `*.test.cjs` files
+  are skipped, since `npm test` runs them all. Give a kept browser test an npm
+  script in `frontend/package.json`, list a kept probe in `benchmarks/README.md`
+  with its run command, or delete the file.
 - Commit messages carry no `Co-Authored-By` line for an AI tool and no
   "Generated with ..." line, even when your tool adds one by default.
   `scripts/check-commit-messages.py` fails on them; amend or reword those
@@ -113,6 +140,10 @@ npm run test:serial   # everything in one process
   `-n` (`tests/helpers/serial_tests.py`). Don't drop it.
 - Rich folds output at 80 columns and xdist makes temporary paths longer, so
   compare paths in CLI output after joining the lines.
+- Tests must pass in any temp folder, however long its path or whatever its name
+  holds (Rem's worker scratch folders are long and contain `x` and `-scratch`):
+  don't count characters in text that includes a path, cap argument sizes below
+  the OS limit, or find folders by a word in their path.
 - `npm test` (`frontend/electron/tests/run-tests.cjs`) runs the files in its
   `SEPARATE` list in their own processes, 2 at a time beside the unit tests.
   Add a new slow real-browser or git file there. `RATICODE_TEST_JOBS` changes
@@ -128,7 +159,7 @@ npm run test:serial   # everything in one process
   `.venv` synced with the `dev` extra:
 
   ```bash
-  env -u FORCE_COLOR NO_COLOR=1 PYTHONPATH=src systemd-run --user --scope --quiet -p MemoryMax=6G -p MemorySwapMax=0 --setenv=PATH=$PATH .venv/bin/python -m pytest -n 8 --dist worksteal -q -p no:cacheprovider --no-header -rf tests
+  PYTHONPATH=src systemd-run --user --scope --quiet -p MemoryMax=6G -p MemorySwapMax=0 --setenv=PATH=$PATH .venv/bin/python -m pytest -n 8 --dist worksteal -q -p no:cacheprovider --no-header -rf tests
   ```
 
   and from `frontend/`:
@@ -228,7 +259,10 @@ Node step-2:
   scripts that spawn Electron go through its `backgroundLaunch()`. On Linux this
   runs Electron on a hidden Xvfb display (install `xvfb-run`) and a private,
   empty D-Bus session, so tests can't add tray icons, notifications or wallet
-  prompts to the desktop. `electron/tests/background-display.test.cjs` fails if
+  prompts to the desktop. A launch whose arguments include
+  `--ozone-platform=headless` keeps the private environment but skips Xvfb, for
+  tests that need no display and must run where Xvfb can't start, such as an
+  agent's sandbox. `electron/tests/background-display.test.cjs` fails if
   an entry script or launcher skips the helper. Set `RATICODE_TEST_VISIBLE=1`
   only when the user asks to watch a run.
 - Tests must not leave files behind. `/tmp` is often RAM-backed, and a single
@@ -237,7 +271,17 @@ Node step-2:
   `frontend/electron/tests/test-tmp.cjs` first, which moves the whole run to a
   disk-backed folder and removes it when the run ends, even after a failure.
   Loading `background-display.cjs` includes it. `electron/tests/test-tmp.test.cjs`
-  fails if a test skips this. Agents put their own scratch files, logs and build
+  fails if a test skips this. For a folder one test uses, call
+  `tempFolder(prefix, t)` from `frontend/electron/tests/temp-folder.cjs`, which
+  removes it when that test ends (without `t`, when the calling test ends), and
+  pass any Firefox engine or store that writes into it to
+  `stopBeforeRemoving(folder, engine)` so it stops before the folder goes.
+  `npm test` prints `ℹ temp_left_behind N` with its totals: entries the tests
+  left in the run folder, with their names, so a new leak shows up. Leftovers
+  from runs before the run folder existed are not removed automatically. To clear
+  them, older than an hour and owned by you, run
+  `find /tmp /tmp/claude-$(id -u) -maxdepth 1 -user $(id -u) -mmin +60 \( -name 'browser-sessions-??????' -o -name 'browser-pdf-??????' -o -name 'raticode-browser-window-??????' -o -name 'firefox-*-??????' \) -exec rm -rf -- {} +`
+  (leave off `-exec rm -rf -- {} +` to list them first). Agents put their own scratch files, logs and build
   output in a private folder on disk, not `/tmp`, and delete it when the task ends.
   Keep only what a report cites as evidence.
 - That private folder is outside the repository, for example

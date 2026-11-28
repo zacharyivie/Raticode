@@ -13,6 +13,16 @@ Find the layer that's failing: installation, provider, workflow validation, a ru
 - Check the download matches your system. The macOS build is for Apple Silicon; Windows and Linux builds are x64. See [Installation](../installation.md) for unsigned-build prompts and making the AppImage executable.
 - Building from source: select the repository's Node version with nvm and install both the Python and frontend dependencies. Don't mix dependencies from another checkout with a packaged release.
 
+## One view says it stopped working
+
+From 0.6.2, if something breaks while a view draws itself, only that view is replaced. You'll see a message like **Posts stopped working** with the error in one line, and the activity rail, Rem and your other views keep running. This covers Rem, Organizations, Second Brain, Kanban, Posts, Workflow runs, Swarms, the editor, the browser, a workflow's graph and the threads pane.
+
+- **Reload this view** draws the view again from scratch. Switching to another view and back does the same.
+- **Copy details** copies the full error report: the stack, the view's name, the Raticode version and your system.
+- **Report** opens a new GitHub issue with that report filled in.
+
+The error is also written to the app log under **Settings > Developer**. If the view breaks again after a reload, report it. The whole-window **Something snapped.** page appears only for errors outside every view, and its **Reload Raticode** button reloads the whole window.
+
 ## A provider is missing or can't sign in
 
 1. Run the provider's own CLI outside Raticode and check its login works.
@@ -80,11 +90,11 @@ Their schedules and file watches don't run any more either. The converter prints
 
 ## Report an issue
 
-Open an issue on [GitHub](https://github.com/zacharyivie/Raticode/issues) with:
+Choose **Help › Report a Problem** in the desktop app (from 0.6.2). It opens a new [GitHub](https://github.com/zacharyivie/Raticode/issues) issue with the Raticode version, your OS and architecture, and the Electron version filled in. **Help › About Raticode** shows the same details with a **Copy** button. On the phone, use **More › Help › Report a problem** (from Raticode Mobile 0.38.0). In **What happened**, add:
 
-- the Raticode version, your OS and architecture, and the provider CLI's version
+- the provider CLI's version, if a provider is involved
 - steps to reproduce
-- diagnostics from **Settings > Developer**, and a minimal failing Rattish file if you have one
+- log lines from **Settings > Developer**, and a minimal failing Rattish file if you have one
 
 Remove keys, tokens, private attachments and personal paths first. Keep your working state as it is; don't delete databases to make an error go away.
 

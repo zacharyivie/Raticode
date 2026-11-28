@@ -68,6 +68,14 @@ Each built-in contract also has a `catalog` entry that editors use to list it: a
 It is left out of the contract fingerprint, so rewording it never changes compiled IR or
 invalidates a saved workflow. A contract without one still loads and is listed under Other.
 
+Every property in `configuration_schema`, nested ones included, has a one-line
+`description` that the node inspector shows under the field's label. Take it from the
+field's Meaning cell in the Configuration table of the node's page in `website/docs/nodes/`,
+the docs source of truth, and keep it short and in sentence case.
+`tests/unit/test_rattish_contract_field_help.py` fails when a property has none. Like the
+catalog, `description` and `title` annotations in `configuration_schema` are left out of
+the contract fingerprint.
+
 These files do not expand common node fields such as `needs`, `to`, `timeout`, or
 `allow-fail`. The language contract owns those fields.
 

@@ -8,6 +8,7 @@ const { execFileSync } = require("node:child_process");
 const { unixTerminalShell } = require("../terminal-shell.cjs");
 const { scanProject } = require("../project-search.cjs");
 const safeFiles = require("../safe-files.cjs");
+const { helpMenuTemplate } = require("../help-menu.cjs");
 const source = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
 
 test("Mac installer URLs point at the canonical repository and require a listed installer", () => {
@@ -97,13 +98,19 @@ test("restart and quit share a renderer handshake; a foreign or cancelled respon
   await new Promise(resolve => setImmediate(resolve)); assert.equal(quits, 1);
 });
 
-test("Mac menus retain application, editing, services and window roles; other platforms retain the studio menus", () => {
+test("Mac menus retain application, editing, services, window and help roles; other platforms retain the studio menus", () => {
   const start = source.indexOf("  Menu.setApplicationMenu(");
   const end = source.indexOf("  setupIpcHandlers();", start);
   for (const platform of ["darwin", "linux", "win32"]) {
     let template;
-    vm.runInNewContext(source.slice(start, end), { process: { platform }, Menu: { buildFromTemplate: value => value, setApplicationMenu: value => { template = value; } } });
-    if (platform === "darwin") assert.deepEqual(Array.from(template.filter(item => item.role), item => item.role), ["appMenu", "editMenu", "windowMenu"]);
-    else assert.equal(template, null);
+    const sent = [];
+    const mainWindow = { isDestroyed: () => false, show() {}, webContents: { send: (channel, payload) => sent.push([channel, payload]) } };
+    vm.runInNewContext(source.slice(start, end), { helpMenuTemplate, mainWindow, process: { platform }, Menu: { buildFromTemplate: value => value, setApplicationMenu: value => { template = value; } } });
+    if (platform !== "darwin") { assert.equal(template, null); continue; }
+    assert.deepEqual(Array.from(template.filter(item => item.role), item => item.role), ["appMenu", "editMenu", "windowMenu", "help"]);
+    // Help's items run in the window, as the window's own Help menu does.
+    const help = template.find(item => item.role === "help");
+    help.submenu.find(item => item.label === "Report a Problem...").click();
+    assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["gofer:browser-command", { action: "help-menu", item: "help.reportProblem" }]]);
   }
 });

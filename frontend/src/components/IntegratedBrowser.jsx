@@ -961,7 +961,7 @@ export default function IntegratedBrowser({
 // Google refuses to sign in while Raticode controls Firefox or Chrome; a
 // normal window on the same profile can sign in, and the tabs here come back
 // signed in.
-export function FirefoxSignInBar({ onSignIn, name = "Firefox" }) {
+function FirefoxSignInBar({ onSignIn, name = "Firefox" }) {
   const [status, setStatus] = useState("");
   const opening = `Opening ${withArticle(name)} window…`;
   async function open() {
@@ -1101,7 +1101,7 @@ export function HtmlModeToggle({ editing, onModeChange }) {
 
 export { browserChromeShortcutAction };
 
-export function displayBrowserUrl(value) {
+function displayBrowserUrl(value) {
   return value === "about:blank" ? "" : String(value ?? "");
 }
 

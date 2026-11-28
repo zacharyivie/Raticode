@@ -3,6 +3,131 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used an earlier product name.
 
+## 0.6.2 - 2026-11-28
+
+Changes since the `v0.6.1` tag. Raticode Mobile 0.38.0 ships alongside it from
+its own `mobile-v0.38.0` tag; its changes are marked (phone).
+
+### Added
+
+- After an update, the toolbar says **Raticode updated to X.Y.Z** with a
+  **What's new** button that shows these notes; **Help › What's New** opens
+  them any time.
+- The **Help** menu has Documentation, Keyboard Shortcuts, Troubleshooting,
+  Report a Problem and About Raticode, and the phone's More page has Help
+  (phone).
+- Terminal: Ctrl+click (Cmd+click on macOS) opens web links and file paths in
+  the output, including Windows paths, Python traceback lines and compiler
+  `file(line,column)` output; a find bar searches the output (Ctrl+Shift+F,
+  Command+F on a Mac, or the right-click menu).
+- Workflows: copy, cut and paste nodes in the graph, within one workflow or
+  into another; "Did you mean" hints become one-click fixes in the editor and
+  in Problems; every node field shows a line of help in the inspector; cron
+  schedules read in words with their next run times; Run again, Resume and Run
+  workflow say why they're off.
+- A crash or forced quit loses at most the step that was running, so Resume no
+  longer redoes finished steps. Quit and Restart to update name the workflow
+  runs they would cut off and ask first.
+- A failed run's history line and run lists name the step that failed and its
+  exit code, on the desktop and the phone (phone).
+- File triggers run every changed file (past 256, the next run takes the
+  rest), and a trigger that is on but can't fire says why in its history.
+- HTTP request steps wait as long as a busy server asks before retrying, up to
+  5 minutes.
+- Rem tickets can be edited from their sheet on the desktop and their page on
+  the phone (phone). Quick open finds board tickets by key or title.
+- Each of Rem's projects has its own self-work objectives and a level of
+  effort that splits self-work's threads between projects; objectives move
+  between the global list and a project, fold stale ones under **Stale**, and
+  can be edited on the phone (phone). **Ask Rem** writes 3 to 5 broad
+  objectives for a project.
+- Files a Rem message or a worker's reply links show as attachments under it,
+  on desktop and phone (phone), and screenshots and logs a sandboxed worker
+  links stay in a kept evidence folder so their tiles still open later.
+- A crash in one desktop view shows **Reload this view** in that view instead
+  of replacing the whole window.
+- Thread chats show a new-messages button when replies arrive while you read
+  further up.
+- Second Brain's **Index needs attention** warning opens the saved error and
+  offers **Rebuild index**.
+- New workflow says when a starter's app is missing and lets you pick an
+  installed one.
+- With the desktop app open, the CLI says so instead of telling you to start a
+  second backend.
+- The phone's task screen reads Custom schedules in words and shows the
+  review's Notes (phone).
+- Organization settings take durations in minutes, hours or days, and a due
+  date from a date and time picker.
+- A Facebook or YouTube copy Raticode couldn't delete shows on the post in
+  Problems and backs off instead of retrying every 15 seconds.
+- Source control rows say each change in words.
+
+### Changed
+
+- The desktop app moves to Electron 45.5.0 (Chromium 156.0.8078.109).
+- Rem's spinners and progress bars move smoothly, and dismissing updates or
+  checking and removing objectives happens at once.
+- Rem no longer adds objectives of its own while any objective is still open.
+- Organizations say ticket, worker and check-in interval everywhere, including
+  error messages.
+- Relative times such as "3 h ago" and run lengths such as "5m 3s" read the
+  same way everywhere in the desktop app.
+
+### Fixed
+
+- Security: a sandboxed turn in a worktree can no longer write the
+  repository's git hooks or config, and can write its shared `.git` folder
+  only when that repository lists the worktree back; sandboxed cloud turns and
+  workflow agent steps hide every private Second Brain on this computer; a
+  clicked link asks about where it really leads before Raticode gets access;
+  work a paired desktop sends always runs under the handed-over limits; the
+  leftover temp file sweep can't be tricked into deleting folders outside
+  `/tmp`.
+- The app's third-party notices include the phone pairing packages its
+  backend ships.
+- Editing a ticket on the desktop no longer saves over a change made
+  somewhere else to the same field. On the phone, a change made on the
+  computer while the edit sheet is open is kept for the fields you didn't
+  touch (phone).
+- Triggers: a queued triggered run starts after a restart instead of being
+  dropped; a trigger start that hits an error is tried again; file triggers
+  watch a deleted, replaced or remounted folder again, look through it again
+  after losing changes in a burst, read `**` like loops do, count each file
+  once, and can't be stopped by a deeply nested folder; a fixed-time cron
+  schedule runs once on the day clocks go back.
+- Rem: a reply written as plain text shows as Rem's answer instead of "I
+  couldn't read my own reply"; one bad task change no longer fails a whole
+  reply; tasks no longer stop with "Too many active Rem turns" when more than
+  8 run at once; Auto mode and phone alerts handle folder names with spaces.
+- Workflows: long loops no longer slow down as they go; values containing
+  `{{` or `}}` go in as they are; route conditions on untyped data compile and
+  stop clearly when types don't fit; formatting keeps comments; command steps
+  keep their error text past the 2 MB output limit; HTTP request steps treat
+  header names the same in any case; workflow steps inside a sandboxed turn
+  run; projects opened together and workflows created at the same moment keep
+  each other's registrations.
+- Rem's reports stay readable on the phone in dark mode (phone), and an HTML
+  file with many unclosed style tags no longer freezes the phone's preview
+  (phone). The phone's Help works on Android 8 and 9, and Rem's only project
+  no longer shows level of effort buttons that always fail (phone).
+- A failed run's reason on the phone no longer shows part of a folder path
+  (phone), and a crash report issue doesn't name your account or home folder.
+- A task you resumed stays yours when Rem follows up to unblock it, and one a
+  workflow's message resumes isn't counted as resumed by you.
+- A queued triggered run that failed to start once isn't lost at the next
+  restart, and a route condition looking for a number in text is refused when
+  the workflow is checked instead of stopping the run.
+- The backend starts on a data folder whose network mount can't lock files;
+  Help › Keyboard Shortcuts switches back to Keybindings; What's new shows
+  after updating from 0.6.1; queued tests and builds still run when the user
+  message bus can't be reached; agent tokens lose two write rules for
+  addresses that don't exist.
+- Settings and data files are all saved the same safe way, and Raticode works
+  when a folder above its data folder is a symbolic link.
+- One social post's error no longer stops the others or replaces the message
+  of copies waiting for you.
+- Old-run clean-up pauses when its settings file can't be read.
+
 ## 0.6.1 - 2026-11-26
 
 Changes since the `v0.6.0` tag. Raticode Mobile 0.37.0 ships alongside it from

@@ -8,7 +8,8 @@ object RemThreadRows {
     sealed interface Row { val id: String }
     /** [author] is `rem` for Rem's prompt to the worker, `user` for the user's own, empty when the desktop doesn't say. */
     data class Instruction(override val id: String, val body: String, val author: String = "") : Row
-    data class Reply(override val id: String, val body: String) : Row
+    /** [linkedFiles] are the desktop files the reply links to, shown under it as tiles. */
+    data class Reply(override val id: String, val body: String, val linkedFiles: List<RemLinkedFile> = emptyList()) : Row
     data class Failure(override val id: String, val body: String) : Row
     /**
      * [replied] means a reply follows before the next instruction, so the group starts
@@ -35,7 +36,7 @@ object RemThreadRows {
                 message.role == "user" -> Instruction(message.id, message.body,
                     message.sender.takeIf { it == "rem" || it == "user" }.orEmpty())
                 message.kind == "error" -> Failure(message.id, message.body)
-                else -> Reply(message.id, message.body)
+                else -> Reply(message.id, message.body, message.linkedFiles)
             }
         }
         close()

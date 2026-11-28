@@ -1471,9 +1471,23 @@ class RemHomeStore:
         def operation(db: sqlite3.Connection) -> dict[str, Any]:
             dismissed: list[dict[str, Any]] = []
             needs_you = 0
+            # Only a task waiting for others, or one with a run in a state that needs
+            # attention, can be placed by ``attention``. Building every task's view held
+            # the write lock for most of a second with a thousand finished tasks; the
+            # runs' state column narrows it without reading their bodies.
+            flagged = {
+                row[0]
+                for row in db.execute(
+                    "SELECT DISTINCT task FROM runs WHERE state IN "
+                    f"({','.join('?' * len(NEEDS_ATTENTION))})",
+                    tuple(NEEDS_ATTENTION),
+                )
+            }
             for row in db.execute("SELECT body FROM tasks").fetchall():
                 task = json.loads(row[0])
-                if task.get("deleted_at"):
+                if task.get("deleted_at") or not (
+                    task["id"] in flagged or after_tasks.pending(task)
+                ):
                     continue
                 view = self.task_view(db, task, summary=True)
                 kind = attention(view)
@@ -1697,6 +1711,18 @@ class RemHomeStore:
                     run.get("active_turn_id") if run.get("active_thread_id") == identity else None
                 ),
             }
+
+    def thread_runs(self, identity: str) -> list[str]:
+        """IDs of the runs whose worker writes the work thread ``identity``."""
+        with self.read() as db:
+            return [
+                str(row[0])
+                for row in db.execute(
+                    "SELECT id FROM runs WHERE json_valid(body) "
+                    "AND json_extract(body, '$.thread_id')=?",
+                    (identity,),
+                )
+            ]
 
     def append_thread(self, identity: str, message: dict[str, Any]) -> None:
         self.append_threads(identity, [message])

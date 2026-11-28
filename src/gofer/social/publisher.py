@@ -6,11 +6,13 @@ that ownership, so there is one publisher per data folder and nothing is sent tw
 
 Each pass:
 
-- cancels posts the platform was holding when the user edited or cancelled them,
+- deletes copies a platform was holding when the user edited or cancelled the post,
+  backing off on errors and stopping for the user on a refusal or a login problem,
 - marks unapproved posts whose time and late window passed as expired,
 - hands far-off posts to platforms that schedule natively (Facebook, YouTube),
 - turns tap-to-publish variants (LinkedIn) into ``due`` at their time,
 - sends what is due, inside the late window, and marks the rest ``missed``,
+- holds back a variant while an older copy on its account still waits to be deleted,
 - never sends a variant whose result is unknown again on its own.
 
 A variant is marked ``publishing`` before its request leaves, so if the process dies
@@ -29,11 +31,12 @@ import anyio
 
 from gofer.core.http import HttpClient, UrllibHttpClient
 from gofer.social.accounts import AccountStore, SocialAccountError
-from gofer.social.models import RETRY_MINUTES
+from gofer.social.models import PLATFORMS, RETRY_MINUTES
 from gofer.social.policy import content_hash
 from gofer.social.providers import adapter_for
 from gofer.social.providers.base import Media, PublishError, PublishRequest
-from gofer.social.service import SocialService, iso, parse_time
+from gofer.social.service import SocialService, copy_key, iso, parse_time
+from gofer.utils.logging import RepeatingFailure
 
 log = logging.getLogger(__name__)
 ACTOR = "publisher"
@@ -51,7 +54,15 @@ ACTIVE_POST_STATES = (
     "failed",
     "cancelled",  # only to cancel copies a platform still holds
 )
+# The only variants an unexpected error shows "will try again" on: the ones the next pass
+# sends. A variant being sent, a finished one, or one waiting for the user (failed,
+# missed, held, needs_reconnect, outcome_unknown) keeps its own message.
+RETRIED_VARIANT_STATES = frozenset({"approved", "scheduled", "due"})
+POST_ERROR_PREFIX = "Raticode hit an error with this post ("
 Notify = Callable[[str, Mapping[str, Any]], None]
+OLD_COPY_MESSAGE = (
+    "Waiting for the earlier copy on {platform} to be deleted, so two copies can't go out."
+)
 
 
 def request_for(
@@ -92,6 +103,8 @@ class Publisher:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._tick_lock = threading.Lock()
+        # Keyed "pass:<post id>" or "cancel:<post id>", so each logs once while it repeats.
+        self._failures: dict[str, RepeatingFailure] = {}
 
     # Thread control ----------------------------------------------------------------
 
@@ -124,10 +137,85 @@ class Publisher:
         with self._tick_lock:
             moment = now or self.service.clock()
             paused = self.service.settings()["paused"]
+            seen: set[str] = set()
             for post in self.service.posts_in(ACTIVE_POST_STATES):
-                self._cancel_held(post)
-                if post["state"] != "cancelled":
-                    self._pass(post["id"], moment, paused)
+                seen.add(post["id"])
+                try:
+                    self._cancel_held(post, moment)
+                    if post["state"] != "cancelled":
+                        self._pass(post["id"], moment, paused)
+                except Exception as exc:  # noqa: BLE001 - one post must not stop the others
+                    self._post_failed(post["id"], exc)
+                else:
+                    self._post_recovered(post["id"])
+            # Copies left on posts the loop above skips (declined, expired, missed).
+            for post in self.service.posts_with_platform_copies(ACTIVE_POST_STATES):
+                seen.add(post["id"])
+                try:
+                    self._cancel_held(post, moment)
+                except Exception as exc:  # noqa: BLE001 - one post must not stop the others
+                    self._post_failed(post["id"], exc)
+                else:
+                    self._post_recovered(post["id"])
+            for key in [k for k in self._failures if k.split(":", 1)[1] not in seen]:
+                del self._failures[key]
+
+    def _failure(self, key: str, what: str) -> RepeatingFailure:
+        failure = self._failures.get(key)
+        if failure is None:
+            failure = self._failures[key] = RepeatingFailure(log, what)
+        return failure
+
+    def _post_failed(self, post_id: str, exc: Exception) -> None:
+        """Log an unexpected error once while it repeats, and tell the user once.
+
+        Only variants the next pass tries again get the message. Variants in
+        ``publishing`` are left alone: a send may be on its way, and the next pass's
+        outcome-unknown rule must still find them as they are.
+        """
+        key = f"pass:{post_id}"
+        first = key not in self._failures
+        failure = self._failure(key, f"Social post {post_id}")
+        before = failure.current
+        failure.failed(exc)
+        if failure.current == before:
+            return  # the same error again: already logged, shown and notified
+        message = f"{POST_ERROR_PREFIX}{type(exc).__name__}) and will try again."
+
+        def show(post: dict[str, Any]) -> bool:
+            changed = False
+            for item in post["variants"]:
+                if item["state"] not in RETRIED_VARIANT_STATES or item.get("message") == message:
+                    continue
+                item["message"] = message
+                changed = True
+            return changed
+
+        try:
+            self.service.update_post(post_id, show, ACTOR, "error", {"error": type(exc).__name__})
+        except Exception:  # noqa: BLE001 - the error is logged; showing it is best effort
+            log.debug("Couldn't show the error on social post %s", post_id, exc_info=True)
+        if first:
+            self.notify("problem", {"post": post_id})
+
+    def _post_recovered(self, post_id: str) -> None:
+        failure = self._failures.pop(f"pass:{post_id}", None)
+        if failure is None:
+            return
+        failure.succeeded()
+
+        def clear(post: dict[str, Any]) -> bool:
+            changed = False
+            for item in post["variants"]:
+                if str(item.get("message") or "").startswith(POST_ERROR_PREFIX):
+                    item["message"] = ""
+                    changed = True
+            return changed
+
+        try:
+            self.service.update_post(post_id, clear, ACTOR, "error_cleared", {})
+        except Exception:  # noqa: BLE001 - a stale message must not stop the other posts
+            log.debug("Couldn't clear the error on social post %s", post_id, exc_info=True)
 
     def _late(self, post: Mapping[str, Any], now: datetime) -> bool:
         when = parse_time(post.get("scheduled_at"))
@@ -204,7 +292,8 @@ class Publisher:
             return
         if state == "scheduled" and not due_now and self._can_hold(variant, when, now):
             # Facebook and YouTube publish it themselves, even with this computer off.
-            self._send(post, variant, now, publish_at=when)
+            if not self._waits_for_old_copy(post, variant):
+                self._send(post, variant, now, publish_at=when)
             return
         if not due_now and not tapped:
             return
@@ -225,7 +314,8 @@ class Publisher:
                 self._set(post_id, variant_id, "due", state="due", message="")
                 self.notify("due", {"post": post_id, "variant": variant_id})
             return
-        self._send(post, variant, now)
+        if not self._waits_for_old_copy(post, variant):
+            self._send(post, variant, now)
 
     def _claim(self, post: Mapping[str, Any], variant: Mapping[str, Any]) -> bool:
         """Mark the variant publishing, but only if the post is still what was approved.
@@ -433,36 +523,116 @@ class Publisher:
             self._set(post_id, variant_id, "failed", state="failed", message=error.message)
         self.notify("problem", {"post": post_id})
 
-    def _cancel_held(self, post: Mapping[str, Any]) -> None:
+    def _cancel_held(self, post: Mapping[str, Any], now: datetime) -> None:
+        """Delete copies a platform holds for an edited or cancelled post.
+
+        Each copy keeps its attempts, next try and last error. Network, server and rate
+        limit errors back off on ``RETRY_MINUTES``; a refusal, a login problem or a removed
+        account stops and waits for the user's Try again or I deleted it. The post is
+        saved and logged only when a copy was deleted or its record changed.
+        """
         pending = list(post.get("_cancel_native") or [])
-        if not pending:
-            return
-        remaining = []
+        deleted: set[str] = set()
+        changed: dict[str, dict[str, Any]] = {}
+        stopped = False
+        bug: Exception | None = None
         for item in pending:
-            adapter = adapter_for(item["platform"])
-            account = self._account(item)
-            if adapter is None or account is None:
+            key = copy_key(item)
+            retry_at = parse_time(item.get("next_try_at"))
+            if item.get("waiting") or (retry_at is not None and now < retry_at):
                 continue
             try:
-                secrets = self.service.accounts.read_secrets(account["id"])
+                outcome = self._delete_copy(item)
+            except Exception as exc:  # noqa: BLE001 - an adapter bug: don't guess, keep it
+                bug = exc
+                continue
+            if outcome is None:
+                deleted.add(key)
+                continue
+            attempts = int(item.get("attempts") or 0) + 1
+            update: dict[str, Any] = {"id": key, "attempts": attempts, "error": outcome.message}
+            if outcome.kind in {"transient", "outcome_unknown"}:
+                wait = timedelta(minutes=RETRY_MINUTES[min(attempts, len(RETRY_MINUTES)) - 1])
+                if outcome.retry_after_seconds is not None:
+                    wait = max(wait, timedelta(seconds=outcome.retry_after_seconds))
+                update.update(next_try_at=iso(now + wait), waiting=False)
+            else:
+                update.update(next_try_at=None, waiting=True)
+                stopped = True
+            if any(item.get(name) != value for name, value in update.items()):
+                changed[key] = update
+        failure_key = f"cancel:{post['id']}"
+        if bug is not None:
+            what = f"Cancelling social post {post['id']} on its platform"
+            self._failure(failure_key, what).failed(bug)
+        elif (fixed := self._failures.pop(failure_key, None)) is not None:
+            fixed.succeeded()
+        if not deleted and not changed:
+            return  # nothing changed, so nothing to save or log
 
-                def save_secrets(values: dict[str, str], account_id: str = account["id"]) -> None:
-                    self.service.accounts.write_secrets(account_id, values)
+        def change(p: dict[str, Any]) -> bool:
+            kept, touched = [], False
+            for item in p.get("_cancel_native") or []:
+                key = copy_key(item)
+                touched = touched or key in deleted or key in changed
+                if key in deleted:
+                    continue
+                item.update(changed.get(key, {}))
+                kept.append(item)
+            if not touched:
+                return False  # the user dealt with these copies in the meantime
+            p["_cancel_native"] = kept
+            return True
 
-                async def run(remote_id: str = item["remote_id"]) -> None:
-                    await adapter.cancel_native(remote_id, secrets, self.http, save_secrets)
+        detail = {"cancelled": len(deleted), "failed": len(changed)}
+        kind = "platform_copy_cancelled" if deleted else "platform_copy_not_deleted"
+        self.service.update_post(post["id"], change, ACTOR, kind, detail)
+        if stopped:
+            self.notify("problem", {"post": post["id"]})
 
-                anyio.run(run)
-            except (PublishError, SocialAccountError):
-                remaining.append(item)
+    def _delete_copy(self, item: Mapping[str, Any]) -> PublishError | None:
+        """Ask the platform to delete one held copy: None when it's gone, else why not."""
+        adapter = adapter_for(item["platform"])
+        account = self._account(item)
+        label = PLATFORMS[item["platform"]].label if item["platform"] in PLATFORMS else "it"
+        if adapter is None or account is None:
+            return PublishError(
+                "permanent",
+                f"The account was removed, so Raticode can't delete this copy. Delete it on "
+                f"{label} yourself, then choose I deleted it.",
+            )
+        try:
+            secrets = self.service.accounts.read_secrets(account["id"])
 
-        def change(p: dict[str, Any]) -> None:
-            p["_cancel_native"] = remaining
+            def save_secrets(values: dict[str, str]) -> None:
+                self.service.accounts.write_secrets(account["id"], values)
 
-        self.service.update_post(
-            post["id"],
-            change,
-            ACTOR,
-            "platform_copy_cancelled",
-            {"cancelled": len(pending) - len(remaining), "left": len(remaining)},
+            async def run() -> None:
+                await adapter.cancel_native(item["remote_id"], secrets, self.http, save_secrets)
+
+            anyio.run(run)
+        except PublishError as exc:
+            if exc.kind == "auth":
+                self.service.accounts.mark(account["id"], needs_reconnect=True)
+            return exc
+        except SocialAccountError as exc:
+            return PublishError("auth", str(exc))
+        return None
+
+    def _waits_for_old_copy(self, post: Mapping[str, Any], variant: Mapping[str, Any]) -> bool:
+        """Whether an older copy of this post on the same account still waits for deletion.
+
+        Sending now could put two copies out, so the variant waits until that copy is
+        deleted or the user marks it deleted. The variant's message says so, set once.
+        """
+        waiting = any(
+            item.get("account_id") == variant.get("account_id")
+            and item.get("platform") == variant["platform"]
+            for item in post.get("platform_copies") or []
         )
+        message = OLD_COPY_MESSAGE.format(platform=PLATFORMS[variant["platform"]].label)
+        if waiting and variant.get("message") != message:
+            self._set(post["id"], variant["id"], "waiting_for_old_copy", message=message)
+        elif not waiting and variant.get("message") == message:
+            self._set(post["id"], variant["id"], "old_copy_gone", message="")
+        return waiting

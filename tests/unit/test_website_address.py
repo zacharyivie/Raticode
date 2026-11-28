@@ -30,9 +30,13 @@ def test_desktop_package_links_the_website_and_files_issues_on_github() -> None:
     assert package["homepage"] == SITE
     assert package["bugs"]["url"] == f"{REPO}/issues"
     assert package["repository"]["url"] == f"git+{REPO}.git"
-    # The crash screen's "Open an issue" builds its address from bugs.url, not homepage.
+    # The crash screen's "Open an issue" and Help > Report a Problem build their address
+    # in one helper, from bugs.url, not homepage.
+    helper = (REPO_ROOT / "frontend/src/lib/issueReport.js").read_text(encoding="utf8")
+    assert "packageMetadata.bugs.url" in helper
+    assert "packageMetadata.homepage" not in helper
     crash = (REPO_ROOT / "frontend/src/components/AppCrashBoundary.jsx").read_text(encoding="utf8")
-    assert "packageMetadata.bugs.url" in crash
+    assert "newIssueUrl" in crash
     assert "packageMetadata.homepage" not in crash
 
 

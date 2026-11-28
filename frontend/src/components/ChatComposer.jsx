@@ -986,7 +986,7 @@ const UNTIDIED_NOTE = "Those words were added as heard, with basic capitals and 
 const HOLD_TAP_MS = 400;
 const HOLD_HINT = "Hold to talk: keep the mic pressed while you speak, and let go when you're done.";
 
-export function resizeChatComposerTextarea(textarea) {
+function resizeChatComposerTextarea(textarea) {
   if (!textarea) return;
   textarea.style.height = "auto";
   const contentHeight = Number(textarea.scrollHeight);

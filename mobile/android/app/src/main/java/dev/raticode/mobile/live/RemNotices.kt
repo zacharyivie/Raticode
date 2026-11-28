@@ -131,19 +131,12 @@ object RemNoticeText {
  * drops only the reads that name the workflow switch, for a desktop that still takes the filter but not that switch.
  */
 internal fun dropQueuedNoticeFilters(state: JSONObject, workflowOnly: Boolean = false): Boolean {
-    val outbox = state.optJSONArray("outbox") ?: return false
-    val kept = org.json.JSONArray()
-    for (i in 0 until outbox.length()) {
-        val event = JSONObject(outbox.getString(i))
+    return Outbox.drop(state) { event ->
         val payload = event.optJSONObject("payload")
         val include = payload?.optJSONObject("params")?.optJSONArray("include")
         val named = include != null && (!workflowOnly || (0 until include.length()).any { include.optString(it) == RemAlertRules.WORKFLOW })
-        val filtered = event.optString("type") == "desktop.read" && payload?.optString("op") == "rem.notices" && named
-        if (!filtered) kept.put(outbox.getString(i))
+        event.optString("type") == "desktop.read" && payload?.optString("op") == "rem.notices" && named
     }
-    if (kept.length() == outbox.length()) return false
-    state.put("outbox", kept)
-    return true
 }
 
 /**
@@ -151,13 +144,5 @@ internal fun dropQueuedNoticeFilters(state: JSONObject, workflowOnly: Boolean = 
  * rejects the unknown op and closes the session; the phone asks again once that desktop's overview reports support.
  */
 internal fun dropQueuedNoticeReads(state: JSONObject): Boolean {
-    val outbox = state.optJSONArray("outbox") ?: return false
-    val kept = org.json.JSONArray()
-    for (i in 0 until outbox.length()) {
-        val event = JSONObject(outbox.getString(i))
-        if (event.optString("type") != "desktop.read" || event.optJSONObject("payload")?.optString("op") != "rem.notices") kept.put(outbox.getString(i))
-    }
-    if (kept.length() == outbox.length()) return false
-    state.put("outbox", kept)
-    return true
+    return Outbox.drop(state) { it.optString("type") == "desktop.read" && it.optJSONObject("payload")?.optString("op") == "rem.notices" }
 }

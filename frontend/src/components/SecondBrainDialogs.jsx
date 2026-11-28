@@ -1,7 +1,8 @@
 import SecondBrainProvider, { useResearchSelection } from "./SecondBrainProvider.jsx";
 import { useEffect, useState } from "react";
 import { AlertTriangle, CircleCheck, FolderOpen, Library, ShieldCheck, Sparkles, FileArchive, Files, Quote } from "lucide-react";
-import { formatBytes, parseDateBound, searchLibrary, wordDiff, formatDay, formatTime, SUMMARY_MAX, summaryPatch, folderRuleFor } from "../lib/secondBrain.js";
+import { formatBytes, parseDateBound, searchLibrary, wordDiff, libraryDay, SUMMARY_MAX, summaryPatch, folderRuleFor } from "../lib/secondBrain.js";
+import { dateTime } from "../lib/timeText.js";
 import { useSecondBrain, viewFor, closeDialog, openDialog, createBrain, removeBrain, updateBrain, createCollection, updateCollection, addToCollection, navigate, saveSearch, documentById, blockById, updateReportCitation, updateClaim, updateReport, updateDocument, confirmReplacement, resolveHealth, startTask, notify, openDocument, captureSource, libraryFor, uid, getState, isSampleLibrary, previewAbsoluteLinks, historySize, passageCount, useDocumentHistory } from "../lib/secondBrainStore.js";
 import { brainRequest } from "../lib/secondBrainApi.js";
 import { DraftInput, Modal, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
@@ -77,7 +78,7 @@ function ImportBrain({ onClose }) {
   const here = identity === "restore-here";
   const restoreHere = () => { setIdentity("restore-here"); if (destination === defaultDestination) setDestination(registered.root); };
   const run = () => { onClose(); void startTask({ kind: "import", label: `${here ? "Restoring" : "Importing"} “${preview.name}”`, path: file, destination, identity, duplicates }); };
-  return <Modal wide={step === "preview"} title={step === "choose" ? "Import brain" : `Import “${preview.name}”`} description={step === "choose" ? "Import a Raticode brain package (.zip). Nothing is written until you review the preview." : `${preview.format} · exported ${formatDay(preview.exported)} · ${formatBytes(preview.size)}`} onClose={onClose}
+  return <Modal wide={step === "preview"} title={step === "choose" ? "Import brain" : `Import “${preview.name}”`} description={step === "choose" ? "Import a Raticode brain package (.zip). Nothing is written until you review the preview." : `${preview.format} · exported ${libraryDay(preview.exported)} · ${formatBytes(preview.size)}`} onClose={onClose}
     footer={step === "choose" ? <Footer onCancel={onClose} confirm="Preview import" disabled={!file.trim() || checking} onConfirm={previewImport} /> : <><button type="button" className="sb-button" onClick={() => setStep("choose")}>Back</button><Footer onCancel={onClose} confirm={here ? "Restore" : "Import"} onConfirm={run} note="Import runs in the background and can be cancelled." /></>}>
     {step === "choose" ? <>
       <PathField label="Package" directory={false} value={file} onChange={setFile} placeholder="/home/you/Downloads/field-research.zip" />
@@ -201,11 +202,11 @@ function VersionDiff({ docId, from, blockId, citation, reportId, onClose }) {
   return <Modal wide title={`Changes to “${doc.title}”`} description={`Version ${from} compared with the current version ${doc.version}${block ? ` · ${block.heading}` : ""}.`} onClose={onClose}
     footer={citation ? <><span className="sb-footer-note">The report keeps version {from} until you accept a change.</span><button type="button" className="sb-button" onClick={() => { updateReportCitation(reportId, citation.id, { state: "unreviewed" }); onClose(); }}>Keep original and flag claim</button><button type="button" className="sb-button sb-primary" onClick={() => { if (!quoteStillPresent) { onClose(); openDialog("relocate", { citation, reportId }); return; } updateReportCitation(reportId, citation.id, { state: "unreviewed", version: doc.version, blockId: doc.blocks.find(item => item.text.includes(citation.quote))?.id || citation.blockId, quote: citation.quote }); onClose(); notify("Citation updated to the current version."); }}>{quoteStillPresent ? "Use current passage" : "Choose replacement passage"}</button></> : <button type="button" className="sb-button" onClick={onClose}>Close</button>}>
     <div className="sb-diff">
-      <div><h4>Version {from}<small>{version ? formatTime(version.at) : ""}</small></h4><p>{parts.filter(part => part.kind !== "added").map((part, index) => part.kind === "removed" ? <del key={index}>{part.text}</del> : <span key={index}>{part.text}</span>)}</p></div>
-      <div><h4>Current · {doc.version}<small>{formatTime(doc.dates.modified)}</small></h4><p>{parts.filter(part => part.kind !== "removed").map((part, index) => part.kind === "added" ? <ins key={index}>{part.text}</ins> : <span key={index}>{part.text}</span>)}</p></div>
+      <div><h4>Version {from}<small>{version ? dateTime(version.at) : ""}</small></h4><p>{parts.filter(part => part.kind !== "added").map((part, index) => part.kind === "removed" ? <del key={index}>{part.text}</del> : <span key={index}>{part.text}</span>)}</p></div>
+      <div><h4>Current · {doc.version}<small>{dateTime(doc.dates.modified)}</small></h4><p>{parts.filter(part => part.kind !== "removed").map((part, index) => part.kind === "added" ? <ins key={index}>{part.text}</ins> : <span key={index}>{part.text}</span>)}</p></div>
     </div>
     {citation ? <p className="sb-inline-note" data-tone={quoteStillPresent ? "success" : "warning"}>{quoteStillPresent ? <CircleCheck size={14} aria-hidden="true" /> : <AlertTriangle size={14} aria-hidden="true" />}{quoteStillPresent ? "The cited quote still appears in the current version." : <>The cited quote “{citation.quote}” no longer appears. Check that the claim is still supported before using the current passage.</>}</p> : null}
-    {affected.length ? <section><h4>Reports that used an older version</h4><ul className="sb-issue-list">{affected.map(report => <li key={report.id}><Quote size={14} aria-hidden="true" /><span><button type="button" className="sb-link" onClick={() => { onClose(); navigate("reports", { reportId: report.id }); }}>{report.title}</button><small>Generated {formatDay(report.generatedAt, { relative: true })}</small></span></li>)}</ul></section> : null}
+    {affected.length ? <section><h4>Reports that used an older version</h4><ul className="sb-issue-list">{affected.map(report => <li key={report.id}><Quote size={14} aria-hidden="true" /><span><button type="button" className="sb-link" onClick={() => { onClose(); navigate("reports", { reportId: report.id }); }}>{report.title}</button><small>Generated {libraryDay(report.generatedAt, { relative: true })}</small></span></li>)}</ul></section> : null}
   </Modal>;
 }
 
@@ -299,7 +300,7 @@ function Duplicate({ issue, onClose }) {
   const [a, b] = [documentById(store, issue.otherId || issue.docs?.[0]), documentById(store, issue.docId)];
   return <Modal wide title="Exact duplicates" description="These files have identical content. Raticode doesn't assume they are the same document, so citations stay attached to the copy they name." onClose={onClose}
     footer={<><button type="button" className="sb-button" onClick={() => { resolveHealth(issue.id); onClose(); notify("Both copies kept as independent documents."); }}>Keep both</button><button type="button" className="sb-button sb-primary" onClick={() => { updateDocument(b.id, { extraction: "ready", excluded: true }); resolveHealth(issue.id); onClose(); notify(`Excluded ${b.path} from search. The file was not deleted.`); }}>Exclude the copy from search</button></>}>
-    <div className="sb-diff">{[a, b].map(doc => <div key={doc.id}><h4><TypeIcon type={doc.type} size={14} />{doc.title}<small className="sb-mono">{doc.path}</small></h4><dl className="sb-facts">{[["Added", formatDay(doc.dates.added)], ["Modified", formatDay(doc.dates.modified)], ["Version", doc.version], ["Cited by", `${(libraryFor(store).citedBy[doc.id] || []).length} items`]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl></div>)}</div>
+    <div className="sb-diff">{[a, b].map(doc => <div key={doc.id}><h4><TypeIcon type={doc.type} size={14} />{doc.title}<small className="sb-mono">{doc.path}</small></h4><dl className="sb-facts">{[["Added", libraryDay(doc.dates.added)], ["Modified", libraryDay(doc.dates.modified)], ["Version", doc.version], ["Cited by", `${(libraryFor(store).citedBy[doc.id] || []).length} items`]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl></div>)}</div>
   </Modal>;
 }
 
@@ -309,7 +310,7 @@ function ReplaceSuggestion({ issue, onClose }) {
   const newer = documentById(store, issue.newerId);
   const family = (store.families || []).find(item => item.id === issue.familyId);
   if (!older || !newer) return null;
-  const facts = doc => [["Modified", formatDay(doc.dates.modified)], ["Added", formatDay(doc.dates.added)], ["Passages", passageCount(doc)], ["Cited by", `${(libraryFor(store).citedBy[doc.id] || []).length} items`]];
+  const facts = doc => [["Modified", libraryDay(doc.dates.modified)], ["Added", libraryDay(doc.dates.added)], ["Passages", passageCount(doc)], ["Cited by", `${(libraryFor(store).citedBy[doc.id] || []).length} items`]];
   return <Modal wide title="Is this an older version?" description={`These reports share ${Math.round((issue.share || 0) * 100)}% of their long passages. Marking the older one as replaced keeps both files as they are. Search lists it after current reports and names the newer one.`} onClose={onClose}
     footer={<><span className="sb-footer-note">Stored in this brain’s library metadata.</span><button type="button" className="sb-button" onClick={() => { resolveHealth(issue.id); onClose(); notify("Kept both as current reports."); }}>Not an older version</button><button type="button" className="sb-button sb-primary" onClick={() => { confirmReplacement(older.id, newer.id); onClose(); notify(`Marked “${older.title}” as replaced by “${newer.title}”. No files were changed.`); }}>Mark as replaced</button></>}>
     <div className="sb-diff">{[["Older", older], ["Newer", newer]].map(([label, doc]) => <div key={doc.id}><h4><TypeIcon type={doc.type} size={14} />{label}: {doc.title}<small className="sb-mono">{doc.path}</small></h4><dl className="sb-facts">{facts(doc).map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl></div>)}</div>
@@ -322,8 +323,8 @@ function CheckBy({ docId, onClose }) {
   const doc = documentById(store, docId);
   const [next, setNext] = useState("");
   if (!doc) return null;
-  return <Modal title="Mark report checked" description={`“${doc.title}” was due for a check on ${formatDay(doc.checkBy)}.`} onClose={onClose}
-    footer={<Footer onCancel={onClose} confirm={next ? "Save next date" : "Mark checked"} onConfirm={() => { updateDocument(docId, { checkBy: next }); onClose(); notify(next ? `Next check on ${formatDay(next)}.` : "Marked checked."); }} note="Stored in library metadata." />}>
+  return <Modal title="Mark report checked" description={`“${doc.title}” was due for a check on ${libraryDay(doc.checkBy)}.`} onClose={onClose}
+    footer={<Footer onCancel={onClose} confirm={next ? "Save next date" : "Mark checked"} onConfirm={() => { updateDocument(docId, { checkBy: next }); onClose(); notify(next ? `Next check on ${libraryDay(next)}.` : "Marked checked."); }} note="Stored in library metadata." />}>
     <label className="sb-field"><span>Next check-by date (optional)</span><input type="date" value={next} onChange={event => setNext(event.target.value)} /><small>Leave empty to stop reminding you about this report.</small></label>
   </Modal>;
 }

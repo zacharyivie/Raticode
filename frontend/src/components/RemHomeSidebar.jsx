@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCheck, ChevronDown, ChevronRight, MoreHorizontal, Play, Plus, Square, Target } from "lucide-react";
+import { CheckCheck, ChevronDown, ChevronRight, MoreHorizontal, Play, Plus, Square, Target, X } from "lucide-react";
 import { dismissibleUpdates, groupTasks, statusLine } from "../lib/remHome.js";
-import { acknowledgeAllRemRuns, connectRemHome, deleteRemTask, openNewTask, openTaskSheet, showRemMessage, useRemHome } from "../lib/remHomeStore.js";
+import { acknowledgeAllRemRuns, connectRemHome, deleteRemTask, dismissSideNotice, openNewTask, openTaskSheet, showRemMessage, tellSidePane, useRemHome } from "../lib/remHomeStore.js";
 import { modeLabel, saveSelfWork, selfWorkToggle, useKanban } from "../lib/remKanban.js";
 import { taskObjective } from "../lib/remObjectives.js";
 import { RemMenu, TaskGlyph, taskActions, typeLabel } from "./RemHomeParts.jsx";
@@ -9,14 +9,8 @@ import RemObjectives from "./RemObjectives.jsx";
 import RemDecisions from "./RemDecisions.jsx";
 import TaskSheet from "./RemTaskSheet.jsx";
 import RatFaceIcon from "./RatFaceIcon.jsx";
+import { useMinuteClock } from "../lib/timeText.js";
 import "./RemHome.css";
-
-// Re-render relative times ("in 5 min") without waiting for new server data.
-function useMinuteClock() {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => { const timer = window.setInterval(() => setNow(new Date()), 30000); return () => window.clearInterval(timer); }, []);
-  return now;
-}
 
 // Opening a task replaces this list with its details; the main area stays as it is.
 function TaskRow({ task, activity }) {
@@ -45,16 +39,16 @@ function TaskRow({ task, activity }) {
 }
 
 // Dismiss all in the Needs you / Updates heading: every update at once. Runs that ask
-// the user something and tasks on hold aren't counted and stay in the group.
+// the user something and tasks on hold aren't counted and stay in the group. The updates
+// leave at once; the request goes in the background (acknowledgeAllRemRuns).
 function DismissAll({ group, now }) {
-  const [busy, setBusy] = useState(false);
   const updates = dismissibleUpdates(group.items.map(item => item.task), now);
   if (!updates.length) return null;
   const staying = group.items.length - updates.length;
   const what = `${updates.length} task ${updates.length === 1 ? "update" : "updates"}`;
   const title = `Dismiss ${what}.${staying ? ` ${staying} that ${staying === 1 ? "needs" : "need"} your answer or ${staying === 1 ? "is" : "are"} on hold ${staying === 1 ? "stays" : "stay"}.` : ""} Nothing is stopped or deleted.`;
-  return <button type="button" className="rem-side-dismiss-all" disabled={busy} title={title} aria-label={`Dismiss all: ${what}`}
-    onClick={async () => { setBusy(true); try { await acknowledgeAllRemRuns(updates); } finally { setBusy(false); } }}>
+  return <button type="button" className="rem-side-dismiss-all" title={title} aria-label={`Dismiss all: ${what}`}
+    onClick={() => void acknowledgeAllRemRuns(updates)}>
     <CheckCheck size={12} aria-hidden="true" /><span>Dismiss all</span><small>{updates.length}</small>
   </button>;
 }
@@ -77,8 +71,8 @@ function Group({ group, now }) {
 // on, it shows what self-work is doing and stops it, and while self-work waits for quiet
 // minutes, Start now skips the wait. A failed poll keeps the last state quietly; only a failed
 // click shows its error.
-function SelfWorkToggle({ active }) {
-  const { selfWork, error, run } = useKanban(active, 5000);
+function SelfWorkToggle({ kanban }) {
+  const { selfWork, error, run } = kanban;
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const toggle = selfWorkToggle(selfWork);
@@ -104,15 +98,29 @@ function SelfWorkToggle({ active }) {
   </div>;
 }
 
+// Why something the user did here was undone: a dismissal or an objectives change the
+// backend refused. It stays until closed or replaced.
+function SideNotice({ message }) {
+  if (!message) return null;
+  return <div role="alert" className="rem-side-notice"><span>{message}</span>
+    <button type="button" aria-label="Close" title="Close" onClick={dismissSideNotice}><X size={12} aria-hidden="true" /></button>
+  </div>;
+}
+
 export default function RemHomeSidebar({ active, open, onOpen, projectOptions = [], projectRoot = "" }) {
   const store = useRemHome();
-  const now = useMinuteClock();
+  // Self-work's state, with Rem's projects and their levels of effort, for the toggle and
+  // the projects under Objectives.
+  const kanban = useKanban(active, 5000);
+  // Re-render relative times ("in 5 min") without waiting for new server data.
+  const now = useMinuteClock(30000);
   useEffect(() => (active ? connectRemHome() : undefined), [active]);
   const groups = useMemo(() => groupTasks(store.tasks, now), [store.tasks, now]);
   const tickets = useMemo(() => ({ ...store.taskTickets, ...store.chatTickets }), [store.taskTickets, store.chatTickets]);
   const panel = `rem-side min-h-0 min-w-0 flex-1 flex-col text-ink ${active ? "flex" : "hidden"}`;
   if (store.sheet) {
     return <section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" hidden={!active} className={`${panel} rem-side-task`}>
+      <SideNotice message={store.sideNotice} />
       <TaskSheet key={store.sheet.mode === "task" ? store.sheet.taskId : "new"} sheet={store.sheet} tasks={store.tasks} projectOptions={projectOptions} now={now} messages={store.messages} onShowMessage={showRemMessage} active={active} tickets={tickets} />
     </section>;
   }
@@ -124,9 +132,14 @@ export default function RemHomeSidebar({ active, open, onOpen, projectOptions = 
       </button>
       <button type="button" className="rem-side-icon" aria-label="New task" title="New task" onClick={openNewTask}><Plus size={16} /></button>
     </div>
-    <SelfWorkToggle active={active} />
+    <SelfWorkToggle kanban={kanban} />
+    <SideNotice message={store.sideNotice} />
     <div className="rem-side-scroll">
-      {store.status === "ready" || store.objectives.items.length ? <RemObjectives objectives={store.objectives} tasks={store.tasks} /> : null}
+      {store.status === "ready" || store.objectives.items.length ? <RemObjectives objectives={store.objectives} tasks={store.tasks} projects={kanban.selfWork?.projects}
+        onEffort={async (root, percent) => {
+          const saved = await kanban.run(() => saveSelfWork({ project_effort: { [root]: percent }, expected_revision: kanban.selfWork?.settings?.revision }));
+          if (!saved) tellSidePane("Couldn't change the level of effort: the self-work settings changed meanwhile or the computer refused it. Check it and try again.");
+        }} /> : null}
       {store.decisions.items.length ? <RemDecisions decisions={store.decisions} project={projectRoot} /> : null}
       {store.status === "loading" && !store.tasks.length ? <p role="status" className="rem-side-hint">Checking in with Rem…</p>
         : groups.length ? groups.map(group => <Group key={group.id} group={group} now={now} />)

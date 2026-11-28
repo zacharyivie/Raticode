@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, ChevronDown, ChevronUp, Copy, ExternalLink, Eye, EyeOff, FileClock, Highlighter, Library, ListTree, MessageSquareQuote, MoreHorizontal, PanelLeft, Plus, Quote, Search, Sparkles, Star, Trash2, X, ZoomIn, ZoomOut, Link2, CircleCheck } from "lucide-react";
-import { checkByDue, extractionLabel, formatCitation, formatDay, formatTime, formatBytes, isHeadingPassage, newerReports, originLabel, parseQuery, sectionName, sectionStarts, typeLabel, webSourceUrl } from "../lib/secondBrain.js";
+import { checkByDue, extractionLabel, formatCitation, libraryDay, formatBytes, isHeadingPassage, newerReports, originLabel, parseQuery, sectionName, sectionStarts, typeLabel, webSourceUrl } from "../lib/secondBrain.js";
+import { dateTime } from "../lib/timeText.js";
 import { activateTab, closeTab, pinTab, openDocument, toggleReading, saveCitation, removeCitation, addToCollection, evidenceItem, openDialog, notify, libraryFor, documentById, navigate, confirmReplacement, useDocumentHistory } from "../lib/secondBrainStore.js";
 import { Empty, Menu, Pill, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
 import Connections from "./SecondBrainConnections.jsx";
@@ -56,7 +57,7 @@ function ReportFamily({ doc, store }) {
   return <section className="sb-report-family"><h4>Report family {family ? <small>{family.members.length}</small> : null}</h4>
     {doc.replacedBy?.docId ? <p className="sb-inline-note" data-tone="warning" role="status"><span>Replaced by {open(doc.replacedBy.docId)}{newer.length > 1 ? <>, which was later replaced by {open(newer.at(-1).id)}</> : null}. Search lists this report after current ones.</span><button type="button" className="sb-mini-button" onClick={() => { confirmReplacement(doc.id, ""); notify(`“${doc.title}” is a current report again.`); }}>Undo</button></p> : null}
     {replaces.length ? <p className="sb-hint">Replaces {replaces.map(item => <span key={item.id}>{open(item.id)} </span>)}</p> : null}
-    {family ? <ul className="sb-family-members">{family.members.filter(member => member.docId !== doc.id).map(member => { const other = documentById(store, member.docId); return other ? <li key={member.docId}>{open(member.docId)}<small>{Math.round(member.share * 100)}% shared · modified {formatDay(other.dates.modified)}{member.replacedBy ? " · replaced" : ""}</small></li> : null; })}</ul> : null}
+    {family ? <ul className="sb-family-members">{family.members.filter(member => member.docId !== doc.id).map(member => { const other = documentById(store, member.docId); return other ? <li key={member.docId}>{open(member.docId)}<small>{Math.round(member.share * 100)}% shared · modified {libraryDay(other.dates.modified)}{member.replacedBy ? " · replaced" : ""}</small></li> : null; })}</ul> : null}
     {family ? <p className="sb-hint">Reports in a family share most of their long passages. Library health suggests which one replaces which; files are never changed.</p> : null}
   </section>;
 }
@@ -78,15 +79,15 @@ function DocumentDetails({ doc, store }) {
   const versions = [{ hash: doc.version, at: doc.dates.modified, note: "Current source" }, ...history.versions.filter(version => version.hash !== doc.version)];
   const facts = [["Path", <code className="sb-mono" key="p">{doc.path}</code>], ["Type", typeLabel(doc.type)], ["Author", doc.author || "Unknown"], ["Project in file or set by you", doc.project || "None"], ["Tags", doc.tags.length ? doc.tags.join(", ") : "None"],
     ["Source", webSourceUrl(doc.source?.url) ? <a key="s" href={webSourceUrl(doc.source.url)} rel="noreferrer" onClick={event => { event.preventDefault(); window.open(webSourceUrl(doc.source.url), "_blank", "noopener,noreferrer"); }}>{doc.source.domain}</a> : "None"], ["DOI", doc.source?.doi || "None"],
-    ["Added", formatDay(doc.dates.added)], ["Modified", formatDay(doc.dates.modified)], ["Published", doc.dates.published ? formatDay(doc.dates.published) : "Unknown"], ...(doc.dates.captured ? [["Captured", formatTime(doc.dates.captured)]] : []),
-    ["Check by", doc.checkBy ? `${formatDay(doc.checkBy)}${checkByDue(doc) ? " · due now" : ""}` : "Not set"],
+    ["Added", libraryDay(doc.dates.added)], ["Modified", libraryDay(doc.dates.modified)], ["Published", doc.dates.published ? libraryDay(doc.dates.published) : "Unknown"], ...(doc.dates.captured ? [["Captured", dateTime(doc.dates.captured)]] : []),
+    ["Check by", doc.checkBy ? `${libraryDay(doc.checkBy)}${checkByDue(doc) ? " · due now" : ""}` : "Not set"],
     ["Origin", originLabel(doc.origin)], ["Extraction", extractionLabel(doc.extraction)], ["Size", formatBytes(doc.size)], ["Document ID", <code className="sb-mono" key="i">{doc.id}</code>]];
   return <div className="sb-details">
     <DocumentSummary doc={doc} />
     <section><div className="sb-details-head"><h4>Metadata</h4><button type="button" className="sb-mini-button" onClick={() => openDialog("edit-metadata", { docId: doc.id })}>Edit metadata</button></div><dl className="sb-facts">{facts.map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl></section>
     <ReportFamily doc={doc} store={store} />
     <section><h4>Versions</h4><ol className="sb-versions">{versions.map((version, index) => { const used = reportsUsing.filter(report => report.sourceVersions.some(source => source.docId === doc.id && source.version === version.hash)); return <li key={version.hash + index}>
-      <code className="sb-mono">{version.hash}</code><span>{version.note}<small>{formatTime(version.at)}</small></span>
+      <code className="sb-mono">{version.hash}</code><span>{version.note}<small>{dateTime(version.at)}</small></span>
       {index === 0 ? <Pill tone="success">Current</Pill> : <button type="button" className="sb-mini-button" onClick={() => openDialog("version-diff", { docId: doc.id, from: version.hash })}>Compare with current</button>}
       {used.length ? <small className="sb-version-use">Used by {used.map(report => report.title).join(", ")}</small> : null}
     </li>; })}</ol>{history.loading ? <p role="status" className="sb-hint">Loading older versions…</p> : history.error ? <p role="alert" className="sb-hint">Could not load older versions: {history.error}</p> : null}</section>
@@ -181,7 +182,7 @@ export default function SecondBrainReader({ brain, view, store, search, collecti
           <h3>{doc.title}</h3>
           <button type="button" className="sb-icon-button" aria-pressed={Boolean(doc.reading?.starred)} aria-label={doc.reading?.starred ? "Unstar" : "Star"} title={doc.reading?.starred ? "Unstar" : "Star"} onClick={() => toggleReading(doc.id, "starred")}><Star size={15} fill={doc.reading?.starred ? "currentColor" : "none"} /></button>
         </div>
-        <p className="sb-reader-meta"><span className="sb-mono">{doc.path}</span><span>Modified {formatDay(doc.dates.modified)}</span><span title="Content version used by citations">Version <code className="sb-mono">{doc.version}</code></span>{doc.extraction !== "ready" ? <Pill tone={doc.extraction === "failed" ? "danger" : "warning"}>{extractionLabel(doc.extraction)}</Pill> : null}{doc.reading?.reviewed ? <Pill tone="brand">Reviewed</Pill> : null}{doc.replacedBy?.docId ? <Pill tone="warning">Replaced by {documentById(store, doc.replacedBy.docId)?.title || "a newer report"}</Pill> : null}{checkByDue(doc) ? <Pill tone="warning">Check due</Pill> : null}</p>
+        <p className="sb-reader-meta"><span className="sb-mono">{doc.path}</span><span>Modified {libraryDay(doc.dates.modified)}</span><span title="Content version used by citations">Version <code className="sb-mono">{doc.version}</code></span>{doc.extraction !== "ready" ? <Pill tone={doc.extraction === "failed" ? "danger" : "warning"}>{extractionLabel(doc.extraction)}</Pill> : null}{doc.reading?.reviewed ? <Pill tone="brand">Reviewed</Pill> : null}{doc.replacedBy?.docId ? <Pill tone="warning">Replaced by {documentById(store, doc.replacedBy.docId)?.title || "a newer report"}</Pill> : null}{checkByDue(doc) ? <Pill tone="warning">Check due</Pill> : null}</p>
         <div className="sb-reader-tools">
           <Segmented size="sm" label="Document view" value={mode} options={[["reading", "Reading"], ["original", "Original"], ["details", "Details"]]} onChange={setMode} />
           <span className="sb-tool-sep" aria-hidden="true" />

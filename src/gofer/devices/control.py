@@ -18,7 +18,8 @@ import socket
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
+from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,19 @@ def default_device_host(network_enabled: bool) -> str:
         except OSError:
             pass
     return "127.0.0.1"
+
+
+def _peer(body: dict[str, Any]) -> str:
+    """The paired device a device action names."""
+    return str(body.get("device_id", ""))
+
+
+class Needs(Enum):
+    """What ``DeviceControl.action`` does before it runs an action's handler."""
+
+    NOTHING = "nothing"  # The handler takes the lock itself, so it can wait outside it.
+    LOCK = "lock"  # Holds the lock; runs before the device service has started.
+    SERVICE = "service"  # Holds the lock; needs the started device service.
 
 
 def address_still_assigned(host: str) -> bool:
@@ -583,16 +597,14 @@ class DeviceControl:
                 port,
             )
 
-    def _tailnet_action(self, body: dict[str, Any]) -> dict[str, Any]:
+    def _action_tailnet(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``tailnet`` saves the choice and checks; ``tailnet_check`` only checks again."""
         with self.lock:
-            if self.registry is None:
-                raise StorageError("protected_device_service_unavailable")
+            registry = self._registry()
             if not self.experimental_network:
                 raise PairingError("experimental_network_opt_in_required")
             if body.get("action") == "tailnet":
-                if not isinstance(body.get("enabled"), bool):
-                    raise PairingError("invalid_tailnet_choice")
-                self.registry.save_tailnet_enabled(body["enabled"])
+                self._switch(body, "invalid_tailnet_choice", registry.save_tailnet_enabled)
             task = self._tailnet_start()
         # Wait outside the lock, so status polling keeps answering during the check.
         try:
@@ -602,13 +614,21 @@ class DeviceControl:
         with self.lock:
             return self.status()
 
+    def _check_network(self, host: str) -> None:
+        """A peer at an address other than this computer needs the experimental opt-in."""
+        if not self.experimental_network and not ipaddress.ip_address(host).is_loopback:
+            raise PairingError("experimental_network_opt_in_required")
+
     def _reachable(self, peer: str) -> bool:
-        assert self.registry is not None
         try:
-            endpoint = self.registry.endpoint(peer)
+            endpoint = self._registry().endpoint(peer)
         except ValueError:
             return False
-        return self.experimental_network or ipaddress.ip_address(endpoint["host"]).is_loopback
+        try:
+            self._check_network(endpoint["host"])
+        except PairingError:
+            return False
+        return True
 
     def _dispatch(
         self,
@@ -688,280 +708,293 @@ class DeviceControl:
                 continue
         return started
 
-    def _fleet_status(self) -> dict[str, Any]:
+    def _action_fleet_status(self, _body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
-            if self.registry is None or self.application is None:
-                raise StorageError("protected_device_service_unavailable")
+            self._registry()
+            self._app()
             pending = self._refresh_fleet(requested=True)
         if pending:
             # Answer with what the desktops say now, not the previous snapshot.
             concurrent.futures.wait(pending, timeout=FLEET_WAIT)
         with self.lock:
-            assert self.registry is not None and self.application is not None
-            return {"devices": self.application.fleet(), "observed_at": self.registry.clock()}
+            return {"devices": self._app().fleet(), "observed_at": self._registry().clock()}
 
     def action(self, body: dict[str, Any]) -> dict[str, Any]:
-        if body.get("action") == "fleet_status":
-            return self._fleet_status()
-        if body.get("action") in ("tailnet", "tailnet_check"):
-            return self._tailnet_action(body)
+        """Run one POST /api/devices body action: its handler in ``DEVICE_ACTIONS``."""
+        name = body.get("action")
+        entry = DEVICE_ACTIONS.get(name) if isinstance(name, str) else None
+        if entry is not None and entry[0] is Needs.NOTHING:
+            # These wait on other desktops or Tailscale, so they take the lock themselves.
+            return entry[1](self, body)
         with self.lock:
-            action = body.get("action")
-            if action == "enable":
-                self.start(initialize=True)
-                return self.status()
-            if self.registry is None or self.invitations is None:
+            needs = entry[0] if entry is not None else Needs.SERVICE
+            if needs is Needs.SERVICE and (self.registry is None or self.invitations is None):
                 raise StorageError("protected_device_service_unavailable")
-            if action == "set_endpoint":
-                from gofer.devices.pairing import lan_endpoint
-
-                checked_endpoint = lan_endpoint(body.get("endpoint", {}))
-                if checked_endpoint is None:
-                    raise PairingError("peer_endpoint_unknown")
-                if (
-                    not self.experimental_network
-                    and not ipaddress.ip_address(checked_endpoint["host"]).is_loopback
-                ):
-                    raise PairingError("experimental_network_opt_in_required")
-                self.registry.save_endpoint(str(body.get("device_id", "")), checked_endpoint)
-                return self.status()
-            if action == "work_status":
-                assert self.application is not None
-                return self.application.remote_status(
-                    str(body.get("device_id", "")), str(body.get("request_id", ""))
-                )
-            if action in {"send", "cancel_work"}:
-                assert self.application is not None
-                peer = str(body.get("device_id", ""))
-                endpoint = self.registry.endpoint(peer)
-                if (
-                    not self.experimental_network
-                    and not ipaddress.ip_address(endpoint["host"]).is_loopback
-                ):
-                    raise PairingError("experimental_network_opt_in_required")
-                event = (
-                    self.application.cancel_remote(peer, str(body.get("request_id", "")))
-                    if action == "cancel_work"
-                    else self.application.queue_remote(peer, body)
-                )
-                key = (peer, event["request_id"] + (":cancel" if action == "cancel_work" else ""))
-                self._dispatch(key, peer, event)
-                return {"device_id": peer, "request_id": event["request_id"], "state": "queued"}
-            if action == "offer_file":
-                assert self.application is not None
-                return self.application.offer_file(
-                    str(body.get("device_id", "")),
-                    str(body.get("thread_id", "")),
-                    str(body.get("path", "")),
-                    origin_request=body.get("origin_request"),
-                )
-            if action == "thread_history":
-                assert self.application is not None
-                peer, thread = str(body.get("device_id", "")), str(body.get("thread_id", ""))
-                if not self.application.authorized(peer, thread):
-                    raise PairingError("thread_grant_required")
-                return {"messages": self.application.history(peer, thread)}
-            if action == "share_workspace":
-                assert self.application is not None
-                if not isinstance(body.get("enabled"), bool):
-                    raise PairingError("invalid_sharing_choice")
-                self.application.workspace.enable(str(body.get("device_id", "")), body["enabled"])
-                return self.status()
-            if action == "remote_control":
-                assert self.application is not None
-                if not isinstance(body.get("enabled"), bool):
-                    raise PairingError("invalid_remote_control_choice")
-                self.application.remote.enable(str(body.get("device_id", "")), body["enabled"])
-                return self.status()
-            if action == "desktop_control":
-                assert self.application is not None
-                if not isinstance(body.get("enabled"), bool):
-                    raise PairingError("invalid_desktop_control_choice")
-                self.application.desktop.enable(str(body.get("device_id", "")), body["enabled"])
-                return self.status()
-            if action in ("unlock_phone", "phone_guard", "flagged_requests", "forget_flagged"):
-                # The user's own clicks in Paired devices. Agent tokens can't reach
-                # /api/devices (headless._AGENT_DENIED_PREFIXES), and neither Rem nor its
-                # workers have a tool that calls it.
-                assert self.application is not None
-                locks = self.application.locks
-                peer = str(body.get("device_id", ""))
-                if action == "phone_guard":
-                    if not isinstance(body.get("enabled"), bool):
-                        raise PairingError("invalid_phone_guard_choice")
-                    locks.set_enabled(body["enabled"])
-                    return self.status()
-                with self.registry.lock:
-                    self.registry._row(peer)
-                if action == "flagged_requests":
-                    return {"device_id": peer, "requests": locks.flagged(peer)}
-                if action == "forget_flagged":
-                    locks.forget_flagged(peer)
-                    return self.status()
-                if body.get("confirm") is not True:
-                    raise PairingError("unlock_confirmation_required")
-                locks.unlock(peer)
-                return self.status()
-            if action == "wake_computer":
-                assert self.application is not None
-                if not isinstance(body.get("enabled"), bool):
-                    raise PairingError("invalid_wake_computer_choice")
-                self.application.desktop.wake.enable(
-                    str(body.get("device_id", "")), body["enabled"]
-                )
-                return self.status()
-            if action == "host_threads":
-                assert self.application is not None
-                if not isinstance(body.get("enabled"), bool):
-                    raise PairingError("invalid_thread_hosting_choice")
-                self.application.enable_hosting(str(body.get("device_id", "")), body["enabled"])
-                return self.status()
-            if action == "host_template":
-                assert self.application is not None
-                # The local API builds this context from canonical, granted project paths.
-                self.application.host_template(str(body.get("device_id", "")), body["context"])
-                return {"saved": True}
-            if action == "settings_exchange":
-                assert self.application is not None
-                return self.application.desktop.exchange_settings(
-                    body.get("settings"), body.get("applied")
-                )
-            if action == "browser_exchange":
-                assert self.application is not None
-                if not self.application.desktop.enabled():
-                    return {"opens": []}
-                return self.application.desktop.exchange_browser(
-                    body.get("tabs"), body.get("search_url"), body.get("opened"), body.get("engine")
-                )
-            if action == "workspace_remove":
-                assert self.application is not None
-                self.application.workspace.remove(
-                    str(body.get("device_id", "")), str(body.get("thread_id", ""))
-                )
-                return {"removed": True}
-            if action == "workspace_poll":
-                assert self.application is not None
-                peer = str(body.get("device_id", ""))
-                if peer not in self.application.workspace.enabled():
-                    raise PairingError("workspace_sharing_disabled")
-                with self.registry.lock:
-                    return {
-                        "threads": [
-                            self.application.workspace.export(peer, row[0])
-                            for row in self.registry.db.execute(
-                                "SELECT thread FROM device_workspace_threads WHERE peer=?", (peer,)
-                            )
-                            if (body.get("known") or {}).get(row[0])
-                            != self.application.workspace.sync_token(peer, row[0])
-                        ]
-                    }
-            if action == "workspace_exchange":
-                assert self.application is not None
-                return self.application.workspace.exchange(
-                    str(body.get("device_id", "")),
-                    body["metadata"],
-                    body["messages"],
-                    body["context"],
-                    body.get("revision"),
-                )
-            if action == "authorize_thread":
-                if self.application is None or not isinstance(body.get("context"), dict):
-                    raise PairingError("invalid_thread_context")
-                context = body["context"]
-                # Paths and permission modes originate only at this authenticated local API.
-                from gofer.ui.device_chat import validate_context
-
-                context = validate_context(context)
-                self.application.authorize(
-                    str(body.get("device_id", "")), str(body.get("thread_id", "")), context
-                )
-                return self.status()
-            if action == "revoke_thread":
-                assert self.application is not None
-                self.application.revoke_grant(
-                    str(body.get("device_id", "")), str(body.get("thread_id", ""))
-                )
-                return self.status()
-            if action == "invite":
-                if not self.experimental_network:
-                    raise PairingError("experimental_network_opt_in_required")
-                # Phones connect only over the local network, so a QR must carry its address.
-                if self.port is None or ipaddress.ip_address(self.host).is_loopback:
-                    raise PairingError("local_network_address_required")
-                # The device the user chose to pair, which fixes the role a claim must have.
-                kind = body.get("device", "phone")
-                if kind not in ("phone", "desktop"):
-                    raise PairingError("invalid_role")
-                result = self.invitations.create(
-                    str(body.get("name", "Raticode Desktop")),
-                    {"host": self.host, "port": self.port},
-                    role="controller" if kind == "phone" else "desktop",
-                )
-                import segno
-
-                # segno leaves the background transparent by default, which turns
-                # into dark-on-dark in dark mode; paint an opaque white field.
-                result["qr"] = segno.make(result["uri"], micro=False).svg_data_uri(
-                    scale=4, dark="#000", light="#fff", omitsize=True
-                )
-                return result
-            if action == "cancel_invitation":
-                self.invitations.cancel()
-            elif action == "confirm":
-                self.registry.confirm(
-                    str(body.get("device_id", "")), str(body.get("fingerprint", ""))
-                )
-            elif action in ("unpair", "remove_revoked"):
-                assert self.application is not None
-                self.application.remove_peer(
-                    str(body.get("device_id", "")), revoked_only=action == "remove_revoked"
-                )
-            elif action == "revoke":
-                self.registry.revoke(str(body.get("device_id", "")))
-            elif action == "preview":
-                _, invite = parse_invitation(str(body.get("uri", "")), self.registry.clock())
-                endpoint = invite["lan_endpoint"]
-                if endpoint is None or (
-                    not self.experimental_network
-                    and not ipaddress.ip_address(endpoint["host"]).is_loopback
-                ):
-                    raise PairingError("experimental_network_opt_in_required")
-                return {
-                    "name": invite["responder_name"],
-                    "fingerprint": invite["responder_spki_sha256"],
-                    "expires_at": invite["expires_at"],
-                }
-            elif action == "pair":
-                uri = str(body.get("uri", ""))
-                preview = self.action({"action": "preview", "uri": uri})
-                if body.get("fingerprint") != preview["fingerprint"]:
-                    raise PairingError("local_identity_confirmation_required")
-                if self.outbound is not None and not self.outbound.done():
-                    raise PairingError("pairing_already_running")
-                self.outbound = asyncio.run_coroutine_threadsafe(
-                    pair_desktop(self.registry, uri), self.loop
-                )
-                self.outbound.add_done_callback(self._outbound_done)
-            elif action == "reconnect":
-                peer = str(body.get("device_id", ""))
-                endpoint = self.registry.endpoint(peer)
-                if (
-                    not self.experimental_network
-                    and not ipaddress.ip_address(endpoint["host"]).is_loopback
-                ):
-                    raise PairingError("experimental_network_opt_in_required")
-                if self.outbound is not None and not self.outbound.done():
-                    raise PairingError("pairing_already_running")
-                self.outbound = asyncio.run_coroutine_threadsafe(
-                    reconnect_desktop(self.registry, peer, endpoint), self.loop
-                )
-                self.outbound.add_done_callback(self._outbound_done)
-            elif action == "cancel_pairing":
-                if self.outbound is not None:
-                    self.outbound.cancel()
-            else:
+            if entry is None:
                 raise PairingError("unknown_device_action")
-            return self.status()
+            return entry[1](self, body)
+
+    def _registry(self) -> DeviceRegistry:
+        if self.registry is None:
+            raise StorageError("protected_device_service_unavailable")
+        return self.registry
+
+    def _invitations(self) -> Invitations:
+        if self.invitations is None:
+            raise StorageError("protected_device_service_unavailable")
+        return self.invitations
+
+    def _app(self) -> DeviceApplication:
+        if self.application is None:
+            raise StorageError("protected_device_service_unavailable")
+        return self.application
+
+    def _switch(self, body: dict[str, Any], error: str, setter: Callable[[bool], None]) -> None:
+        """An on/off choice: ``enabled`` must be true or false, otherwise ``error``."""
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            raise PairingError(error)
+        setter(enabled)
+
+    def _action_enable(self, _body: dict[str, Any]) -> dict[str, Any]:
+        self.start(initialize=True)
+        return self.status()
+
+    def _action_set_endpoint(self, body: dict[str, Any]) -> dict[str, Any]:
+        from gofer.devices.pairing import lan_endpoint
+
+        checked_endpoint = lan_endpoint(body.get("endpoint", {}))
+        if checked_endpoint is None:
+            raise PairingError("peer_endpoint_unknown")
+        self._check_network(checked_endpoint["host"])
+        self._registry().save_endpoint(_peer(body), checked_endpoint)
+        return self.status()
+
+    def _action_work_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._app().remote_status(_peer(body), str(body.get("request_id", "")))
+
+    def _action_send(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``send`` queues work on a paired desktop; ``cancel_work`` asks it to stop."""
+        app, peer = self._app(), _peer(body)
+        self._check_network(self._registry().endpoint(peer)["host"])
+        cancel = body.get("action") == "cancel_work"
+        event = (
+            app.cancel_remote(peer, str(body.get("request_id", "")))
+            if cancel
+            else app.queue_remote(peer, body)
+        )
+        key = (peer, event["request_id"] + (":cancel" if cancel else ""))
+        self._dispatch(key, peer, event)
+        return {"device_id": peer, "request_id": event["request_id"], "state": "queued"}
+
+    def _action_offer_file(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._app().offer_file(
+            _peer(body),
+            str(body.get("thread_id", "")),
+            str(body.get("path", "")),
+            origin_request=body.get("origin_request"),
+        )
+
+    def _action_thread_history(self, body: dict[str, Any]) -> dict[str, Any]:
+        app, peer, thread = self._app(), _peer(body), str(body.get("thread_id", ""))
+        if not app.authorized(peer, thread):
+            raise PairingError("thread_grant_required")
+        return {"messages": app.history(peer, thread)}
+
+    def _action_share_workspace(self, body: dict[str, Any]) -> dict[str, Any]:
+        enable = partial(self._app().workspace.enable, _peer(body))
+        self._switch(body, "invalid_sharing_choice", enable)
+        return self.status()
+
+    def _action_remote_control(self, body: dict[str, Any]) -> dict[str, Any]:
+        enable = partial(self._app().remote.enable, _peer(body))
+        self._switch(body, "invalid_remote_control_choice", enable)
+        return self.status()
+
+    def _action_desktop_control(self, body: dict[str, Any]) -> dict[str, Any]:
+        enable = partial(self._app().desktop.enable, _peer(body))
+        self._switch(body, "invalid_desktop_control_choice", enable)
+        return self.status()
+
+    # unlock_phone, phone_guard, flagged_requests and forget_flagged are the user's own
+    # clicks in Paired devices. Agent tokens can't reach /api/devices
+    # (headless._AGENT_DENIED_PREFIXES), and neither Rem nor its workers have a tool
+    # that calls it.
+    def _action_phone_guard(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._switch(body, "invalid_phone_guard_choice", self._app().locks.set_enabled)
+        return self.status()
+
+    def _guarded_peer(self, body: dict[str, Any]) -> str:
+        """The paired device a phone guard action names; an unknown one is refused."""
+        registry, peer = self._registry(), _peer(body)
+        with registry.lock:
+            registry._row(peer)
+        return peer
+
+    def _action_flagged_requests(self, body: dict[str, Any]) -> dict[str, Any]:
+        locks = self._app().locks
+        peer = self._guarded_peer(body)
+        return {"device_id": peer, "requests": locks.flagged(peer)}
+
+    def _action_forget_flagged(self, body: dict[str, Any]) -> dict[str, Any]:
+        locks = self._app().locks
+        locks.forget_flagged(self._guarded_peer(body))
+        return self.status()
+
+    def _action_unlock_phone(self, body: dict[str, Any]) -> dict[str, Any]:
+        locks = self._app().locks
+        peer = self._guarded_peer(body)
+        if body.get("confirm") is not True:
+            raise PairingError("unlock_confirmation_required")
+        locks.unlock(peer)
+        return self.status()
+
+    def _action_wake_computer(self, body: dict[str, Any]) -> dict[str, Any]:
+        enable = partial(self._app().desktop.wake.enable, _peer(body))
+        self._switch(body, "invalid_wake_computer_choice", enable)
+        return self.status()
+
+    def _action_host_threads(self, body: dict[str, Any]) -> dict[str, Any]:
+        enable = partial(self._app().enable_hosting, _peer(body))
+        self._switch(body, "invalid_thread_hosting_choice", enable)
+        return self.status()
+
+    def _action_host_template(self, body: dict[str, Any]) -> dict[str, Any]:
+        # The local API builds this context from canonical, granted project paths.
+        self._app().host_template(_peer(body), body["context"])
+        return {"saved": True}
+
+    def _action_settings_exchange(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._app().desktop.exchange_settings(body.get("settings"), body.get("applied"))
+
+    def _action_browser_exchange(self, body: dict[str, Any]) -> dict[str, Any]:
+        desktop = self._app().desktop
+        if not desktop.enabled():
+            return {"opens": []}
+        return desktop.exchange_browser(
+            body.get("tabs"), body.get("search_url"), body.get("opened"), body.get("engine")
+        )
+
+    def _action_workspace_remove(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._app().workspace.remove(_peer(body), str(body.get("thread_id", "")))
+        return {"removed": True}
+
+    def _action_workspace_poll(self, body: dict[str, Any]) -> dict[str, Any]:
+        """The shared threads that changed since the sync tokens in ``known``."""
+        workspace, registry, peer = self._app().workspace, self._registry(), _peer(body)
+        if peer not in workspace.enabled():
+            raise PairingError("workspace_sharing_disabled")
+        known = body.get("known") or {}
+        with registry.lock:
+            rows = registry.db.execute(
+                "SELECT thread FROM device_workspace_threads WHERE peer=?", (peer,)
+            )
+            return {
+                "threads": [
+                    workspace.export(peer, row[0])
+                    for row in rows
+                    if known.get(row[0]) != workspace.sync_token(peer, row[0])
+                ]
+            }
+
+    def _action_workspace_exchange(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._app().workspace.exchange(
+            _peer(body), body["metadata"], body["messages"], body["context"], body.get("revision")
+        )
+
+    def _action_authorize_thread(self, body: dict[str, Any]) -> dict[str, Any]:
+        if self.application is None or not isinstance(body.get("context"), dict):
+            raise PairingError("invalid_thread_context")
+        # Paths and permission modes originate only at this authenticated local API.
+        from gofer.ui.device_chat import validate_context
+
+        context = validate_context(body["context"])
+        self.application.authorize(_peer(body), str(body.get("thread_id", "")), context)
+        return self.status()
+
+    def _action_revoke_thread(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._app().revoke_grant(_peer(body), str(body.get("thread_id", "")))
+        return self.status()
+
+    def _action_invite(self, body: dict[str, Any]) -> dict[str, Any]:
+        if not self.experimental_network:
+            raise PairingError("experimental_network_opt_in_required")
+        # Phones connect only over the local network, so a QR must carry its address.
+        if self.port is None or ipaddress.ip_address(self.host).is_loopback:
+            raise PairingError("local_network_address_required")
+        # The device the user chose to pair, which fixes the role a claim must have.
+        kind = body.get("device", "phone")
+        if kind not in ("phone", "desktop"):
+            raise PairingError("invalid_role")
+        result = self._invitations().create(
+            str(body.get("name", "Raticode Desktop")),
+            {"host": self.host, "port": self.port},
+            role="controller" if kind == "phone" else "desktop",
+        )
+        import segno
+
+        # segno leaves the background transparent by default, which turns
+        # into dark-on-dark in dark mode; paint an opaque white field.
+        result["qr"] = segno.make(result["uri"], micro=False).svg_data_uri(
+            scale=4, dark="#000", light="#fff", omitsize=True
+        )
+        return result
+
+    def _action_cancel_invitation(self, _body: dict[str, Any]) -> dict[str, Any]:
+        self._invitations().cancel()
+        return self.status()
+
+    def _action_confirm(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._registry().confirm(_peer(body), str(body.get("fingerprint", "")))
+        return self.status()
+
+    def _action_unpair(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``unpair`` forgets a paired device; ``remove_revoked`` a revoked one."""
+        revoked_only = body.get("action") == "remove_revoked"
+        self._app().remove_peer(_peer(body), revoked_only=revoked_only)
+        return self.status()
+
+    def _action_revoke(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._registry().revoke(_peer(body))
+        return self.status()
+
+    def _action_preview(self, body: dict[str, Any]) -> dict[str, Any]:
+        _, invite = parse_invitation(str(body.get("uri", "")), self._registry().clock())
+        endpoint = invite["lan_endpoint"]
+        if endpoint is None:
+            raise PairingError("experimental_network_opt_in_required")
+        self._check_network(endpoint["host"])
+        return {
+            "name": invite["responder_name"],
+            "fingerprint": invite["responder_spki_sha256"],
+            "expires_at": invite["expires_at"],
+        }
+
+    def _start_outbound(self, work: Callable[[], Coroutine[Any, Any, str]]) -> dict[str, Any]:
+        """Start pairing with, or reconnecting to, another desktop: one at a time."""
+        if self.outbound is not None and not self.outbound.done():
+            raise PairingError("pairing_already_running")
+        self.outbound = asyncio.run_coroutine_threadsafe(work(), self.loop)
+        self.outbound.add_done_callback(self._outbound_done)
+        return self.status()
+
+    def _action_pair(self, body: dict[str, Any]) -> dict[str, Any]:
+        uri = str(body.get("uri", ""))
+        preview = self._action_preview({"uri": uri})
+        if body.get("fingerprint") != preview["fingerprint"]:
+            raise PairingError("local_identity_confirmation_required")
+        return self._start_outbound(partial(pair_desktop, self._registry(), uri))
+
+    def _action_reconnect(self, body: dict[str, Any]) -> dict[str, Any]:
+        registry, peer = self._registry(), _peer(body)
+        endpoint = registry.endpoint(peer)
+        self._check_network(endpoint["host"])
+        return self._start_outbound(partial(reconnect_desktop, registry, peer, endpoint))
+
+    def _action_cancel_pairing(self, _body: dict[str, Any]) -> dict[str, Any]:
+        if self.outbound is not None:
+            self.outbound.cancel()
+        return self.status()
 
     def _outbound_done(self, future: concurrent.futures.Future[str]) -> None:
         # A new or resumed pairing introduces this desktop's address right away.
@@ -1124,3 +1157,60 @@ class DeviceControl:
                 rem.phone_guard = None
             if self.registry is not None:
                 self.registry.close()
+
+
+DeviceAction = Callable[[DeviceControl, dict[str, Any]], dict[str, Any]]
+
+
+def _action_table(
+    entries: list[tuple[str | set[str], Needs, DeviceAction]],
+) -> dict[str, tuple[Needs, DeviceAction]]:
+    table: dict[str, tuple[Needs, DeviceAction]] = {}
+    for names, needs, handler in entries:
+        for name in [names] if isinstance(names, str) else sorted(names):
+            if name in table:
+                raise RuntimeError(f"Device action {name} has two handlers")
+            table[name] = (needs, handler)
+    return table
+
+
+# Every POST /api/devices body action: what it needs first, and the handler that runs
+# it. tests/helpers/cli_parity.py reads the keys, so each one gets a CLI parity key.
+DEVICE_ACTIONS = _action_table(
+    [
+        ("fleet_status", Needs.NOTHING, DeviceControl._action_fleet_status),
+        ({"tailnet", "tailnet_check"}, Needs.NOTHING, DeviceControl._action_tailnet),
+        ("enable", Needs.LOCK, DeviceControl._action_enable),
+        ("set_endpoint", Needs.SERVICE, DeviceControl._action_set_endpoint),
+        ("work_status", Needs.SERVICE, DeviceControl._action_work_status),
+        ({"send", "cancel_work"}, Needs.SERVICE, DeviceControl._action_send),
+        ("offer_file", Needs.SERVICE, DeviceControl._action_offer_file),
+        ("thread_history", Needs.SERVICE, DeviceControl._action_thread_history),
+        ("share_workspace", Needs.SERVICE, DeviceControl._action_share_workspace),
+        ("remote_control", Needs.SERVICE, DeviceControl._action_remote_control),
+        ("desktop_control", Needs.SERVICE, DeviceControl._action_desktop_control),
+        ("phone_guard", Needs.SERVICE, DeviceControl._action_phone_guard),
+        ("flagged_requests", Needs.SERVICE, DeviceControl._action_flagged_requests),
+        ("forget_flagged", Needs.SERVICE, DeviceControl._action_forget_flagged),
+        ("unlock_phone", Needs.SERVICE, DeviceControl._action_unlock_phone),
+        ("wake_computer", Needs.SERVICE, DeviceControl._action_wake_computer),
+        ("host_threads", Needs.SERVICE, DeviceControl._action_host_threads),
+        ("host_template", Needs.SERVICE, DeviceControl._action_host_template),
+        ("settings_exchange", Needs.SERVICE, DeviceControl._action_settings_exchange),
+        ("browser_exchange", Needs.SERVICE, DeviceControl._action_browser_exchange),
+        ("workspace_remove", Needs.SERVICE, DeviceControl._action_workspace_remove),
+        ("workspace_poll", Needs.SERVICE, DeviceControl._action_workspace_poll),
+        ("workspace_exchange", Needs.SERVICE, DeviceControl._action_workspace_exchange),
+        ("authorize_thread", Needs.SERVICE, DeviceControl._action_authorize_thread),
+        ("revoke_thread", Needs.SERVICE, DeviceControl._action_revoke_thread),
+        ("invite", Needs.SERVICE, DeviceControl._action_invite),
+        ("cancel_invitation", Needs.SERVICE, DeviceControl._action_cancel_invitation),
+        ("confirm", Needs.SERVICE, DeviceControl._action_confirm),
+        ({"unpair", "remove_revoked"}, Needs.SERVICE, DeviceControl._action_unpair),
+        ("revoke", Needs.SERVICE, DeviceControl._action_revoke),
+        ("preview", Needs.SERVICE, DeviceControl._action_preview),
+        ("pair", Needs.SERVICE, DeviceControl._action_pair),
+        ("reconnect", Needs.SERVICE, DeviceControl._action_reconnect),
+        ("cancel_pairing", Needs.SERVICE, DeviceControl._action_cancel_pairing),
+    ]
+)

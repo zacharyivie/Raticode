@@ -2,7 +2,7 @@
 // workflow document (document.nodeContracts). A new contract with a catalog entry shows up
 // in the right group without any change here; one without a catalog lands in "Other".
 
-export const NODE_CATEGORIES = [
+const NODE_CATEGORIES = [
   { id: "code", label: "Run code" },
   { id: "files", label: "Files" },
   { id: "ai", label: "AI" },

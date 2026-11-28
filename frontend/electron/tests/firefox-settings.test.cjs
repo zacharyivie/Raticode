@@ -8,7 +8,6 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
-const os = require("node:os");
 const path = require("node:path");
 const {
   PROFILE_PREFS,
@@ -33,14 +32,14 @@ const { addonSlugFromUrl, createAddonCatalog, versionCompatible } = require("../
 const { createFirefoxManager, permissionLines } = require("../firefox-manager.cjs");
 const { FirefoxContents } = require("../firefox-contents.cjs");
 const { zip } = require("./zip-fixture.cjs");
+const { stopBeforeRemoving, tempFolder } = require("./temp-folder.cjs");
 
 const FIREFOX = process.env.RATICODE_SKIP_FIREFOX_TESTS === "1" ? "" : findFirefox();
 const realFirefox = { skip: FIREFOX ? false : "Firefox is not installed" };
 const network = { skip: process.env.RATICODE_FIREFOX_NETWORK_TESTS === "1" && FIREFOX ? false : "Set RATICODE_FIREFOX_NETWORK_TESTS=1 to install a real extension from Firefox Add-ons" };
 
-function temp(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
+// Each folder is removed when the test that made it ends.
+const temp = (prefix) => tempFolder(prefix);
 
 // A cookie database with the column Firefox uses to tell containers apart.
 function cookieDatabase(file, rows) {
@@ -437,85 +436,69 @@ async function fontSize(engine) {
 
 test("settings chosen in Raticode and settings imported from another profile reach Firefox", realFirefox, async () => {
   const dataDir = temp("firefox-real-settings-");
-  const engine = createFirefoxEngine({ dataDir });
-  try {
-    assert.equal(await fontSize(engine), "16px");
-    engine.saveUserPrefs({ "font.size.variable.x-western": 20 });
-    await engine.stopAndWait();
-    assert.equal(await fontSize(engine), "20px");
-    // Imported prefs land in prefs.js; a Raticode choice still wins over them.
-    engine.saveUserPrefs({});
-    await engine.stopAndWait();
-    const source = everydayProfile(temp("firefox-real-source-"));
-    importProfile({ source, target: engine.profileDir(), items: { settings: true }, backupDir: path.join(dataDir, "backup"), options: { platform: "linux" } });
-    assert.equal(await fontSize(engine), "22px");
-    // Containers made by automation do not pile up across launches; others stay.
-    await engine.stopAndWait();
-    const file = path.join(engine.profileDir(), "containers.json");
-    const data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { version: 5, lastUserContextId: 0, identities: [] };
-    data.identities = [...data.identities.filter((item) => !/^remote-/.test(item.name)), { userContextId: 900, name: "remote-0b594fd2-e8de-4fd1-bad5-9b3d791bdb3d", public: true }, { userContextId: 901, name: "Kept", public: true }];
-    data.lastUserContextId = Math.max(data.lastUserContextId || 0, 901);
-    fs.writeFileSync(file, JSON.stringify(data));
-    await engine.ensure();
-    const names = JSON.parse(fs.readFileSync(file, "utf8")).identities.map((item) => item.name);
-    assert.equal(names.includes("remote-0b594fd2-e8de-4fd1-bad5-9b3d791bdb3d"), false);
-    assert.equal(names.includes("Kept"), true);
-  } finally {
-    engine.stop();
-  }
+  const engine = stopBeforeRemoving(dataDir, createFirefoxEngine({ dataDir }));
+  assert.equal(await fontSize(engine), "16px");
+  engine.saveUserPrefs({ "font.size.variable.x-western": 20 });
+  await engine.stopAndWait();
+  assert.equal(await fontSize(engine), "20px");
+  // Imported prefs land in prefs.js; a Raticode choice still wins over them.
+  engine.saveUserPrefs({});
+  await engine.stopAndWait();
+  const source = everydayProfile(temp("firefox-real-source-"));
+  importProfile({ source, target: engine.profileDir(), items: { settings: true }, backupDir: path.join(dataDir, "backup"), options: { platform: "linux" } });
+  assert.equal(await fontSize(engine), "22px");
+  // Containers made by automation do not pile up across launches; others stay.
+  await engine.stopAndWait();
+  const file = path.join(engine.profileDir(), "containers.json");
+  const data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { version: 5, lastUserContextId: 0, identities: [] };
+  data.identities = [...data.identities.filter((item) => !/^remote-/.test(item.name)), { userContextId: 900, name: "remote-0b594fd2-e8de-4fd1-bad5-9b3d791bdb3d", public: true }, { userContextId: 901, name: "Kept", public: true }];
+  data.lastUserContextId = Math.max(data.lastUserContextId || 0, 901);
+  fs.writeFileSync(file, JSON.stringify(data));
+  await engine.ensure();
+  const names = JSON.parse(fs.readFileSync(file, "utf8")).identities.map((item) => item.name);
+  assert.equal(names.includes("remote-0b594fd2-e8de-4fd1-bad5-9b3d791bdb3d"), false);
+  assert.equal(names.includes("Kept"), true);
 });
 
 test("Firefox refuses unsigned extensions and Firefox's own pages stay out of reach", realFirefox, async () => {
   const dataDir = temp("firefox-real-unsigned-");
-  const engine = createFirefoxEngine({ dataDir });
-  try {
-    const file = path.join(dataDir, "unsigned.xpi");
-    fs.writeFileSync(file, zip({ "manifest.json": JSON.stringify({ manifest_version: 2, name: "Unsigned", version: "1.0", browser_specific_settings: { gecko: { id: "unsigned@example.com" } } }) }));
-    await assert.rejects(engine.installExtension(file), /signature|signed|corrupt|Could not install/i);
-    assert.deepEqual(await engine.listExtensions(), []);
-    const contents = new FirefoxContents({ engine, kind: "user" });
-    await assert.rejects(contents.loadURL("about:preferences"), /not allowed/);
-    contents.close();
-  } finally {
-    engine.stop();
-  }
+  const engine = stopBeforeRemoving(dataDir, createFirefoxEngine({ dataDir }));
+  const file = path.join(dataDir, "unsigned.xpi");
+  fs.writeFileSync(file, zip({ "manifest.json": JSON.stringify({ manifest_version: 2, name: "Unsigned", version: "1.0", browser_specific_settings: { gecko: { id: "unsigned@example.com" } } }) }));
+  await assert.rejects(engine.installExtension(file), /signature|signed|corrupt|Could not install/i);
+  assert.deepEqual(await engine.listExtensions(), []);
+  const contents = new FirefoxContents({ engine, kind: "user" });
+  await assert.rejects(contents.loadURL("about:preferences"), /not allowed/);
+  contents.close();
 });
 
 test("a signed extension from Firefox Add-ons installs, survives a restart and imports with its storage ID", network, async () => {
   const catalog = createAddonCatalog();
   const addon = await catalog.details("ublock-origin");
   const sourceDir = temp("firefox-real-addon-source-");
-  const source = createFirefoxEngine({ dataDir: sourceDir });
+  const source = stopBeforeRemoving(sourceDir, createFirefoxEngine({ dataDir: sourceDir }));
   const download = path.join(sourceDir, "addon.xpi");
-  try {
-    await catalog.download(addon.file, download);
-    assert.equal(await source.installExtension(download), addon.guid);
-    await source.stopAndWait();
-    const afterRestart = await source.listExtensions();
-    assert.ok(afterRestart.some((item) => item.id === addon.guid && item.active), JSON.stringify({ guid: addon.guid, afterRestart }));
-    await source.stopAndWait();
-    const sourceUuid = JSON.parse(readPrefs(path.join(source.profileDir(), "prefs.js")).get("extensions.webextensions.uuids"))[addon.guid];
-    assert.ok(sourceUuid);
-    // Import it into a second Raticode profile, as from an everyday Firefox.
-    const targetDir = temp("firefox-real-addon-target-");
-    const target = createFirefoxEngine({ dataDir: targetDir });
-    try {
-      const summary = importProfile({ source: source.profileDir(), target: target.profileDir(), items: { extensions: true, extensionData: true }, extensionIds: [addon.guid], backupDir: path.join(targetDir, "backup"), options: { platform: "linux" } });
-      assert.equal(summary.extensions.length, 1);
-      const copy = path.join(targetDir, "copy.xpi");
-      fs.copyFileSync(summary.extensions[0].file, copy);
-      await target.installExtension(copy);
-      await target.stopAndWait();
-      const targetUuid = JSON.parse(readPrefs(path.join(target.profileDir(), "prefs.js")).get("extensions.webextensions.uuids"))[addon.guid];
-      assert.equal(targetUuid, sourceUuid);
-      await target.uninstallExtension(addon.guid);
-      assert.deepEqual(await target.listExtensions(), []);
-    } finally {
-      target.stop();
-    }
-  } finally {
-    source.stop();
-  }
+  await catalog.download(addon.file, download);
+  assert.equal(await source.installExtension(download), addon.guid);
+  await source.stopAndWait();
+  const afterRestart = await source.listExtensions();
+  assert.ok(afterRestart.some((item) => item.id === addon.guid && item.active), JSON.stringify({ guid: addon.guid, afterRestart }));
+  await source.stopAndWait();
+  const sourceUuid = JSON.parse(readPrefs(path.join(source.profileDir(), "prefs.js")).get("extensions.webextensions.uuids"))[addon.guid];
+  assert.ok(sourceUuid);
+  // Import it into a second Raticode profile, as from an everyday Firefox.
+  const targetDir = temp("firefox-real-addon-target-");
+  const target = stopBeforeRemoving(targetDir, createFirefoxEngine({ dataDir: targetDir }));
+  const summary = importProfile({ source: source.profileDir(), target: target.profileDir(), items: { extensions: true, extensionData: true }, extensionIds: [addon.guid], backupDir: path.join(targetDir, "backup"), options: { platform: "linux" } });
+  assert.equal(summary.extensions.length, 1);
+  const copy = path.join(targetDir, "copy.xpi");
+  fs.copyFileSync(summary.extensions[0].file, copy);
+  await target.installExtension(copy);
+  await target.stopAndWait();
+  const targetUuid = JSON.parse(readPrefs(path.join(target.profileDir(), "prefs.js")).get("extensions.webextensions.uuids"))[addon.guid];
+  assert.equal(targetUuid, sourceUuid);
+  await target.uninstallExtension(addon.guid);
+  assert.deepEqual(await target.listExtensions(), []);
 });
 
 test("Firefox's install errors are reported in plain words", () => {
@@ -531,8 +514,10 @@ test("imported sign-ins from other containers never reach Rem's container, acros
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const page = `http://127.0.0.1:${server.address().port}/`;
   const cookie = (name) => ({ name, value: { type: "string", value: "secret" }, domain: "127.0.0.1", path: "/", sameSite: "lax", httpOnly: false, secure: false, expiry: Math.floor(Date.now() / 1000) + 86400 });
-  const everyday = createFirefoxEngine({ dataDir: temp("firefox-real-everyday-") });
-  const raticode = createFirefoxEngine({ dataDir: temp("firefox-real-raticode-") });
+  const everydayDir = temp("firefox-real-everyday-");
+  const raticodeDir = temp("firefox-real-raticode-");
+  const everyday = stopBeforeRemoving(everydayDir, createFirefoxEngine({ dataDir: everydayDir }));
+  const raticode = stopBeforeRemoving(raticodeDir, createFirefoxEngine({ dataDir: raticodeDir }));
   try {
     // An everyday Firefox signed in to the same site in its normal tabs and in eight containers.
     await everyday.ensure();
@@ -576,8 +561,6 @@ test("imported sign-ins from other containers never reach Rem's container, acros
     }
     assert.ok(containers.lastUserContextId >= Math.max(...containerIds), "new containers should be numbered above the imported ones");
   } finally {
-    everyday.stop();
-    raticode.stop();
     server.close();
   }
 });

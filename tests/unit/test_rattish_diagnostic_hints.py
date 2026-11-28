@@ -182,3 +182,73 @@ def test_preflight_and_starters_speak_plainly(tmp_path: Path) -> None:
     assert "Needs: the claude-code provider." in starters.output
     assert "Needs: the secret ALERT_WEBHOOK_URL when used." in starters.output
     assert "Create one with: Raticode rattish create --from STARTER_ID" in starters.output
+
+
+def test_did_you_mean_hints_carry_one_click_replacements(tmp_path: Path) -> None:
+    def replacements(source: str, code: str) -> object:
+        return only(diagnostics_for(source, tmp_path), code).details.get("replacements")
+
+    head = "Rattish: 1\nWorkflow:\n  name: Hints\n"
+    assert replacements(head + "Node a:\n  type: write_file\n", "RATTISH_INVALID_TOKEN") == [
+        "write-file"
+    ]
+    assert replacements(
+        head + "Node greet:\n  type: write-file\n  path: out.txt\n  contents: hi\n",
+        "RATTISH_UNKNOWN_FIELD",
+    ) == ["content"]
+    assert replacements(
+        head + "Node ask:\n  type: agent\n  provider: claude\n  prompt: Hi\n",
+        "RATTISH_PROVIDER_CONTRACT_UNRESOLVED",
+    ) == ["claude-code"]
+    route = (
+        head + "Node greet:\n  type: bash-command\n  command: echo hi\n  to: sumary\n"
+        "Node summary:\n  type: bash-command\n  command: echo done\n  needs: greet\n"
+    )
+    assert replacements(route, "RATTISH_UNRESOLVED_NODE") == ["summary"]
+    needs = (
+        head + "Node greet:\n  type: bash-command\n  command: echo hi\n"
+        "Node summary:\n  type: bash-command\n  command: echo done\n  needs:\n    - gret\n"
+    )
+    assert replacements(needs, "RATTISH_UNRESOLVED_NODE") == ["greet"]
+    assert replacements(head + "  workspace: worktee\n", "RATTISH_INVALID_FIELD_VALUE") == [
+        "worktree"
+    ]
+    assert replacements(head + "Node a:\n  type: write-fil\n", "RATTISH_UNKNOWN_NODE_TYPE") == [
+        "write-file"
+    ]
+
+
+def test_replacements_point_at_the_name_and_skip_text_that_is_not_just_the_name(
+    tmp_path: Path,
+) -> None:
+    head = "Rattish: 1\nWorkflow:\n  name: Résumé hints\n"
+    source = head + "Node ask:\n  type: agent\n  provider: claude\n  prompt: Hi\n"
+    provider = only(diagnostics_for(source, tmp_path), "RATTISH_PROVIDER_CONTRACT_UNRESOLVED")
+    # Offsets count UTF-8 bytes, so the accented name above shifts them past the characters.
+    start, end = provider.span.start.offset, provider.span.end.offset
+    assert source.encode("utf-8")[start:end] == b"claude"
+    assert (provider.span.start.line, provider.span.start.column) == (6, 13)
+
+    quoted = only(
+        diagnostics_for(
+            head + 'Node ask:\n  type: agent\n  provider: "claude"\n  prompt: Hi\n', tmp_path
+        ),
+        "RATTISH_PROVIDER_CONTRACT_UNRESOLVED",
+    )
+    assert quoted.suggestions[0] == "Did you mean 'claude-code'?"
+    assert "replacements" not in quoted.details
+    capitalized = only(
+        diagnostics_for(
+            head + "Node a:\n  type: bash-command\n  command: echo\n  to: Sumary\n"
+            "Node summary:\n  type: bash-command\n  command: echo\n",
+            tmp_path,
+        ),
+        "RATTISH_UNRESOLVED_NODE",
+    )
+    # The name is compared lowercased, so the span's text isn't the name to swap out.
+    assert capitalized.suggestions == ("Did you mean 'summary'?",)
+    assert "replacements" not in capitalized.details
+    no_match = only(
+        diagnostics_for(head + "Node a:\n  type: zzzzzz\n", tmp_path), "RATTISH_UNKNOWN_NODE_TYPE"
+    )
+    assert "replacements" not in no_match.details

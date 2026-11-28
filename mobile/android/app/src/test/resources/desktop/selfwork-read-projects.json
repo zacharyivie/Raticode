@@ -1,0 +1,23 @@
+{
+  "settings": {"enabled": true, "saved_enabled": true, "max_threads": 10, "auto_pull_backlog": true, "idle_minutes": 15, "revision": 7,
+    "project_effort": {"11111111-1111-5111-8111-111111111111": 70, "22222222-2222-5222-8222-222222222222": 30}},
+  "limits": {"max_threads_min": 1, "max_threads_max": 16, "effort_percent_max": 100},
+  "state": {"mode": "working", "active_threads": 10, "thread_limit": 10, "detail": "Working. Threads by project: Raticode 7 of 7, agent-trading 3 of 3."},
+  "projects": [
+    {"project_id": "11111111-1111-5111-8111-111111111111", "name": "Raticode", "effort_percent": 70, "target_threads": 7, "running_threads": 7},
+    {"project_id": "22222222-2222-5222-8222-222222222222", "name": "agent-trading", "effort_percent": 30, "target_threads": 3, "running_threads": 1}
+  ],
+  "objectives": {
+    "revision": 12, "open": 1, "done": 0, "stale": 0, "total": 1, "offset": 0, "movable": true,
+    "items": [{"id": "g1", "text": "Improve reliability of the Second Brain tools", "done_when": "", "done": false, "created_by": "user"}],
+    "projects": {
+      "22222222-2222-5222-8222-222222222222": {
+        "revision": 12, "open": 1, "done": 1, "stale": 0, "total": 2, "offset": 0,
+        "items": [
+          {"id": "t1", "text": "Raise the trading strategy's risk-adjusted returns", "done_when": "", "done": false, "created_by": "user", "project_id": "22222222-2222-5222-8222-222222222222"},
+          {"id": "t2", "text": "Backtest every strategy on a year of data", "done_when": "Each strategy has a one-year backtest", "done": true, "done_by": "user", "created_by": "rem", "project_id": "22222222-2222-5222-8222-222222222222"}
+        ]
+      }
+    }
+  }
+}

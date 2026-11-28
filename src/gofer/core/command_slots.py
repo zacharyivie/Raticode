@@ -14,6 +14,7 @@ Claude Code shell call (through the hook) starts a fresh process that imports it
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -21,6 +22,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -29,7 +31,9 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.logging import RepeatingFailure
 
 _logger = logging.getLogger(__name__)
@@ -610,10 +614,7 @@ def _write_if_changed(path: Path, content: str, mode: int = 0o600) -> None:
             return
     except OSError:
         pass
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    temporary.write_text(content, encoding="utf-8")
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    replace_file(path, content.encode("utf-8"), mode=mode)
 
 
 # Wrapper scripts -------------------------------------------------------------
@@ -885,10 +886,52 @@ def path_with_wrappers_first(env: dict[str, str], current_path: str) -> str:
 
 
 def scoped_command(command: list[str], env: dict[str, str] | None) -> list[str]:
-    """Start a provider inside Raticode's slice when its turn environment asks for it."""
+    """Start a provider inside Raticode's slice when its turn environment asks for it.
+
+    A command that can't reach the user's systemd bus, such as one started inside a
+    sandboxed turn, runs unchanged: ``systemd-run`` would fail before it started. It
+    still runs inside the provider's own scope in the slice, so the slice's limits apply.
+    """
     if not command or not env or env.get(SLICE_ENV) != SLICE or command[0] == "systemd-run":
         return command
+    if env.get(SANDBOX_ENV) or not _user_bus_reachable(user_bus_socket(env)):
+        return command
     return [*scope_prefix(), *command]
+
+
+def user_bus_socket(env: dict[str, str]) -> str:
+    """The socket ``systemd-run --user`` connects to; abstract names start with a NUL."""
+    for entry in env.get("DBUS_SESSION_BUS_ADDRESS", "").split(";"):
+        transport, _, options = entry.partition(":")
+        if transport != "unix":
+            continue
+        for option in options.split(","):
+            key, _, value = option.partition("=")
+            if key == "path" and value:
+                return unquote(value)
+            if key == "abstract" and value:
+                return "\0" + unquote(value)
+    runtime = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return f"{runtime}/bus"
+
+
+@functools.cache
+def _user_bus_reachable(path: str) -> bool:
+    """Whether this process can connect to the user bus; checked once per socket."""
+    family = getattr(socket, "AF_UNIX", None)
+    if family is None:
+        return False
+    try:
+        probe = socket.socket(family, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    with probe:
+        probe.settimeout(1.0)
+        try:
+            probe.connect(path)
+        except OSError:
+            return False
+    return True
 
 
 # Acquiring a slot ------------------------------------------------------------
@@ -1211,11 +1254,15 @@ def run(kind: str, argv: list[str]) -> int:
             # Without the systemd slice, a lower priority keeps the desktop responsive.
             with contextlib.suppress(OSError):
                 os.nice(5)
-        # A sandboxed command can't ask systemd for a scope of its own. It still
-        # runs inside the provider's scope in the slice, which has its own limits.
+        # A sandboxed command can't ask systemd for a scope of its own, and nothing can
+        # while the user bus is out of reach (systemd-run would fail before the command
+        # starts). It still runs inside the provider's scope in the slice, which has its
+        # own limits.
         limit = (
             command_memory_limit()
-            if env.get(SLICE_ENV) == SLICE and not env.get(SANDBOX_ENV)
+            if env.get(SLICE_ENV) == SLICE
+            and not env.get(SANDBOX_ENV)
+            and _user_bus_reachable(user_bus_socket(env))
             else None
         )
         try:

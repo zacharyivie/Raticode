@@ -170,6 +170,41 @@ test("quick open lists workflows, Rem threads, settings sections and files", () 
   assert.equal(rankItems(items, "keybind")[0].id, "settings:keybindings");
 });
 
+test("quick open lists board tickets by title, with the key and column, open ones first", () => {
+  const tickets = [
+    { ticket_id: "t-done", key: "REM-3", title: "Ship the release notes", status: "done", updated_at: "2026-11-20T10:00:00Z" },
+    { ticket_id: "t-12", key: "REM-12", title: "Tidy the settings page", status: "blocked", updated_at: "2026-11-10T10:00:00Z" },
+    { ticket_id: "t-120", key: "REM-120", title: "Shorter log lines", status: "todo", updated_at: "2026-11-21T10:00:00Z" },
+    { ticket_id: "t-gone", key: "REM-9", title: "Old idea", status: "cancelled", updated_at: "2026-11-22T10:00:00Z" },
+    { ticket_id: "t-org", key: "ENG-4", title: "Release checklist", status: "in_progress", organization_name: "Acme", updated_at: "2026-11-01T10:00:00Z" },
+    { ticket_id: "", key: "REM-99", title: "No id" },
+  ];
+  const items = quickOpenItems({ tickets });
+  const rows = items.filter((item) => item.kind === "ticket");
+  assert.deepEqual(rows.map((row) => row.id), ["ticket:t-120", "ticket:t-12", "ticket:t-org", "ticket:t-gone", "ticket:t-done"], "open tickets first, newest first, then closed ones");
+  const ticket = rows.find((row) => row.id === "ticket:t-12");
+  assert.equal(ticket.group, "Ticket");
+  assert.equal(ticket.label, "Tidy the settings page");
+  assert.equal(ticket.description, "REM-12 · Blocked");
+  assert.equal(ticket.ticketId, "t-12");
+  assert.equal(ticket.ticketKey, "REM-12");
+  // The key matches with or without its dash, and in either case; the exact key beats REM-120.
+  for (const query of ["rem12", "REM-12", "rem-12", "REM12"]) {
+    assert.equal(rankItems(items, query)[0].id, "ticket:t-12", `"${query}" finds REM-12 first`);
+  }
+  assert.equal(rankItems(items, "settings page")[0].id, "ticket:t-12", "a word from the title finds it");
+  assert.equal(rankItems(items, "tidy")[0].id, "ticket:t-12");
+  assert.equal(rankItems(items, "acme")[0].id, "ticket:t-org", "an organization's name finds its tickets");
+  // A title word shared by an open and a Done ticket lists the open one first.
+  const release = rankItems(items, "release").filter((item) => item.kind === "ticket").map((item) => item.id);
+  assert.deepEqual(release, ["ticket:t-org", "ticket:t-done"]);
+  // Recent tickets come first, like other rows.
+  assert.equal(rankItems(items, "", ["ticket:t-done"])[0].id, "ticket:t-done");
+  assert.equal(rankItems(items, "rem", ["ticket:t-gone"])[0].id, "ticket:t-gone");
+  // No tickets, no ticket rows.
+  assert.ok(!quickOpenItems({}).some((item) => item.kind === "ticket"));
+});
+
 test("the palette keys give way to a focused terminal or code editor", () => {
   const inside = (selector) => ({ closest: (query) => (query.split(",").map((part) => part.trim()).includes(selector) ? {} : null) });
   assert.equal(paletteGivesWay(inside(".xterm")), true);

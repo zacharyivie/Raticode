@@ -218,7 +218,7 @@ def test_concurrency_diagnostic_has_no_fixed_cap_of_eight(tmp_path: Path) -> Non
     assert diagnostics["effectiveConcurrency"] == 12
     assert "serviceConcurrency" not in diagnostics
     note = diagnostics["concurrencyNote"]
-    assert note.startswith("Up to 12 at once: each worker runs one task at a time")
+    assert note.startswith("Up to 12 at once: each worker runs one ticket at a time")
     assert "Worker limit" in note and "Settings › Computers" in note
     assert "employee" not in note.lower()
     manager.close()

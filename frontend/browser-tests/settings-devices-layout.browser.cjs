@@ -23,7 +23,7 @@ let vite;
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(__dirname, ".."), logLevel: "error", cacheDir: path.join(profile, "vite-cache"),
+  vite = await createServer({ configLoader: "runner", root: path.join(__dirname, ".."), logLevel: "error", cacheDir: path.join(profile, "vite-cache"),
     server: { host: "127.0.0.1", port: 0 }, plugins: [{
       name: "settings-devices-layout-test",
       resolveId(id) { if (id === "/settings-entry.jsx") return id; },

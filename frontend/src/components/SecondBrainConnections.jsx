@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import "./SecondBrainGraph.css";
 import { Bot, FolderKanban, Link2, MessagesSquare, Network, ScrollText, Sparkles, Ticket, TriangleAlert } from "lucide-react";
-import { formatDay } from "../lib/secondBrain.js";
+import { libraryDay } from "../lib/secondBrain.js";
 import { basisLabel, connectionItems, egoLayout, isSuggestion, makerLabel } from "../lib/secondBrainGraph.js";
 import { documentById, graphKey, navigate, openDocument, setDocumentProject, useBrainData } from "../lib/secondBrainStore.js";
 import { Pill, TypeIcon } from "./SecondBrainParts.jsx";
@@ -65,7 +65,7 @@ export default function Connections({ doc, store }) {
       <div><h5>Made by</h5>{data.madeBy.length ? <ul>{data.madeBy.map((item, index) => <li key={index}>
         {item.kind === "organization" ? <Ticket size={13} aria-hidden="true" /> : <Bot size={13} aria-hidden="true" />}
         <span><strong>{makerLabel(item.kind)}</strong>{item.title ? ` · ${item.title}` : ""}{item.organization ? ` · ${item.organization}${item.ticket ? ` ${item.ticket}` : ""}` : ""}
-          <small>{[item.at ? formatDay(item.at) : "", item.provider, item.model].filter(Boolean).join(" · ")}</small>
+          <small>{[item.at ? libraryDay(item.at) : "", item.provider, item.model].filter(Boolean).join(" · ")}</small>
           {item.hashMatches === false ? <small className="sb-warn-text"><TriangleAlert size={11} aria-hidden="true" />The file changed after it was saved.</small> : null}</span>
         <Basis basis={item.basis} />
       </li>)}</ul> : <p className="sb-hint">No record of who made this file. Files you write yourself have none.</p>}</div>
@@ -79,7 +79,7 @@ export default function Connections({ doc, store }) {
           : item.kind === "thread" ? <>Read in <strong>{item.title}</strong></>
           : item.kind === "claim" ? <>{item.ticket ? <strong>{item.ticket} </strong> : null}claim “{item.title}” quotes it</>
           : <>{item.relation === "read" ? "Read for" : "Linked to"} <strong>{item.ticket}</strong> {item.title}</>}
-          <small>{[item.organization, item.at ? formatDay(item.at) : ""].filter(Boolean).join(" · ")}{item.olderVersion ? " · an earlier version" : ""}</small>
+          <small>{[item.organization, item.at ? libraryDay(item.at) : ""].filter(Boolean).join(" · ")}{item.olderVersion ? " · an earlier version" : ""}</small>
           {item.changed ? <small className="sb-warn-text"><TriangleAlert size={11} aria-hidden="true" />{item.changed} citation{item.changed === 1 ? "" : "s"} need review</small> : null}
           {item.kind === "claim" && item.state !== "ok" ? <small className="sb-warn-text"><TriangleAlert size={11} aria-hidden="true" />The quote no longer matches the note</small> : null}</span>
         <Basis basis={item.basis} />

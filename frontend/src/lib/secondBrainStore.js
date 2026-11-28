@@ -7,7 +7,7 @@ import { mergedProject } from "./secondBrainGraph.js";
 // own view state so switching brains restores the query, tabs and selection.
 // Edits publish optimistically and are serialized to the persistent library service.
 
-export const DEFAULT_SEARCH = Object.freeze({ text: "", filters: EMPTY_FILTERS, mode: "exact", searchIn: "all", match: "all", sort: "relevance", savedId: "" });
+const DEFAULT_SEARCH = Object.freeze({ text: "", filters: EMPTY_FILTERS, mode: "exact", searchIn: "all", match: "all", sort: "relevance", savedId: "" });
 const newView = () => ({ section: "search", collectionId: "", reportId: "", projectId: "", projectTab: "reports", mapTopicId: "", search: { ...DEFAULT_SEARCH }, tabs: [], activeDocId: "", focus: null, selection: [] });
 let sequence = 0;
 export const uid = prefix => `${prefix}-${Date.now().toString(36)}-${(++sequence).toString(36)}`;
@@ -418,6 +418,10 @@ export async function startTask({ kind, label, brainId = state.activeBrainId, ..
     state = { ...state, tasks: [...state.tasks.filter(item => item.id !== task.id), task] }; emit();
     return task.id;
   } catch (error) { notify(error.message, "danger"); return null; }
+}
+// Brain settings and the toolbar's "Index needs attention" panel both start this task.
+export function rebuildIndex(brain) {
+  return startTask({ kind: "index", label: `Rebuilding the ${brain.name} index`, brainId: brain.id, steps: ["Scanning folder", "Extracting text", "Building passages", "Publishing generation"] });
 }
 export function cancelTask(id) { if (!fixture) enqueue("cancel", { id }); }
 export function dismissTask(id) { if (!fixture) enqueue("dismiss", { id }); set(current => ({ ...current, tasks: current.tasks.filter(task => task.id !== id) })); }

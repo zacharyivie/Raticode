@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from gofer.ui.brain_library import BrainLibrary
 from gofer.ui.brain_research import checked_research_citations, pinned_quote
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.unit.test_brain_library import opened
 
 
@@ -39,13 +39,6 @@ def test_quote_cannot_be_reattributed_to_another_passage():
     }
     _, problems = checked_research_citations(output, evidence)
     assert len(problems) == 1 and problems[0]["evidence"] == "e1"
-
-
-@pytest.fixture
-def library(tmp_path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def response(evidence_id: str, quote: str) -> dict[str, Any]:

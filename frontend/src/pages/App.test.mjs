@@ -9,6 +9,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDeepStrictEqual } from "node:util";
 import { createServer } from "vite";
+import { fakeMonacoEditor } from "../../electron/tests/fake-monaco-editor.mjs";
 
 // When a comparison involving a test DOM node fails, Node and the test reporter describe
 // both values by walking everything reachable from them: the whole test document and
@@ -48,11 +49,13 @@ let crashBoundaryModule;
 let bottomPanelModule;
 let canvasModule;
 let inspectorFieldsModule;
+let rattishInspectorModule;
 let runTimelineModule;
 let triggersSectionModule;
 let secretsSectionModule;
 let resultCacheSectionModule;
 let codeFileExplorerModule;
+let sourceControlModule;
 let codeWorkspaceModule;
 let dialogModule;
 let runPreviewModule;
@@ -60,9 +63,16 @@ let integratedBrowserModule;
 let markdownContentModule;
 let rattishRangesModule;
 let settingsModule;
+let appSettingsModule;
+let browserTabsModule;
+let devicesModule;
+let workspacePathsModule;
 let graphEditHistoryModule;
+let graphClipboardModule;
 let settingsPopoverModule;
 let workflowDialogsModule;
+let workflowSidebarModule;
+let appChromeModule;
 let legacyTomlLibModule;
 let legacyTomlModule;
 let chatAttachmentsModule;
@@ -71,6 +81,7 @@ let ticketTimelineModule;
 let ticketPatchReviewModule;
 let ticketReviewModule;
 let organizationSheetModule;
+let organizationWorkspaceModule;
 let organizationModelModule;
 let organizationApproveAllModule;
 let organizationAutoModeModule;
@@ -105,6 +116,7 @@ const XTERM_STUBS = {
       onData() { return disposable(); }
       onResize() { return disposable(); }
       attachCustomKeyEventHandler() {}
+      registerLinkProvider() { return disposable(); }
       hasSelection() { return false; }
       getSelection() { return ""; }
       clearSelection() {}
@@ -117,6 +129,16 @@ const XTERM_STUBS = {
       dispose() {}
       fit() {}
       proposeDimensions() { return { cols: 80, rows: 24 }; }
+    }
+  `,
+  "@xterm/addon-search": `
+    export class SearchAddon {
+      activate() {}
+      dispose() {}
+      clearDecorations() {}
+      findNext() { return false; }
+      findPrevious() { return false; }
+      onDidChangeResults() { return { dispose() {} }; }
     }
   `,
 };
@@ -133,6 +155,7 @@ const xtermStubPlugin = {
 
 before(async () => {
   viteServer = await createServer({
+    configLoader: "runner",
     appType: "custom",
     cacheDir: viteCacheDir,
     plugins: [xtermStubPlugin],
@@ -170,12 +193,14 @@ before(async () => {
   bottomPanelModule = await viteServer.ssrLoadModule("/src/components/UnifiedBottomPanel.jsx");
   canvasModule = await viteServer.ssrLoadModule("/src/components/DagCanvas.jsx");
   inspectorFieldsModule = await viteServer.ssrLoadModule("/src/components/InspectorFields.jsx");
+  rattishInspectorModule = await viteServer.ssrLoadModule("/src/components/RattishInspector.jsx");
   runTimelineModule = await viteServer.ssrLoadModule("/src/components/RunTimelinePanel.jsx");
   triggersSectionModule = await viteServer.ssrLoadModule("/src/components/RattishTriggersSection.jsx");
   secretsSectionModule = await viteServer.ssrLoadModule("/src/components/WorkflowSecretsSection.jsx");
   resultCacheSectionModule = await viteServer.ssrLoadModule("/src/components/WorkflowResultCacheSection.jsx");
   workflowTestsPanelModule = await viteServer.ssrLoadModule("/src/components/WorkflowTestsPanel.jsx");
   codeFileExplorerModule = await viteServer.ssrLoadModule("/src/components/CodeFileExplorer.jsx");
+  sourceControlModule = await viteServer.ssrLoadModule("/src/lib/useSourceControl.js");
   codeWorkspaceModule = await viteServer.ssrLoadModule("/src/components/CodeWorkspace.jsx");
   dialogModule = await viteServer.ssrLoadModule("/src/components/Dialog.jsx");
   runPreviewModule = await viteServer.ssrLoadModule("/src/components/RunPreviewDialog.jsx");
@@ -183,9 +208,16 @@ before(async () => {
   markdownContentModule = await viteServer.ssrLoadModule("/src/components/MarkdownContent.jsx");
   rattishRangesModule = await viteServer.ssrLoadModule("/src/lib/rattishRanges.js");
   settingsModule = await viteServer.ssrLoadModule("/src/lib/settings.js");
+  appSettingsModule = await viteServer.ssrLoadModule("/src/lib/useAppSettings.js");
+  browserTabsModule = await viteServer.ssrLoadModule("/src/lib/useBrowserTabs.js");
+  devicesModule = await viteServer.ssrLoadModule("/src/lib/useDevicesAndDictation.js");
+  workspacePathsModule = await viteServer.ssrLoadModule("/src/lib/workspacePaths.js");
   graphEditHistoryModule = await viteServer.ssrLoadModule("/src/lib/graphEditHistory.js");
+  graphClipboardModule = await viteServer.ssrLoadModule("/src/lib/graphClipboard.js");
   settingsPopoverModule = await viteServer.ssrLoadModule("/src/components/SettingsPopover.jsx");
   workflowDialogsModule = await viteServer.ssrLoadModule("/src/components/WorkflowDialogs.jsx");
+  workflowSidebarModule = await viteServer.ssrLoadModule("/src/components/WorkflowSidebar.jsx");
+  appChromeModule = await viteServer.ssrLoadModule("/src/components/AppChrome.jsx");
   legacyTomlModule = await viteServer.ssrLoadModule("/src/components/LegacyTomlWorkflows.jsx");
   legacyTomlLibModule = await viteServer.ssrLoadModule("/src/lib/legacyToml.js");
   chatAttachmentsModule = await viteServer.ssrLoadModule("/src/lib/chatAttachments.js");
@@ -194,6 +226,7 @@ before(async () => {
   ticketPatchReviewModule = await viteServer.ssrLoadModule("/src/components/TicketPatchReview.jsx");
   ticketReviewModule = await viteServer.ssrLoadModule("/src/lib/ticketReview.js");
   organizationSheetModule = await viteServer.ssrLoadModule("/src/components/OrganizationSheet.jsx");
+  organizationWorkspaceModule = await viteServer.ssrLoadModule("/src/components/OrganizationWorkspace.jsx");
   organizationModelModule = await viteServer.ssrLoadModule("/src/lib/organizationModel.js");
   organizationApproveAllModule = await viteServer.ssrLoadModule("/src/components/OrganizationApproveAll.jsx");
   organizationAutoModeModule = await viteServer.ssrLoadModule("/src/components/OrganizationAutoMode.jsx");
@@ -451,12 +484,12 @@ test("text zoom clamps stored values and recognizes keyboard zoom shortcuts", ()
   const storage = {
     getItem: () => "175",
   };
-  assert.equal(appModule.loadTextZoom(storage), 150);
-  assert.equal(appModule.nextTextZoom(100, 1), 110);
-  assert.equal(appModule.nextTextZoom(80, -1), 80);
-  assert.equal(appModule.textZoomDirection({ ctrlKey: true, key: "+" }), 1);
-  assert.equal(appModule.textZoomDirection({ ctrlKey: true, key: "-" }), -1);
-  assert.equal(appModule.textZoomDirection({ ctrlKey: true, key: "a" }), 0);
+  assert.equal(appSettingsModule.loadTextZoom(storage), 150);
+  assert.equal(appSettingsModule.nextTextZoom(100, 1), 110);
+  assert.equal(appSettingsModule.nextTextZoom(80, -1), 80);
+  assert.equal(appSettingsModule.textZoomDirection({ ctrlKey: true, key: "+" }), 1);
+  assert.equal(appSettingsModule.textZoomDirection({ ctrlKey: true, key: "-" }), -1);
+  assert.equal(appSettingsModule.textZoomDirection({ ctrlKey: true, key: "a" }), 0);
 });
 
 test("text zoom stays consistent across views and ignores the graph visualization", async () => {
@@ -491,7 +524,7 @@ test("text zoom stays consistent across views and ignores the graph visualizatio
         view: "code",
         workflowId: workflow.id,
       }),
-      [appModule.TEXT_ZOOM_STORAGE_KEY]: "100",
+      [appSettingsModule.TEXT_ZOOM_STORAGE_KEY]: "100",
     },
   });
 
@@ -1123,6 +1156,79 @@ test("Rem follows new text only while the conversation is at the bottom", async 
   assert.equal(scrollPane.scrollTop, 720);
 
   await dom.unmount();
+});
+
+test("thread chats count messages that arrive while you read further up and jump to them", async () => {
+  const controlledStream = controlledStreamResponse([
+    '{"type":"thought","text":"Checking the workflow"}\n',
+    '{"type":"compaction","message":"Compacting Rem context"}\n{"type":"final","message":{"body":"The workflow is ready."}}\n',
+  ]);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url) => (url === "/api/chat/stream" ? controlledStream.response(url) : null),
+  ]);
+  const workflow = workflowFixture({ id: "testing", name: "Testing" });
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
+    activeWorkflowId: workflow.id,
+    onOpenMarkdownLink() {},
+    onResizeKeyDown() {},
+    onResizeStart() {},
+    width: 380,
+    workflow,
+    workflows: [workflow],
+  }), fetchMock);
+  const scrollPane = allElements(dom.container).find(
+    (element) => element.getAttribute?.("data-chat-scroll") === "true",
+  );
+  const newMessagesButton = () => allElements(dom.container).find(
+    (element) => element.tagName === "BUTTON" && /new messages?$/.test(textOf(element)),
+  );
+  scrollPane.clientHeight = 100;
+  scrollPane.scrollHeight = 500;
+  scrollPane.scrollTop = 400;
+
+  await dom.change(dom.first("textarea"), "Inspect this workflow");
+  await dom.click(dom.byTitle("Send message"));
+  await dom.flush();
+  controlledStream.releaseNext();
+  await dom.flush();
+  assert.equal(newMessagesButton(), undefined);
+
+  // Read further up, then two messages arrive.
+  scrollPane.scrollTop = 120;
+  await dom.pointer(scrollPane, "onScroll");
+  scrollPane.scrollHeight = 800;
+  controlledStream.releaseNext();
+  await dom.flush();
+  assert.equal(scrollPane.scrollTop, 120);
+  assert.equal(textOf(newMessagesButton()), "2 new messages");
+
+  const scrolled = [];
+  scrollPane.scrollTo = (options) => {
+    scrolled.push(options);
+    scrollPane.scrollTop = options.top;
+  };
+  await dom.click(newMessagesButton());
+  assert.equal(newMessagesButton(), undefined);
+  assert.deepEqual(scrolled, [{ top: 800, behavior: "smooth" }]);
+  assert.equal(scrollPane.scrollTop, scrollPane.scrollHeight);
+  // The smooth jump passing through the middle keeps the chat following new text.
+  scrollPane.scrollTop = 500;
+  await dom.pointer(scrollPane, "onScroll");
+  scrollPane.scrollTop = 800;
+  await dom.pointer(scrollPane, "onScroll");
+  assert.equal(newMessagesButton(), undefined);
+
+  await dom.unmount();
+});
+
+test("thread chats count only messages after the newest row you saw", () => {
+  const row = id => ({ type: "message", message: { id } });
+  const seen = new Set(["a", "b"]);
+  // Earlier pages load above what you saw and never count; thought groups don't either.
+  assert.equal(chatPaneModule.unseenConversationMessages([row("old"), row("a"), row("b")], seen), 0);
+  assert.equal(chatPaneModule.unseenConversationMessages([row("a"), row("b"), { type: "thought-group", id: "t" }, row("c"), row("d")], seen), 2);
+  assert.equal(chatPaneModule.unseenConversationMessages([row("x")], seen), null);
 });
 
 test("assistant threads open at the bottom and returning home resets the pane to the top", async () => {
@@ -2608,6 +2714,210 @@ test("app crash fallback exposes recovery actions and complete diagnostics", () 
   assert.equal(issueUrl.origin + issueUrl.pathname, "https://github.com/zacharyivie/Raticode/issues/new");
   assert.match(issueUrl.searchParams.get("title"), /^Crash: ReferenceError:/);
   assert.ok(issueUrl.searchParams.get("body").includes(`Raticode v${frontendPackage.version}`));
+
+  // The public issue names neither the account nor its folders.
+  const local = crashBoundaryModule.createCrashDetails(new Error("Path does not exist: /home/alice/proj/a.md"), "", {
+    stack: "Error: x\n    at f (file:///C:/Users/Alice%20B/AppData/Local/Programs/Raticode/resources/app.asar/dist/assets/App.js:1:2)\n    at g (C:\\Users\\alice\\proj\\b.js:3:4)\n    at h (/Users/alice/proj/c.js:5:6)",
+    url: "file:///C:/Users/Alice%20B/AppData/Local/Programs/Raticode/resources/app.asar/dist/index.html#/",
+  });
+  const shared = new URL(crashBoundaryModule.issueUrlForCrash(local));
+  const text = `${shared.searchParams.get("title")}\n${shared.searchParams.get("body")}`;
+  assert.doesNotMatch(text, /alice/i);
+  assert.match(text, /app\.asar\/dist\/assets\/App\.js:1:2/);
+  assert.match(text, /Path does not exist: ~\/proj\/a\.md/);
+});
+
+test("Help lists Documentation, Keyboard Shortcuts, Troubleshooting, Report a Problem and About Raticode, and a report carries only the version and system", async () => {
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  // developer.info() also returns folders; none of them may reach a report.
+  const desktop = { developer: { info: async () => ({
+    version: frontendPackage.version, platform: "linux x64", electron: "42.1.0", node: "24.1.0",
+    dataDir: "/home/someone/.local/state/raticode", userData: "/home/someone/.config/Raticode", logs: "/home/someone/logs",
+    archiveFolder: "/home/someone/secret-project/archive",
+  }) } };
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { desktop });
+  const opened = [];
+  window.open = (...args) => opened.push(args);
+  const copied = [];
+  navigator.clipboard.writeText = async (value) => copied.push(value);
+  const helpItem = async (label) => {
+    await dom.click(allElements(dom.container).find(element => element.getAttribute?.("data-menu-trigger") === "Help"));
+    const menu = allElements(dom.container).find(element => element.getAttribute?.("role") === "menu");
+    const items = allElements(menu).filter(element => element.getAttribute?.("role") === "menuitem").map(element => textOf(element).trim());
+    const item = allElements(menu).find(element => element.getAttribute?.("role") === "menuitem" && textOf(element).trim().startsWith(label));
+    assert.ok(item, `Help has ${label}`);
+    await dom.click(item);
+    for (let index = 0; index < 4; index += 1) await dom.flush();
+    return items;
+  };
+  try {
+    await dom.flush(); await dom.flush();
+    const items = await helpItem("Documentation");
+    for (const label of ["Documentation", "Keyboard Shortcuts", "Troubleshooting", "Report a Problem", "What's New", "Check for Updates", "Settings", "About Raticode"]) {
+      assert.ok(items.some(item => item.startsWith(label)), `Help lists ${label}: ${items.join(", ")}`);
+    }
+    assert.deepEqual(opened.at(-1), ["https://raticode.dev/docs/getting-started", "_blank", "noopener,noreferrer"]);
+    await helpItem("Troubleshooting");
+    assert.deepEqual(opened.at(-1), ["https://raticode.dev/docs/reference/troubleshooting", "_blank", "noopener,noreferrer"]);
+
+    await helpItem("Report a Problem");
+    const [reportUrl, target, features] = opened.at(-1);
+    assert.equal(target, "_blank");
+    assert.equal(features, "noopener,noreferrer");
+    assert.ok(reportUrl.startsWith("https://github.com/zacharyivie/Raticode/issues/new"), reportUrl);
+    const body = new URL(reportUrl).searchParams.get("body");
+    assert.match(body, /^### What happened\n\n\n\n### Raticode details/);
+    assert.ok(body.includes(`Raticode: ${frontendPackage.version}`), body);
+    assert.match(body, /OS: Linux\nArchitecture: x64\nElectron: 42\.1\.0/);
+    assert.doesNotMatch(reportUrl, /someone|secret-project|state|\.config/);
+
+    await helpItem("About Raticode");
+    const dialog = allElements(dom.container).find(element => element.getAttribute?.("data-testid") === "about-raticode");
+    assert.ok(dialog, "About Raticode opens");
+    assert.match(textOf(dialog), new RegExp(`Version${frontendPackage.version.replaceAll(".", "\\.")}`));
+    assert.match(textOf(dialog), /Linux/);
+    assert.match(textOf(dialog), /42\.1\.0/);
+    await dom.click(allElements(dialog).find(element => element.tagName === "BUTTON" && textOf(element).trim() === "Copy"));
+    await dom.flush();
+    assert.deepEqual(copied, [`Raticode: ${frontendPackage.version}\nOS: Linux\nArchitecture: x64\nElectron: 42.1.0`]);
+    await dom.click(allElements(dialog).find(element => element.tagName === "BUTTON" && textOf(element).trim() === "Close"));
+    await dom.flush();
+
+    // Keyboard Shortcuts switches Settings to Keybindings even when Settings is already open.
+    await helpItem("Settings");
+    const generalShown = () => allElements(dom.container).some(element => element.getAttribute?.("aria-current") === "page" && textOf(element).trim() === "General");
+    for (let index = 0; index < 20 && !generalShown(); index += 1) await dom.flush(5);
+    assert.ok(generalShown(), "Settings opens on General");
+    await helpItem("Keyboard Shortcuts");
+    const keybindingsShown = () => allElements(dom.container).some(element => element.getAttribute?.("aria-current") === "page" && textOf(element).trim() === "Keybindings");
+    for (let index = 0; index < 20 && !keybindingsShown(); index += 1) await dom.flush(5);
+    assert.ok(keybindingsShown(), "Settings opens on Keybindings");
+    // After picking another category inside Settings, asking again still switches back.
+    await dom.click(allElements(dom.container).find(element => element.tagName === "BUTTON" && textOf(element).trim() === "General"));
+    for (let index = 0; index < 20 && !generalShown(); index += 1) await dom.flush(5);
+    assert.ok(generalShown(), "General picked inside Settings");
+    await helpItem("Keyboard Shortcuts");
+    for (let index = 0; index < 20 && !keybindingsShown(); index += 1) await dom.flush(5);
+    assert.ok(keybindingsShown(), "Keyboard Shortcuts switches back to Keybindings");
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("a view that throws while rendering shows its own fallback and Reload this view, while the rail and Rem keep working", async () => {
+  // A posts list that isn't a list makes the Posts board throw while it renders.
+  let social = { posts: 5, accounts: [], paused: false, settings: {}, platforms: [] };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url, options = {}) => url === "/api/social" && (options.method ?? "GET") === "GET"
+      ? { ok: true, status: 200, json: async () => structuredClone(social) } : null,
+  ]);
+  const logged = [];
+  const storage = { [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ plugins: { enabled: { posts: true } }, layout: { assistantPaneContent: "rem" } }) };
+  const caughtErrors = console.error;
+  console.error = () => {}; // React reports each caught render error here.
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    desktop: { developer: { log: async (text) => { logged.push(text); } } },
+    storage,
+  });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const button = text => find(node => node.tagName === "BUTTON" && textOf(node).trim() === text);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const remBox = () => find(node => node.tagName === "TEXTAREA" && node.getAttribute("aria-label") === "Message Rem");
+  const postsBoard = () => find(node => node.getAttribute?.("data-testid") === "posts-dashboard");
+  const assertRestOfAppRuns = () => {
+    assert.doesNotMatch(dom.text(), /Something snapped\./, "the whole-window crash page is not shown");
+    const rail = allElements(dom.container).filter(node => String(node.getAttribute?.("id") || "").startsWith("sidebar-tab-")).map(node => node.getAttribute("aria-label"));
+    assert.ok(rail.includes("Posts") && rail.includes("Rem") && rail.includes("Workflows"), `the activity rail is still there: ${rail}`);
+    assert.ok(remBox(), "Rem's chat is still there");
+    assert.ok(find(node => node.getAttribute?.("data-rem-pane") === "true"), "Rem still fills the side pane");
+  };
+  try {
+    await until(() => remBox() && find(node => node.getAttribute?.("id") === "sidebar-tab-posts"));
+    await dom.click(dom.byLabel("Posts"));
+    await until(() => dom.text().includes("Posts stopped working"));
+
+    // The Posts view shows its own fallback with the error and recovery actions.
+    const fallback = find(node => node.getAttribute?.("data-view-crash") === "Posts");
+    assert.ok(fallback, "Posts shows a fallback in its own place");
+    assert.match(textOf(fallback), /Posts stopped working/);
+    assert.match(textOf(fallback), /TypeError: .*filter is not a function/);
+    assert.ok(button("Reload this view") && button("Copy details"));
+    const report = find(node => node.tagName === "A" && textOf(node).trim() === "Report");
+    assert.match(new URL(report.getAttribute("href")).searchParams.get("title"), /^Crash: TypeError:/);
+    assert.equal(postsBoard(), undefined);
+    assertRestOfAppRuns();
+    assert.ok(logged.some(text => text.startsWith("Posts view: TypeError")), "the error goes to the developer log");
+
+    // Once the cause is gone, Reload this view renders Posts again.
+    social = { ...social, posts: [] };
+    await dom.click(button("Reload this view"));
+    await until(() => postsBoard() && !dom.text().includes("Loading posts"));
+    assert.ok(postsBoard(), "Posts renders again");
+    assert.doesNotMatch(dom.text(), /Posts stopped working/);
+    assertRestOfAppRuns();
+
+    // Switching to another view and back resets a crashed view too.
+    social = { ...social, posts: 5 };
+    await dom.click(dom.byLabel("Workflows"));
+    await dom.click(dom.ancestor(dom.byText("Workflow A"), node => node.getAttribute?.("role") === "button"));
+    await dom.click(dom.byLabel("Posts"));
+    await until(() => dom.text().includes("Posts stopped working"));
+    assert.ok(find(node => node.getAttribute?.("data-view-crash") === "Posts"));
+    social = { ...social, posts: [] };
+    await dom.click(dom.byLabel("Workflows"));
+    await dom.click(dom.ancestor(dom.byText("Workflow A"), node => node.getAttribute?.("role") === "button"));
+    await until(() => !dom.text().includes("Posts stopped working"));
+    await dom.click(dom.byLabel("Posts"));
+    await until(() => postsBoard());
+    assert.ok(postsBoard(), "Posts renders again after switching away and back");
+    assertRestOfAppRuns();
+  } finally {
+    console.error = caughtErrors;
+    await dom.unmount();
+  }
+});
+
+test("a view boundary reports the view and resets when its reset key changes", async () => {
+  let shouldThrow = true;
+  function Flaky() {
+    if (shouldThrow) throw new Error("graph layout failed");
+    return React.createElement("p", null, "Graph ready");
+  }
+  const { ViewCrashBoundary } = crashBoundaryModule;
+  let setVisible;
+  function Host() {
+    const [visible, update] = React.useState(true);
+    setVisible = update;
+    return React.createElement(ViewCrashBoundary, { name: "Workflow graph", resetKey: visible }, React.createElement(Flaky));
+  }
+  const caughtErrors = console.error;
+  console.error = () => {};
+  const dom = await mountReact(React.createElement(Host), createFetchMock([]));
+  try {
+    assert.match(dom.text(), /Workflow graph stopped working/);
+    assert.match(dom.text(), /Error: graph layout failed/);
+    shouldThrow = false;
+    // A view that is always mounted (the editor, the browser, Rem) resets when it is shown again.
+    await React.act(async () => setVisible(false));
+    assert.match(dom.text(), /Graph ready/);
+    const crash = crashBoundaryModule.createCrashDetails(new Error("x"), "", { view: "Workflow graph" });
+    assert.match(crashBoundaryModule.formatCrashReport(crash), /^View: Workflow graph$/m);
+  } finally {
+    console.error = caughtErrors;
+    await dom.unmount();
+  }
 });
 
 test("apiUrl normalizes relative paths, HTTP origins, trailing slashes, and prefixed bases", () => {
@@ -2739,6 +3049,7 @@ test("an approval with options shows one button per option and sends the typed r
 });
 
 test("every migrated dialog family uses the shared keyboard and focus contract", async (context) => {
+  const lifecycleDialogModule = await viteServer.ssrLoadModule("/src/components/LifecycleDialog.jsx");
   const approval = {
     workflowId: "demo",
     runId: "run-1",
@@ -2768,7 +3079,7 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
     },
     {
       name: "create workflow",
-      render: (onClose) => React.createElement(appModule.CreateWorkflowDialog, {
+      render: (onClose) => React.createElement(workflowDialogsModule.CreateWorkflowDialog, {
         error: "",
         open: true,
         saving: false,
@@ -2815,6 +3126,16 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
         onCancel: onClose,
         onDiscard() {},
         onSave() {},
+      }),
+    },
+    {
+      name: "quit with running workflow runs",
+      render: (onClose) => React.createElement(lifecycleDialogModule.LifecycleDialog, {
+        prompt: { reason: "quit Raticode", paths: ["/workspace/demo.txt"], runs: [{ key: "w:r", workflowName: "Nightly", startedBy: "Trigger", length: "3m 2s" }] },
+        onCancel: onClose,
+        onContinue() {},
+        onKeepDrafts() {},
+        onSaveAll() {},
       }),
     },
     {
@@ -2958,7 +3279,7 @@ test("button primitives used by dialogs and the inspector are defined", () => {
 });
 
 test("brand actions keep the indigo accent on hover and focus", () => {
-  for (const file of ["src/pages/App.jsx", "src/components/ChatPane.jsx", "src/components/ChatMessages.jsx", "src/components/DagCanvas.jsx", "src/components/InspectorFields.jsx", "src/components/RunTimelinePanel.jsx", "src/components/PathNameDialog.jsx", "src/components/RunPreviewDialog.jsx"]) {
+  for (const file of ["src/pages/App.jsx", "src/components/ChatPane.jsx", "src/components/ChatMessages.jsx", "src/components/DagCanvas.jsx", "src/components/RattishInspector.jsx", "src/components/InspectorFields.jsx", "src/components/RunTimelinePanel.jsx", "src/components/PathNameDialog.jsx", "src/components/RunPreviewDialog.jsx"]) {
     const source = fs.readFileSync(path.join(frontendRoot, file), "utf8");
     assert.doesNotMatch(source, /(hover|focus|focus-visible|focus-within):(bg|border|ring)-teal-/, file);
   }
@@ -3127,7 +3448,7 @@ test("workflow deletion closes source tabs and clears source preview state", () 
 
 test("workflow sidebar groups workflows by registered project folder", () => {
   assert.deepEqual(
-    appModule.groupWorkflowsByProject([
+    workflowSidebarModule.groupWorkflowsByProject([
       { id: "review", projectRoot: "/workspace/gofer-flow", projectName: "stale-workflow-slug" },
       { id: "release", projectRoot: "/workspace/gofer-flow", projectName: "gofer-flow" },
       { id: "deploy", projectRoot: "/workspace/deployment", projectName: "Deployment" },
@@ -3142,7 +3463,7 @@ test("workflow sidebar groups workflows by registered project folder", () => {
   );
 
   assert.deepEqual(
-    appModule.groupWorkflowsByProject(
+    workflowSidebarModule.groupWorkflowsByProject(
       [{ id: "review", projectRoot: "/workspace/gofer-flow" }],
       { "/workspace/gofer-flow": "Raticode" },
     ).map((group) => ({ name: group.name, root: group.root })),
@@ -3151,14 +3472,14 @@ test("workflow sidebar groups workflows by registered project folder", () => {
 });
 
 test("project folder menus stay inside the desktop viewport", () => {
-  assert.deepEqual(appModule.projectMenuPosition(790, 590, 800, 600), { x: 584, y: 438 });
-  assert.deepEqual(appModule.projectMenuPosition(-20, -30, 800, 600), { x: 8, y: 8 });
+  assert.deepEqual(workflowSidebarModule.projectMenuPosition(790, 590, 800, 600), { x: 584, y: 438 });
+  assert.deepEqual(workflowSidebarModule.projectMenuPosition(-20, -30, 800, 600), { x: 8, y: 8 });
 });
 
 test("project context menu renames only the local display label", async () => {
   window.localStorage.removeItem("gofer.projectLabels");
   const dom = await mountReact(
-    React.createElement(appModule.WorkflowSidebar, {
+    React.createElement(workflowSidebarModule.WorkflowSidebar, {
       activeWorkflowId: "review",
       loading: false,
       query: "",
@@ -3208,7 +3529,7 @@ test("workflow context menu opens its Rattish source in the code editor", async 
   };
   const edited = [];
   const dom = await mountReact(
-    React.createElement(appModule.WorkflowSidebar, {
+    React.createElement(workflowSidebarModule.WorkflowSidebar, {
       activeWorkflow: workflow,
       activeWorkflowId: workflow.id,
       loading: false,
@@ -3253,7 +3574,7 @@ test("workflow sidebar activities preserve expanded files while opening workflow
     sourcePath: "/workspace/gofer-flow/.raticode/review-pr/workflow.rattish",
   };
   const dom = await mountReact(
-    React.createElement(appModule.WorkflowSidebar, {
+    React.createElement(workflowSidebarModule.WorkflowSidebar, {
       activeWorkflow: workflow,
       activeWorkflowId: workflow.id,
       loading: false,
@@ -3351,7 +3672,7 @@ test("Code file explorer runs a workflow with a file through the Run dialog", as
   };
   const runs = [];
   const dom = await mountReact(
-    React.createElement(appModule.WorkflowSidebar, {
+    React.createElement(workflowSidebarModule.WorkflowSidebar, {
       activeCodePath: "",
       activeWorkflow: workflow,
       activeWorkflowId: workflow.id,
@@ -3525,7 +3846,7 @@ test("Code file explorer creates, copies, pastes, reveals, renames, and trashes 
     },
   };
   const dom = await mountReact(
-    React.createElement(appModule.WorkflowSidebar, {
+    React.createElement(workflowSidebarModule.WorkflowSidebar, {
       activeCodePath: "/workspace/gofer-flow/README.md",
       activeWorkflow: workflow,
       activeWorkflowId: workflow.id,
@@ -3867,7 +4188,7 @@ test("Code file explorer renders live Git file states and omits deleted files", 
     async trustProjectRoot() {},
   };
   const dom = await mountReact(
-    React.createElement(React.Fragment, null, React.createElement(appModule.WorkflowSidebar, {
+    React.createElement(React.Fragment, null, React.createElement(workflowSidebarModule.WorkflowSidebar, {
       activeWorkflow: workflow,
       activeWorkflowId: workflow.id,
       loading: false,
@@ -3892,7 +4213,7 @@ test("Code file explorer renders live Git file states and omits deleted files", 
       onSelectProject(projectRoot) { selectedProjects.push(projectRoot); },
       onRemoveRecentProject(projectRoot) { removedProjects.push(projectRoot); },
       onViewChange() {},
-    }), React.createElement(appModule.RecentProjectSelector, {
+    }), React.createElement(workflowSidebarModule.RecentProjectSelector, {
       projectRoot: workflow.projectRoot,
       recentProjectRoots: ["/workspace/gofer-flow", "/workspace/other-project"],
       onSelectProject(projectRoot) { selectedProjects.push(projectRoot); },
@@ -5145,7 +5466,7 @@ test("Rem's browser setting defaults to Raticode tabs and rejects unknown values
 });
 
 test("Rem's browser tabs open unselected and are left out of the saved editor session", () => {
-  const tab = appModule.agentBrowserTab({ id: "session-1", label: "  " });
+  const tab = browserTabsModule.agentBrowserTab({ id: "session-1", label: "  " });
   assert.deepEqual(tab, {
     agentLabel: "Rem",
     agentPartition: "persist:raticode-rem",
@@ -5157,13 +5478,13 @@ test("Rem's browser tabs open unselected and are left out of the saved editor se
     url: "about:blank",
   });
   const tabs = { "raticode-browser:a": { url: "https://example.com" }, "raticode-browser:b": tab };
-  assert.deepEqual(appModule.withoutAgentBrowserTabs(["/repo/a.js", "raticode-browser:a", "raticode-browser:b"], "raticode-browser:b", tabs), {
+  assert.deepEqual(browserTabsModule.withoutAgentBrowserTabs(["/repo/a.js", "raticode-browser:a", "raticode-browser:b"], "raticode-browser:b", tabs), {
     paths: ["/repo/a.js", "raticode-browser:a"],
     activePath: "raticode-browser:a",
     browserTabs: { "raticode-browser:a": { url: "https://example.com" } },
   });
   const unchanged = { "raticode-browser:a": { url: "https://example.com" } };
-  assert.deepEqual(appModule.withoutAgentBrowserTabs(["raticode-browser:a"], "raticode-browser:a", unchanged), {
+  assert.deepEqual(browserTabsModule.withoutAgentBrowserTabs(["raticode-browser:a"], "raticode-browser:a", unchanged), {
     paths: ["raticode-browser:a"],
     activePath: "raticode-browser:a",
     browserTabs: unchanged,
@@ -5171,16 +5492,16 @@ test("Rem's browser tabs open unselected and are left out of the saved editor se
   // The paired phone's browser sees each browser tab in strip order, marked as yours or Rem's,
   // with the browser it runs in.
   const withEngines = { ...tabs, "raticode-browser:a": { url: "https://example.com", engine: "gecko" }, "raticode-browser:b": { ...tab, agentEngine: "edge", engine: "edge" } };
-  assert.deepEqual(appModule.phoneBrowserTabs(["/repo/a.js", "raticode-browser:a", "raticode-browser:b"], "raticode-browser:a", withEngines), [
+  assert.deepEqual(devicesModule.phoneBrowserTabs(["/repo/a.js", "raticode-browser:a", "raticode-browser:b"], "raticode-browser:a", withEngines), [
     { id: "raticode-browser:a", title: "", url: "https://example.com", active: true, engine: "gecko", owner: "you" },
     { id: "raticode-browser:b", title: "", url: "about:blank", active: false, engine: "edge", owner: "rem", label: "Rem" },
   ]);
   // Tabs without a browser are Raticode (chromium)'s.
-  assert.equal(appModule.phoneBrowserTabs(["raticode-browser:a"], "", tabs)[0].engine, "raticode");
+  assert.equal(devicesModule.phoneBrowserTabs(["raticode-browser:a"], "", tabs)[0].engine, "raticode");
 });
 
 test("workflow switches retain editor tabs from every project", () => {
-  assert.deepEqual(appModule.mergeCodeOpenPaths(
+  assert.deepEqual(workspacePathsModule.mergeCodeOpenPaths(
     ["/projects/alpha/workflow.rattish", "/projects/alpha/src/app.js"],
     ["/projects/beta/workflow.rattish", ""],
   ), [
@@ -5188,7 +5509,7 @@ test("workflow switches retain editor tabs from every project", () => {
     "/projects/alpha/src/app.js",
     "/projects/beta/workflow.rattish",
   ]);
-  assert.deepEqual(appModule.mergeCodeOpenPaths(
+  assert.deepEqual(workspacePathsModule.mergeCodeOpenPaths(
     ["/projects/alpha/workflow.rattish", "/projects/beta/workflow.rattish"],
     ["/projects/alpha/workflow.rattish"],
   ), ["/projects/alpha/workflow.rattish", "/projects/beta/workflow.rattish"]);
@@ -5228,7 +5549,7 @@ test("recent project ordering uses native editor conventions", () => {
     root: "/repo/feature",
     worktrees: [{ path: "/repo/main" }, { path: "/repo/feature" }],
   }, "/repo/fallback"), "/repo/main");
-  assert.equal(codeFileExplorerModule.mainWorktreePath(
+  assert.equal(sourceControlModule.mainWorktreePath(
     [{ path: "/repo/main" }, { path: "/repo/feature" }],
     "/repo/fallback",
   ), "/repo/main");
@@ -5336,7 +5657,7 @@ test("application menus use configured shortcuts and expose recent projects", as
     },
   });
   const dom = await mountReact(
-    React.createElement(appModule.ApplicationMenus, {
+    React.createElement(appChromeModule.ApplicationMenus, {
       recentProjectRoots: ["/workspace/gofer-flow", "/workspace/second-brain"],
       settings,
       view: "code",
@@ -5613,6 +5934,88 @@ test("recent files retain history and show errors when inspection is unavailable
   assert.match(dom.text(), /Permission denied opening notes.md/);
   assert.ok(dom.byText("notes.md"));
   assert.deepEqual(JSON.parse(window.localStorage.getItem(appModule.RECENT_FILES_STORAGE_KEY)), [kept]);
+  await dom.unmount();
+});
+
+// The window answers main.js's gofer:prepare-lifecycle through this callback.
+function lifecycleDesktop() {
+  const desktop = { onPrepareLifecycle(callback) { desktop.prepare = callback; return () => {}; } };
+  return desktop;
+}
+
+async function flushUntil(dom, ready) {
+  for (let tries = 0; tries < 10 && !ready(); tries += 1) await dom.flush();
+}
+
+test("Quit and Restart to update name the workflow runs they would cut off and ask first", async () => {
+  const runsUrls = [];
+  const startedAt = new Date(Date.now() - 125_000).toISOString();
+  const desktop = lifecycleDesktop();
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    (url) => {
+      if (!String(url).startsWith("/api/rattish/runs?")) return null;
+      runsUrls.push(url);
+      return { ok: true, status: 200, json: async () => ({ runs: [
+        { workflowId: "nightly", id: "run-1", workflowName: "Nightly report", status: "running", startedBy: "trigger", startedAt, durationSeconds: 0 },
+      ] }) };
+    },
+  ]), { desktop });
+  await dom.flush();
+  const dialog = () => allElements(dom.container).find((node) => node.getAttribute?.("data-testid") === "lifecycle-dialog");
+
+  const cancelled = desktop.prepare({ requestId: "quit-1", reason: "quit Raticode" });
+  await flushUntil(dom, dialog);
+  assert.ok(dialog(), "a running run should hold the quit for an answer");
+  assert.equal(new URL(runsUrls[0], "http://x").searchParams.get("status"), "running");
+  assert.match(textOf(dialog()), /Nightly report · Started by Trigger · running 2m \d+s/);
+  assert.match(textOf(dialog()), /If you quit Raticode now, this run stops\. Resume in Runs starts it again/);
+  assert.doesNotMatch(textOf(dialog()), /Keep drafts|Save all/);
+  await dom.click(dom.byExactText("Cancel"));
+  assert.equal(await cancelled, false);
+  assert.equal(dialog(), undefined);
+
+  const quit = desktop.prepare({ requestId: "quit-2", reason: "quit Raticode" });
+  await flushUntil(dom, dialog);
+  await dom.click(dom.byExactText("Quit anyway"));
+  assert.equal(await quit, true);
+
+  const update = desktop.prepare({ requestId: "update-1", reason: "install the update" });
+  await flushUntil(dom, dialog);
+  assert.ok(dom.byExactText("Restart anyway"));
+  await dom.click(dom.byExactText("Restart anyway"));
+  assert.equal(await update, true);
+  await dom.unmount();
+});
+
+test("Quit goes by unsaved files alone when the run list fails or is slow", async () => {
+  let slow = false;
+  const desktop = lifecycleDesktop();
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    (url) => {
+      if (!String(url).startsWith("/api/rattish/runs?")) return null;
+      if (slow) return new Promise(() => {});
+      return { ok: false, status: 503, json: async () => ({ error: "Backend is restarting" }) };
+    },
+  ]), { desktop });
+  await dom.flush();
+  const dialog = () => allElements(dom.container).find((node) => node.getAttribute?.("role") === "dialog");
+
+  const failed = desktop.prepare({ requestId: "quit-1", reason: "quit Raticode" });
+  await flushUntil(dom, () => false);
+  assert.equal(dialog(), undefined);
+  assert.equal(await failed, true);
+
+  slow = true;
+  let answer;
+  void desktop.prepare({ requestId: "quit-2", reason: "quit Raticode" }).then((value) => { answer = value; });
+  await dom.flush();
+  assert.equal(answer, undefined, "the quit waits for the run list for a moment");
+  await dom.flush(2000);
+  await flushUntil(dom, () => answer !== undefined);
+  assert.equal(answer, true);
+  assert.equal(dialog(), undefined);
   await dom.unmount();
 });
 
@@ -6017,6 +6420,234 @@ test("DagCanvas shows only the Rattish inspector, and none without a Rattish doc
   } finally {
     await rattish.unmount();
   }
+});
+
+// A small Rattish document for mounting RattishInspector on its own: one agent node
+// whose contract has max_tokens and profile, and two routes out of it.
+function rattishInspectorDocument() {
+  const plainNode = (id) => ({
+    id, label: id, type: "bash-command",
+    configuration: { command: "echo ok" },
+    execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+    authoredFields: {}, bindings: [], needs: [], diagnostics: [],
+  });
+  return {
+    workflowId: "inspector-direct",
+    workflow: { name: "Inspector direct", fields: {} },
+    source: "",
+    nodeContracts: [
+      {
+        nodeType: "agent",
+        configurationSchema: {
+          properties: {
+            max_tokens: { type: "integer", minimum: 1 },
+            profile: { type: "string" },
+          },
+        },
+      },
+      { nodeType: "bash-command", configurationSchema: { properties: {} } },
+    ],
+    graph: {
+      nodes: [
+        {
+          id: "draft", label: "draft", type: "agent",
+          configuration: { max_tokens: 400, profile: "work" },
+          execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+          authoredFields: { "max-tokens": { value: 400 }, profile: { value: "work" }, type: { value: "agent" } },
+          bindings: [], needs: [], diagnostics: [],
+        },
+        plainNode("review"),
+        plainNode("publish"),
+      ],
+      edges: [
+        { id: "draft->review", from: "draft", to: "review", mode: "unconditional" },
+        { id: "draft->publish", from: "draft", to: "publish", mode: "when", predicateSource: "node.draft.output.ok" },
+      ],
+    },
+  };
+}
+
+async function mountRattishInspector(props) {
+  const calls = { mutations: [], renames: [] };
+  const dom = await mountReact(
+    React.createElement(rattishInspectorModule.RattishInspector, {
+      collapsed: false,
+      document: rattishInspectorDocument(),
+      width: 360,
+      onMutate(mutations) {
+        calls.mutations.push(mutations);
+        return Promise.resolve({ source: "" });
+      },
+      onRenameNode(oldId, newId) {
+        calls.renames.push([oldId, newId]);
+      },
+      ...props,
+    }),
+    createFetchMock([]),
+  );
+  return { calls, dom };
+}
+
+test("RattishInspector sends a contract field edit as one set_field with the hyphenated name, and Use default removes it", async () => {
+  const { calls, dom } = await mountRattishInspector({ node: { id: "draft" } });
+  try {
+    await dom.click(dom.byExactText("Action"));
+    const maxTokens = () => dom.controlAfterLabel("Max Tokens");
+    assert.equal(maxTokens().value, "400");
+    await dom.focus(maxTokens());
+    await dom.change(maxTokens(), "800");
+    assert.deepEqual(calls.mutations, [], "a draft is not saved before the field loses focus");
+    await dom.blur(maxTokens());
+    await dom.flush();
+    assert.deepEqual(calls.mutations, [
+      [{ kind: "set_field", target: { node: "draft" }, field: "max-tokens", value: 800 }],
+    ]);
+
+    // A field without an underscore keeps its name.
+    const profile = () => dom.controlAfterLabel("Profile");
+    await dom.focus(profile());
+    await dom.change(profile(), "personal");
+    await dom.blur(profile());
+    await dom.flush();
+    assert.deepEqual(calls.mutations.at(-1), [
+      { kind: "set_field", target: { node: "draft" }, field: "profile", value: "personal" },
+    ]);
+
+    // Both fields are authored, so each has its own Use default; the first is Max Tokens.
+    const resets = allElements(dom.container).filter(
+      (element) => element.tagName === "BUTTON" && textOf(element) === "Use default",
+    );
+    assert.equal(resets.length, 2);
+    await dom.click(resets[0]);
+    assert.deepEqual(calls.mutations.at(-1), [
+      { kind: "remove_field", target: { node: "draft" }, field: "max-tokens" },
+    ]);
+    assert.equal(calls.mutations.length, 3);
+    assert.deepEqual(calls.renames, []);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("RattishInspector sends a route edit as one set_routes with every route from that node", async () => {
+  const { calls, dom } = await mountRattishInspector({
+    edge: { id: "draft->review", from: "draft", to: "review" },
+  });
+  try {
+    assert.equal(dom.byText("Route inspector").tagName, "H2");
+    const mode = dom.controlAfterLabel("Mode");
+    assert.equal(reactProps(mode).value, "unconditional");
+    await dom.change(mode, "otherwise");
+    assert.deepEqual(calls.mutations, [
+      [
+        {
+          kind: "set_routes",
+          node: "draft",
+          routes: [
+            { target: "review", mode: "otherwise" },
+            { target: "publish", mode: "when", predicateSource: "node.draft.output.ok" },
+          ],
+        },
+      ],
+    ]);
+  } finally {
+    await dom.unmount();
+  }
+
+  // Editing the conditional route's condition keeps the other route as it is.
+  const conditional = await mountRattishInspector({
+    edge: { id: "draft->publish", from: "draft", to: "publish" },
+  });
+  try {
+    const condition = conditional.dom.controlAfterLabel("Condition");
+    assert.equal(condition.value, "node.draft.output.ok");
+    await conditional.dom.focus(condition);
+    await conditional.dom.change(condition, "node.draft.output.ready");
+    await conditional.dom.blur(condition);
+    await conditional.dom.flush();
+    assert.deepEqual(conditional.calls.mutations, [
+      [
+        {
+          kind: "set_routes",
+          node: "draft",
+          routes: ["review", { target: "publish", mode: "when", predicateSource: "node.draft.output.ready" }],
+        },
+      ],
+    ]);
+  } finally {
+    await conditional.dom.unmount();
+  }
+});
+
+test("RattishInspector refuses a bad or empty node ID and renames only with a valid one", async () => {
+  const { calls, dom } = await mountRattishInspector({ node: { id: "draft" } });
+  try {
+    const id = () => dom.controlAfterLabel("ID");
+    await dom.focus(id());
+    await dom.change(id(), "2-bad");
+    await dom.blur(id());
+    await dom.flush();
+    assert.equal(id().value, "2-bad");
+    assert.equal(id().getAttribute("aria-invalid"), "true");
+    assert.ok(dom.byExactText("Use letters, numbers, and single hyphens, starting with a letter."));
+    assert.deepEqual(calls.renames, []);
+
+    await dom.focus(id());
+    await dom.change(id(), "");
+    await dom.blur(id());
+    await dom.flush();
+    assert.ok(dom.byExactText("Enter a node ID."));
+    assert.doesNotMatch(dom.text(), /single hyphens/);
+    assert.deepEqual(calls.renames, []);
+
+    await dom.focus(id());
+    await dom.change(id(), "draft-two");
+    await dom.keyDown(id(), "Enter");
+    await dom.flush();
+    assert.deepEqual(calls.renames, [["draft", "draft-two"]]);
+    assert.doesNotMatch(dom.text(), /Enter a node ID|single hyphens/);
+    assert.deepEqual(calls.mutations, [], "a rename goes through onRenameNode, not onMutate");
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("RattishInspector MCP helpers build the tool list request and summarize a tool's arguments", () => {
+  const { mcpArgumentSummary, mcpToolsQuery } = rattishInspectorModule;
+  const query = (configuration) => {
+    const [path, search] = mcpToolsQuery(configuration).split("?");
+    assert.equal(path, "/rem-resources/mcp-tools");
+    return new URLSearchParams(search);
+  };
+
+  const anyNetwork = query({ server: "files", network: "any", sandbox: "off" });
+  assert.equal(anyNetwork.get("name"), "files");
+  assert.deepEqual(anyNetwork.getAll("network"), ["any"]);
+  assert.equal(anyNetwork.get("sandbox"), "off");
+
+  const hosts = query({ server: "web", network: ["api.example.com", "cdn.example.com"] });
+  assert.deepEqual(hosts.getAll("network"), ["api.example.com", "cdn.example.com"]);
+  assert.equal(hosts.has("sandbox"), false);
+
+  // Only "off" turns the sandbox off; no server still names the parameter.
+  const plain = query({ sandbox: "on" });
+  assert.equal(plain.get("name"), "");
+  assert.equal(plain.has("network"), false);
+  assert.equal(plain.has("sandbox"), false);
+  assert.equal(mcpToolsQuery(), "/rem-resources/mcp-tools?name=");
+
+  assert.equal(mcpArgumentSummary({ name: "ping", inputSchema: {} }), "This tool takes no arguments.");
+  assert.equal(mcpArgumentSummary({ name: "ping" }), "This tool takes no arguments.");
+  assert.equal(
+    mcpArgumentSummary({
+      name: "search",
+      inputSchema: {
+        properties: { query: { type: "string" }, limit: { type: "integer" }, filter: {} },
+        required: ["query"],
+      },
+    }),
+    "Arguments: query (string), limit? (integer), filter? (any)",
+  );
 });
 
 test("a refused inspector save keeps the typed draft and says why under the field", async () => {
@@ -6878,6 +7509,98 @@ test("list and name/value node fields edit as rows, with Edit as JSON as the fal
   }
 });
 
+test("each node field shows its contract description under the label, linked to the control", async () => {
+  const contract = (type) => {
+    const document = JSON.parse(fs.readFileSync(path.join(repoRoot, "rattish/contracts", `${type}.json`), "utf8"));
+    return { nodeType: type, configurationSchema: document.configuration_schema, defaults: document.defaults };
+  };
+  const node = (id, type, configuration) => ({
+    id,
+    label: id,
+    type,
+    configuration,
+    execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+    authoredFields: { type: { value: type } },
+    bindings: [],
+    needs: [],
+    diagnostics: [],
+  });
+  const rattishDocument = {
+    workflowId: "help",
+    source: "Rattish: 1\nWorkflow:\n  name: Help\n",
+    workflow: { name: "Help", fields: { name: { value: "Help" } } },
+    nodeContracts: [contract("http-request"), contract("delete-file"), contract("local-search")],
+    graph: {
+      nodes: [
+        node("fetch", "http-request", { url: "https://example.com", headers: {}, response_mode: "auto" }),
+        node("tidy", "delete-file", { path: "old.txt", use_trash: true }),
+        node("lookup", "local-search", { index_path: "index", query: "rats", top_k: 5 }),
+      ],
+      edges: [],
+    },
+  };
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "help", name: "Help" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    rattishDocument,
+  );
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, { workflow, rattishDocument, onWorkflowChange() {} }),
+    createFetchMock([]),
+  );
+  const byId = (id) => allElements(dom.container).find((element) => element.getAttribute?.("id") === id);
+  // The help line's element, and the control (or row group) it describes.
+  const described = (help) => {
+    const line = dom.byExactText(help);
+    const id = line.getAttribute("id");
+    assert.ok(id, `${help} has an id`);
+    const control = allElements(dom.container).find((element) =>
+      (element.getAttribute?.("aria-describedby") ?? "").split(" ").includes(id),
+    );
+    assert.ok(control, `a control is described by ${help}`);
+    return control;
+  };
+  const nameOf = (control) => byId(control.getAttribute("aria-labelledby")).textContent;
+  const openAction = async (nodeId) => {
+    await dom.pointer(dom.ancestor(dom.byText(nodeId), "ARTICLE"), "onPointerDown");
+    await dom.flush();
+    await dom.click(dom.byText("Action"));
+    await dom.flush();
+  };
+  try {
+    await openAction("fetch");
+    assert.match(dom.text(), /String HTTP headers\./);
+    const headers = described("String HTTP headers.");
+    assert.equal(headers.tagName, "FIELDSET");
+    assert.equal(headers.getAttribute("data-rattish-rows"), "map");
+
+    const url = described("HTTP or HTTPS endpoint.");
+    assert.equal(url.tagName, "INPUT");
+    assert.equal(nameOf(url), "Url");
+    const mode = described("Response interpretation.");
+    assert.equal(mode.tagName, "SELECT");
+    assert.equal(nameOf(mode), "Response Mode");
+    const body = described("Text request body.");
+    assert.equal(body.tagName, "TEXTAREA");
+    assert.equal(nameOf(body), "Body");
+    // Retry has its own fields, so it opens in the JSON box.
+    const retry = described("Attempt count, backoff, and retry-on-statuses map.");
+    assert.equal(retry.tagName, "TEXTAREA");
+    assert.equal(nameOf(retry), "Retry");
+
+    await openAction("tidy");
+    const trash = described("Use trash rather than permanent removal.");
+    assert.equal(trash.getAttribute("type"), "checkbox");
+    assert.equal(nameOf(trash), "Use Trash");
+
+    await openAction("lookup");
+    const topK = described("Maximum returned results.");
+    assert.equal(topK.tagName, "INPUT");
+    assert.equal(topK.value, "5");
+  } finally {
+    await dom.unmount();
+  }
+});
+
 test("MCP tool nodes pick a server from Rem's list and a tool the server lists", async () => {
   const mutations = [];
   const node = (id, configuration) => ({
@@ -7036,7 +7759,7 @@ test("an edited Rattish file in code view gets no code-mode top bar", async () =
     sourcePath: "/workspace/gofer-flow/.raticode/demo/workflow.rattish",
   };
   const dom = await mountReact(
-    React.createElement(appModule.TopBar, {
+    React.createElement(appChromeModule.TopBar, {
       activeCodePath: "/workspace/gofer-flow/.raticode/demo/workflow.rattish",
       editorState: { ...edited, saving: false },
       theme: "light",
@@ -7072,7 +7795,7 @@ test("an edited Rattish file in code view gets no code-mode top bar", async () =
 
 test("studio header separates quiet paths from focused workflow and file names", async () => {
   assert.deepEqual(
-    appModule.topBarLabelParts(
+    appChromeModule.topBarLabelParts(
       { id: "review", name: "Review PR", projectRoot: "/repos/gofer-flow" },
       "graph",
     ),
@@ -7084,7 +7807,7 @@ test("studio header separates quiet paths from focused workflow and file names",
     },
   );
   assert.deepEqual(
-    appModule.topBarLabelParts({}, "code", "C:\\repos\\gofer-flow\\src\\app.jsx"),
+    appChromeModule.topBarLabelParts({}, "code", "C:\\repos\\gofer-flow\\src\\app.jsx"),
     {
       fullPath: "C:\\repos\\gofer-flow\\src\\app.jsx",
       name: "app.jsx",
@@ -7093,7 +7816,7 @@ test("studio header separates quiet paths from focused workflow and file names",
     },
   );
   const dom = await mountReact(
-    React.createElement(appModule.TopBar, {
+    React.createElement(appChromeModule.TopBar, {
       theme: "dark",
       updateState: {},
       view: "graph",
@@ -7122,7 +7845,7 @@ test("create workflow dialog focuses Name each time it opens, even after Import 
   function Harness() {
     const [open, setOpenState] = React.useState(true);
     setOpen = setOpenState;
-    return React.createElement(appModule.CreateWorkflowDialog, {
+    return React.createElement(workflowDialogsModule.CreateWorkflowDialog, {
       defaultProjectRoot: "/repos/raticode", error: "", open, saving: false, onClose() {}, onCreate() {}, onImport() {},
     });
   }
@@ -7150,7 +7873,7 @@ test("create workflow dialog focuses Name each time it opens, even after Import 
 test("create workflow dialog submits the selected project folder", async () => {
   const submissions = [];
   const dom = await mountReact(
-    React.createElement(appModule.CreateWorkflowDialog, {
+    React.createElement(workflowDialogsModule.CreateWorkflowDialog, {
       defaultProjectRoot: "/repos/raticode",
       error: "",
       open: true,
@@ -7202,7 +7925,7 @@ test("create workflow dialog starts from a starter and lets its name be optional
       : null,
   ]);
   const dom = await mountReact(
-    React.createElement(appModule.CreateWorkflowDialog, {
+    React.createElement(workflowDialogsModule.CreateWorkflowDialog, {
       defaultProjectRoot: "/repos/raticode",
       error: "",
       open: true,
@@ -7262,7 +7985,7 @@ test("create workflow dialog says when a starter needs Git for Windows", async (
       : null,
   ]);
   const dom = await mountReact(
-    React.createElement(appModule.CreateWorkflowDialog, {
+    React.createElement(workflowDialogsModule.CreateWorkflowDialog, {
       defaultProjectRoot: "/repos/raticode",
       error: "",
       open: true,
@@ -7286,10 +8009,131 @@ test("create workflow dialog says when a starter needs Git for Windows", async (
   await dom.unmount();
 });
 
+function starterProviderFetch(apps) {
+  const now = new Date().toISOString();
+  return createFetchMock([
+    (url) => String(url).includes("/rattish/starters")
+      ? {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          starters: [{
+            id: "daily-report",
+            name: "Daily report",
+            summary: "Runs a shell command and saves a dated report.",
+            docsUrl: "https://raticode.dev/docs/starters/daily-report",
+            hasTests: true,
+            providers: ["claude-code"],
+            providerApps: ["claude_code"],
+            secrets: [],
+            trigger: null,
+          }],
+          providerApps: ["claude_code", "codex", "cursor"],
+        }),
+      }
+      : null,
+    (url) => String(url).includes("/provider/capabilities")
+      ? {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          providers: apps.map(([id, displayName, discoveryStatus, enabled]) => ({
+            id, displayName, discoveryStatus, enabled, discoveredAt: now, models: [],
+          })),
+        }),
+      }
+      : null,
+  ]);
+}
+
+async function createFromDailyReport(apps, remProvider) {
+  const submissions = [];
+  const dom = await mountReact(
+    React.createElement(workflowDialogsModule.CreateWorkflowDialog, {
+      defaultProjectRoot: "/repos/raticode",
+      error: "",
+      open: true,
+      remProvider,
+      saving: false,
+      onClose() {},
+      onCreate: (name, options) => submissions.push({ name, options }),
+      onImport() {},
+    }),
+    starterProviderFetch(apps),
+  );
+  await dom.flush();
+  await dom.change(dom.controlAfterLabel("Start from"), "daily-report");
+  await dom.flush();
+  await dom.flush();
+  const submit = async () => {
+    await React.act(async () => {
+      const form = allElements(dom.container).find((element) => element.tagName === "FORM");
+      reactProps(form).onSubmit(testEvent(form));
+    });
+  };
+  return { dom, submissions, submit };
+}
+
+const providerSelect = (dom) => allElements(dom.container).find((element) =>
+  element.tagName === "SELECT" && element.getAttribute("aria-describedby") === "workflow-provider-hint");
+
+test("new workflow dialog says a starter's app isn't installed and creates it with an installed one", async () => {
+  const { dom, submissions, submit } = await createFromDailyReport([
+    ["codex", "Codex", "ready", true],
+    ["claude_code", "Claude Code", "missing", false],
+    ["cursor", "Cursor", "missing", false],
+  ], "claude_code");
+
+  assert.ok(dom.byText("Claude Code isn't installed on this computer."));
+  const select = dom.controlAfterLabel("Provider");
+  assert.equal(select, providerSelect(dom));
+  assert.equal(reactProps(select).value, "codex", "Rem's app isn't installed either, so the first installed one is picked");
+  assert.deepEqual(
+    allElements(select).filter((element) => element.tagName === "OPTION").map((option) => option.textContent),
+    ["Codex"],
+    "Only installed apps that can run model steps are listed",
+  );
+  await submit();
+  assert.deepEqual(submissions, [{
+    name: "",
+    options: { projectRoot: "/repos/raticode", projectGrantId: "", starter: "daily-report", provider: "codex" },
+  }]);
+  await dom.unmount();
+});
+
+test("new workflow dialog starts the Provider choice on Rem's app and marks a turned-off one", async () => {
+  const { dom, submissions, submit } = await createFromDailyReport([
+    ["codex", "Codex", "ready", true],
+    ["claude_code", "Claude Code", "ready", false],
+    ["cursor", "Cursor", "ready", true],
+  ], "cursor");
+
+  assert.ok(dom.byText("Claude Code is turned off in Settings > Providers."));
+  const select = providerSelect(dom);
+  assert.equal(reactProps(select).value, "cursor");
+  await dom.change(select, "codex");
+  await submit();
+  assert.equal(submissions[0].options.provider, "codex");
+  await dom.unmount();
+});
+
+test("new workflow dialog leaves a starter alone when its own app is installed", async () => {
+  const { dom, submissions, submit } = await createFromDailyReport([
+    ["codex", "Codex", "ready", true],
+    ["claude_code", "Claude Code", "unauthenticated", true],
+  ], "codex");
+
+  assert.equal(providerSelect(dom), undefined);
+  assert.equal(textOf(dom.container).includes("isn't installed"), false);
+  await submit();
+  assert.deepEqual(submissions[0].options, { projectRoot: "/repos/raticode", projectGrantId: "", starter: "daily-report" });
+  await dom.unmount();
+});
+
 test("new workflow dialog imports a .raticode bundle into the selected project", async () => {
   const submissions = [];
   const dom = await mountReact(
-    React.createElement(appModule.CreateWorkflowDialog, {
+    React.createElement(workflowDialogsModule.CreateWorkflowDialog, {
       defaultProjectRoot: "/repos/raticode",
       error: "",
       open: true,
@@ -7357,8 +8201,14 @@ test("workflow list reports backend run and compile state instead of a stale Rea
   await dom.click(allElements(rows.Broken).find((element) => element.getAttribute?.("aria-haspopup") === "menu"));
   const brokenMenu = allElements(dom.container).find((element) => element.getAttribute?.("role") === "menu" && element.getAttribute("aria-label") === "Broken actions");
   const runItem = allElements(brokenMenu).find((element) => element.getAttribute?.("role") === "menuitem" && textOf(element) === "Run workflow");
-  assert.notEqual(runItem.getAttribute("disabled"), null);
-  assert.match(runItem.getAttribute("title"), /Fix this workflow's errors/);
+  assertOffWithReason(dom, runItem, "Fix this workflow's errors before running it.");
+  const callsBefore = fetchMock.calls.length;
+  await dom.click(runItem);
+  await dom.flush();
+  // The off item starts nothing and leaves the menu open with its reason showing.
+  assert.deepEqual(fetchMock.calls.slice(callsBefore).filter((call) => /\/run|\/runs/.test(call.url)), []);
+  assert.ok(allElements(dom.container).includes(runItem));
+  assert.doesNotMatch(dom.text(), /Run preview/);
   await dom.unmount();
 });
 
@@ -10106,8 +10956,9 @@ test("DagCanvas offers Rattish resume only for runs the desktop can resume", asy
   await dom.click(dom.byTitle("More graph actions"));
   await dom.click(dom.byTitle("Select workflow run"));
   const refused = dom.ancestor(dom.byText("Resume"), "BUTTON");
-  assert.equal(reactProps(refused).disabled, true);
-  assert.equal(reactProps(refused).title, reason);
+  assertOffWithReason(dom, refused, reason);
+  await dom.click(refused);
+  assert.deepEqual(resumeCalls, []);
   // Rattish runs resume where they stopped; the legacy node options are not offered.
   assert.doesNotMatch(dom.text(), /Rerun failed nodes|Rerun from selected node/);
   await dom.unmount();
@@ -10149,8 +11000,9 @@ test("DagCanvas offers Run again with the same inputs for Rattish runs that save
   await dom.click(dom.byTitle("More graph actions"));
   await dom.click(dom.byTitle("Select workflow run"));
   const refused = dom.ancestor(dom.byText("Run again with the same inputs"), "BUTTON");
-  assert.equal(reactProps(refused).disabled, true);
-  assert.equal(reactProps(refused).title, reason);
+  assertOffWithReason(dom, refused, reason);
+  await dom.click(refused);
+  assert.deepEqual(rerunCalls, []);
   await dom.unmount();
 
   dom = await mountReact(
@@ -10533,6 +11385,41 @@ test("Rattish node inspector says when the run's output was cut", async () => {
   }
 });
 
+test("Rattish Activation history says when a command step passed the output limit", async () => {
+  const { document, logState, workflow } = rattishRunOutputFixture();
+  const message = "Step 'greet' wrote more than the 2,000,000-byte output limit: stdout kept its first 2,000,000 bytes. The rest was not saved or passed on.";
+  const truncated = {
+    sequence: 3,
+    type: "node_output_truncated",
+    nodeId: "greet",
+    status: "truncated",
+    message,
+    attempt: 1,
+    runNumber: 1,
+    activationLineageId: "lineage-greet-1",
+  };
+  const runEvents = [...logState.runEvents.slice(0, 1), truncated, ...logState.runEvents.slice(1)];
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, {
+      workflow,
+      rattishDocument: document,
+      logState: { ...logState, runEvents },
+      onWorkflowChange() {},
+    }),
+    createFetchMock([]),
+  );
+  try {
+    await dom.flush();
+    const history = inspectorSection(await openRattishRunTab(dom, "greet"), "Activation history");
+    const notes = allElements(history).filter((element) => element.getAttribute?.("data-testid") === "rattish-output-truncated");
+    assert.equal(notes.length, 1);
+    assert.equal(textOf(notes[0]), message);
+    assert.match(textOf(history), /truncated/);
+  } finally {
+    await dom.unmount();
+  }
+});
+
 test("number fields accept exact runtime references only when enabled", () => {
   assert.deepEqual(inspectorFieldsModule.parseNumberDraft("{{inputs.timeout}}", 0, true), {
     ok: true,
@@ -10593,6 +11480,31 @@ test("DagCanvas retention controls send configured cleanup settings", async () =
   assert.deepEqual(pruneCalls, [
     { dryRun: true, keepDays: 5, keepFailedDays: 12, keepLast: 25 },
   ]);
+
+  await dom.unmount();
+});
+
+test("Run retention settings say when saved settings couldn't be read", async () => {
+  const warning =
+    "Retention settings couldn't be read, so automatic clean-up is paused. Save them again to resume.";
+  const dom = await mountReact(
+    React.createElement(runTimelineModule.RunTimelinePanel, {
+      embedded: true,
+      retentionWarning: warning,
+      text: "completed run",
+      runs: [{ id: "run-1.log", status: "success", startedAt: "2026-01-02T03:04:05Z" }],
+      onPruneRuns() {},
+      onRetentionSettingsChange() {},
+    }),
+    createFetchMock([]),
+  );
+
+  await dom.flush();
+  await dom.click(dom.byTitle("Run retention settings"));
+  const notice = allElements(dom.container).find(
+    (node) => node.getAttribute?.("role") === "status" && directText(node) === warning,
+  );
+  assert.ok(notice, "Unable to find the unreadable retention settings notice");
 
   await dom.unmount();
 });
@@ -13098,6 +14010,24 @@ function testEvent(target, patch = {}) {
   };
 }
 
+// An off button stays focusable (aria-disabled, not disabled) and says why in
+// visible text that aria-describedby points at, not only in a tooltip.
+function assertOffWithReason(dom, button, reason) {
+  assert.equal(button.getAttribute("aria-disabled"), "true");
+  assert.equal(button.getAttribute("disabled"), null);
+  assert.notEqual(reactProps(button).disabled, true);
+  assert.notEqual(button.getAttribute("title"), reason);
+  button.focus();
+  assert.equal(document.activeElement, button);
+  const describedBy = button.getAttribute("aria-describedby");
+  assert.ok(describedBy, "the off button names its reason line");
+  const line = allElements(dom.container).find((node) => node.getAttribute?.("id") === describedBy);
+  assert.ok(line, "the reason line is on the page");
+  assert.equal(textOf(line), reason);
+  assert.ok(dom.text().includes(reason));
+  return line;
+}
+
 function reactProps(node) {
   const key = Object.keys(node).find((candidate) => candidate.startsWith("__reactProps$"));
   assert.ok(key, `No React props found on ${node.tagName ?? node.nodeName}`);
@@ -13192,6 +14122,8 @@ function createStorage() {
   const values = new Map();
   return {
     getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    get length() { return values.size; },
     removeItem: (key) => values.delete(key),
     setItem: (key, value) => values.set(key, String(value)),
   };
@@ -13832,6 +14764,70 @@ test("Second Brain Delete collection offers Undo on a notice that stays at least
     await React.act(async () => { store.deleteCollection(collection.id); });
     await dom.flush(10000);
     assert.doesNotMatch(dom.text(), /Deleted collection/);
+  } finally { await dom.unmount(); store.resetSecondBrainStore(); }
+});
+
+test("Second Brain's Index needs attention warning opens the error and offers Rebuild index", async () => {
+  const { default: SecondBrainWorkspace } = await viteServer.ssrLoadModule("/src/components/SecondBrainWorkspace.jsx");
+  const store = await viteServer.ssrLoadModule("/src/lib/secondBrainStore.js");
+  const settings = { metadata: "portable", semantic: false, embeddings: "local", allowCloud: true, formats: { markdown: true, html: true, text: true, pdf: false, ocr: false }, ocrLanguage: "eng", obsidian: false, folderRules: {} };
+  const brain = { id: "brain-1", name: "Notes", root: "/notes", state: "available", settings, index: { state: "failed", error: "disk full", documents: 3, passages: 9, generation: 2, asOf: "2026-11-20T00:00:00Z" } };
+  const snapshot = { brains: [brain], activeBrainId: brain.id, documents: [], collections: [], savedSearches: [], reports: [], citations: [], jobs: [], projects: [], topics: [], health: [], families: [], tasks: [], views: {}, revision: "1" };
+  const started = [];
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (!url.startsWith("/api/second-brains")) return null;
+      let result = structuredClone(snapshot);
+      if (options.method === "POST") {
+        const { action, params } = JSON.parse(options.body);
+        result = {};
+        if (action === "task") {
+          started.push(params);
+          result = { id: `task-${started.length}`, brainId: params.brainId, kind: params.kind, label: params.label, steps: params.steps, step: 0, progress: 0, state: "running" };
+        }
+      }
+      return { ok: true, status: 200, json: async () => ({ result }) };
+    },
+  ]);
+  store.resetSecondBrainStore();
+  const dom = await mountReact(React.createElement(SecondBrainWorkspace, { onClose() {} }), fetchMock);
+  const warning = () => dom.byLabel("Index needs attention");
+  const panel = () => allElements(dom.container).find(node => node.getAttribute?.("role") === "dialog" && node.getAttribute("aria-label") === "Index needs attention");
+  const panelButton = text => allElements(panel()).find(node => node.tagName === "BUTTON" && textOf(node) === text);
+  try {
+    for (let attempt = 0; attempt < 60 && !store.getState().loaded; attempt++) await dom.flush();
+    assert.equal(warning().tagName, "BUTTON", "the warning is a button, not a plain label");
+    assert.doesNotMatch(dom.text(), /disk full/, "the error stays hidden until the warning is opened");
+    await dom.focus(warning());
+    await dom.click(warning());
+    assert.equal(warning().getAttribute("aria-expanded"), "true");
+    assert.ok(panel(), "the warning opens its panel");
+    assert.equal(document.activeElement, panel(), "the panel takes focus when it opens");
+    assert.match(textOf(panel()), /Indexing stopped with an error/);
+    assert.equal(textOf(dom.ancestor(dom.byExactText("disk full"), "PRE")), "disk full", "the stored error is visible text");
+    assert.ok(panelButton("Rebuild index"));
+    assert.ok(panelButton("Library health"));
+    // Escape closes the panel and puts focus back on the warning.
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    assert.equal(panel(), undefined);
+    assert.equal(document.activeElement, warning(), "Escape returns focus to the warning button");
+    // Rebuild index starts the same index task as the button in Brain settings.
+    await dom.click(warning());
+    await dom.click(panelButton("Rebuild index"));
+    await dom.flush();
+    assert.equal(started.length, 1);
+    assert.deepEqual(started[0], { kind: "index", label: "Rebuilding the Notes index", brainId: brain.id, steps: ["Scanning folder", "Extracting text", "Building passages", "Publishing generation"], provider: started[0].provider });
+    assert.equal(panel(), undefined, "starting the rebuild closes the panel");
+    await React.act(async () => { store.navigate("settings"); });
+    await dom.click(dom.ancestor(dom.byExactText("Rebuild index"), "BUTTON"));
+    await dom.flush();
+    assert.equal(started.length, 2);
+    assert.deepEqual(started[1], started[0], "both buttons send the same request");
+    // Library health opens that page.
+    await dom.click(warning());
+    await dom.click(panelButton("Library health"));
+    assert.equal(store.viewFor(store.getState()).section, "health");
+    assert.equal(panel(), undefined);
   } finally { await dom.unmount(); store.resetSecondBrainStore(); }
 });
 
@@ -14742,7 +15738,7 @@ test("project opening times out and propagates failures", async () => {
 });
 
 test("project sidebar announces project switching", () => {
-  const markup = renderToStaticMarkup(React.createElement(appModule.WorkflowSidebar, {
+  const markup = renderToStaticMarkup(React.createElement(workflowSidebarModule.WorkflowSidebar, {
     openingProjectRoot: "/workspace/second-brain",
     workflows: [], recentProjectRoots: [], runState: {}, query: "", view: "code",
   }));
@@ -15302,6 +16298,42 @@ test("aborting a paused rebase asks in Raticode's dialog and does nothing when k
     await dom.flush();
     assert.deepEqual(calls, [["rebase-abort", undefined]]);
   } finally { window.dispatchEvent = originalDispatch; await dom.unmount(); }
+});
+
+test("source control rows say each change in words to hover and to Tab focus", async () => {
+  const entries = [
+    { path: "docs/notes.txt", status: "U", indexStatus: "?", worktreeStatus: "?", staged: false, unstaged: true },
+    { path: "removed.txt", status: "D", indexStatus: " ", worktreeStatus: "D", staged: false, unstaged: true },
+    { path: "src/renamed.js", status: "A", indexStatus: "R", worktreeStatus: " ", staged: true, unstaged: false, originalPath: "src/old-name.js" },
+    { path: "edited.txt", status: "M", indexStatus: " ", worktreeStatus: "M", staged: false, unstaged: true },
+    { path: "code.py", status: "!", indexStatus: "U", worktreeStatus: "U", staged: false, unstaged: true },
+  ];
+  const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => ({ active: true, entries }),
+    gitHistory: async () => ({ active: true, commits: [] }), gitWorktrees: async () => ({ active: true, worktrees: [] }) };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace } });
+  try {
+    await dom.click(dom.byLabel("Source control")); await showSourceChanges(dom); await dom.flush();
+    // The letter is the row's first element; the open-file button names the file.
+    const markFor = (filePath) => allElements(dom.byTitle(filePath).parentNode)[0];
+    for (const [filePath, letter, words] of [
+      ["docs/notes.txt", "U", "Untracked"],
+      ["removed.txt", "D", "Deleted"],
+      ["src/renamed.js", "A", "Renamed from src/old-name.js"],
+      ["edited.txt", "M", "Modified"],
+    ]) {
+      const mark = markFor(filePath);
+      assert.equal(mark.textContent, letter, `${filePath} keeps its letter on screen`);
+      assert.equal(mark.getAttribute("title"), words);
+      const open = dom.byTitle(filePath);
+      assert.equal(open.tagName, "BUTTON");
+      const hidden = allElements(open).find((node) => node.getAttribute?.("class") === "sr-only");
+      assert.ok(hidden, `${filePath} names its change to a screen reader`);
+      assert.equal(hidden.textContent, `, ${words}`);
+      assert.ok(textOf(open).endsWith(words));
+    }
+    assert.match(markFor("code.py").getAttribute("title"), /^Conflict: unresolved index conflict/);
+  } finally { await dom.unmount(); }
 });
 
 test("source control exposes conflicts and locks parent controls during integration previews", async () => {
@@ -16628,6 +17660,154 @@ test('Ctrl+Z sends no save and says why after workflow.rattish changed since the
   }
 });
 
+// A fake workflow.rattish for Copy and Paste: the graph's nodes carry the byte spans of
+// their declarations, and a paste_nodes mutation appends renamed copies like the backend.
+const PASTE_BEFORE = 'Rattish: 1\nWorkflow:\n  name: Picker\n\nNode prepare:\n  type: bash-command\n  command: echo prepare\n  to: fetch\n\nNode fetch:\n  type: bash-command\n  command: echo fetch\n';
+const PASTE_COPIED = 'Node prepare:\n  type: bash-command\n  command: echo prepare\n  to: fetch\n\nNode fetch:\n  type: bash-command\n  command: echo fetch\n';
+
+function pasteGraphFixture() {
+  const workflow = { ...workflowFixture({ id: 'paste-demo', name: 'Paste demo' }), sourceFormat: 'rattish', sourcePath: '/workspace/.raticode/paste-demo/workflow.rattish' };
+  const disk = { source: PASTE_BEFORE, revision: 1, pastedNodes: null };
+  const documentFor = () => {
+    const declarations = [...disk.source.matchAll(/^Node ([a-z-]+):\n(?: {2}.*\n)*/gm)];
+    const nodes = declarations.map((match, index) => ({
+      ...pickerGraphNode(match[1], 'bash-command'),
+      declarationIndex: index,
+      sourceSpan: { start: { offset: match.index }, end: { offset: match.index + match[0].length } },
+    }));
+    const edges = declarations.flatMap((match) => [...match[0].matchAll(/ to: ([a-z-]+)/g)].map((route, index) => ({
+      id: `${match[1]}:route:${index}`, from: match[1], to: route[1], mode: 'unconditional',
+    })));
+    const positions = { prepare: { x: 100, y: 100 }, fetch: { x: 430, y: 100 } };
+    return {
+      ...pickerDocument(nodes, edges), source: disk.source, workflowId: workflow.id, compilation: { state: 'valid' }, runnable: true,
+      metadata: { canvas: { nodes: positions } }, diagnostics: [], preflight: { diagnostics: [] }, savedRevision: `r${disk.revision}`, dirty: false,
+      ...(disk.pastedNodes ? { pastedNodes: disk.pastedNodes } : {}),
+    };
+  };
+  const writes = [];
+  const fetchMock = createFetchMock([
+    jsonResponse('/api/workflows', workflowsPayload([workflow])),
+    (url, options = {}) => url === '/api/workflows/paste-demo/document' && (options.method ?? 'GET') === 'GET'
+      ? { ok: true, status: 200, json: async () => ({ document: documentFor() }) } : null,
+    (url, options = {}) => {
+      const kind = { '/api/workflows/paste-demo/document/mutate': 'mutate', '/api/workflows/paste-demo/document/save': 'save' }[url];
+      if (!kind || options.method !== 'POST') return null;
+      const body = JSON.parse(options.body);
+      writes.push({ kind, body });
+      if (body.expectedRevision !== `r${disk.revision}`) return { ok: false, status: 409, json: async () => ({ error: 'workflow.rattish changed on disk' }) };
+      disk.pastedNodes = null;
+      if (kind === 'mutate') {
+        assert.deepEqual(body.mutations, [{ kind: 'paste_nodes', source: PASTE_COPIED }]);
+        disk.source = `${disk.source}\n${PASTE_COPIED.replace(/prepare/g, 'prepare-copy').replace(/fetch/g, 'fetch-copy')}`;
+        disk.pastedNodes = ['prepare-copy', 'fetch-copy'];
+      } else {
+        disk.source = body.source;
+      }
+      disk.revision += 1;
+      return { ok: true, status: 200, json: async () => ({ document: documentFor() }) };
+    },
+  ]);
+  return { disk, fetchMock, writes };
+}
+
+test('Ctrl+C then Ctrl+V on two selected graph nodes pastes renamed copies beside them as one edit that one Undo takes back', async () => {
+  const { disk, fetchMock, writes } = pasteGraphFixture();
+  let clipboard = '';
+  const clipboardWrites = [];
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { desktop: { clipboard: { readText: async () => clipboard } } });
+  navigator.clipboard.writeText = async (value) => { clipboardWrites.push(value); clipboard = value; };
+  const press = async (code, patch = {}) => {
+    await dom.dispatchWindow('keydown', { key: code.slice(3).toLowerCase(), code, ctrlKey: true, target: dom.byLabel('Workflow graph visualization'), ...patch });
+    for (let index = 0; index < 6; index += 1) await dom.flush();
+  };
+  const article = (nodeId) => dom.ancestor(dom.byExactText(nodeId), 'ARTICLE');
+  try {
+    await dom.flush(); await dom.flush();
+    await press('KeyA');
+    assert.equal(article('prepare').getAttribute('data-selected'), 'true');
+    assert.equal(article('fetch').getAttribute('data-selected'), 'true');
+
+    await press('KeyC');
+    assert.deepEqual(clipboardWrites, [PASTE_COPIED], 'Copy puts the declarations on the clipboard as plain text');
+    assert.deepEqual(writes, [], 'Copy leaves workflow.rattish alone');
+
+    await press('KeyV');
+    assert.deepEqual(writes.map((write) => write.kind), ['mutate'], 'one paste_nodes mutation');
+    assert.equal(article('prepare-copy').getAttribute('data-selected'), 'true');
+    assert.equal(article('fetch-copy').getAttribute('data-selected'), 'true');
+    assert.equal(article('prepare').getAttribute('data-selected'), null);
+    assert.equal(article('fetch').getAttribute('data-selected'), null);
+    // The copies keep their spacing and sit to the right of the nodes they were copied beside.
+    assert.deepEqual([article('prepare-copy').style.left, article('prepare-copy').style.top], ['730px', '100px']);
+    assert.deepEqual([article('fetch-copy').style.left, article('fetch-copy').style.top], ['1060px', '100px']);
+    assert.equal(dom.byLabel('Undo paste 2 nodes').getAttribute('title'), 'Undo paste 2 nodes');
+
+    await press('KeyZ');
+    assert.deepEqual(writes.map((write) => write.kind), ['mutate', 'save']);
+    assert.equal(writes[1].body.source, PASTE_BEFORE);
+    assert.equal(disk.source, PASTE_BEFORE, 'one Undo restores the old workflow.rattish');
+    assert.equal(allElements(dom.container).some((element) => directText(element) === 'prepare-copy'), false);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test('Ctrl+X cuts the selected nodes as one edit, and copy keys in a text field are left to it', async () => {
+  const { fetchMock, writes } = pasteGraphFixture();
+  const clipboardWrites = [];
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  navigator.clipboard.writeText = async (value) => { clipboardWrites.push(value); };
+  try {
+    await dom.flush(); await dom.flush();
+    await dom.dispatchWindow('keydown', { key: 'a', code: 'KeyA', ctrlKey: true, target: dom.byLabel('Workflow graph visualization') });
+    await dom.flush();
+    const textField = allElements(dom.container).find((element) => element.tagName === 'TEXTAREA');
+    assert.ok(textField);
+    await dom.dispatchWindow('keydown', { key: 'x', code: 'KeyX', ctrlKey: true, target: textField });
+    for (let index = 0; index < 4; index += 1) await dom.flush();
+    assert.deepEqual(clipboardWrites, []);
+    assert.deepEqual(writes, []);
+
+    await dom.dispatchWindow('keydown', { key: 'x', code: 'KeyX', ctrlKey: true, target: dom.byLabel('Workflow graph visualization') });
+    for (let index = 0; index < 6; index += 1) await dom.flush();
+    assert.deepEqual(clipboardWrites, [PASTE_COPIED]);
+    assert.deepEqual(writes.map((write) => write.body.mutations), [[{ kind: 'delete_node', node: 'prepare' }, { kind: 'delete_node', node: 'fetch' }]]);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test('graph Copy, Cut and Paste name one Undo step and lay out pasted text that came from elsewhere', () => {
+  const { graphEditLabel, pastedNodeNames } = graphEditHistoryModule;
+  assert.equal(graphEditLabel([{ kind: 'paste_nodes', source: PASTE_COPIED }]), 'paste 2 nodes');
+  assert.equal(graphEditLabel([{ kind: 'paste_nodes', source: 'Node fetch:\n  type: file\n' }]), 'paste node fetch');
+  assert.equal(graphEditLabel([{ kind: 'delete_node', node: 'fetch' }], { cut: true }), 'cut node fetch');
+  assert.equal(graphEditLabel([{ kind: 'delete_node', node: 'a' }, { kind: 'delete_node', node: 'b' }, { kind: 'delete_node', node: 'c' }], { cut: true }), 'cut 3 nodes');
+  assert.deepEqual(pastedNodeNames('node one:\n  type: x\n# Node no:\nNode Two-b :\n'), ['one', 'Two-b']);
+
+  const { nodeDeclarationsText, pastedNodePositions, rememberCopiedNodes } = graphClipboardModule;
+  const source = 'Rattish: 1\nWorkflow:\n  name: é\n\nNode b:\n  type: file\n\n\nNode a:\n  type: file\n  path: "ü.txt"\n';
+  const byteLength = (text) => new TextEncoder().encode(text).length;
+  const spanOf = (text) => {
+    const start = byteLength(source.slice(0, source.indexOf(text)));
+    return { start: { offset: start }, end: { offset: start + byteLength(text) } };
+  };
+  const nodes = [
+    { id: 'a', x: 500, y: 300, rattish: { declarationIndex: 1, sourceSpan: spanOf('Node a:\n  type: file\n  path: "ü.txt"\n') } },
+    { id: 'b', x: 200, y: 340, rattish: { declarationIndex: 0, sourceSpan: spanOf('Node b:\n  type: file\n\n\n') } },
+  ];
+  const text = nodeDeclarationsText(source, nodes);
+  assert.equal(text, 'Node b:\n  type: file\n\nNode a:\n  type: file\n  path: "ü.txt"\n', 'source order, one blank line apart, UTF-8 spans');
+  const placement = { pastedIds: ['b-copy', 'a-copy'], edges: [], selectedNodes: [], viewport: { x: 0, y: 0, scale: 1 }, size: { width: 1000, height: 600 }, nodeWidth: 220, nodeHeight: 96 };
+  rememberCopiedNodes(text, nodes);
+  assert.deepEqual(pastedNodePositions({ ...placement, text: text.replace(/\n/g, '\r\n') }), { 'b-copy': { x: 240, y: 272 }, 'a-copy': { x: 540, y: 232 } }, 'remembered layout, centred in the view');
+  assert.deepEqual(pastedNodePositions({ ...placement, text, at: { x: 10, y: 20 } }), { 'b-copy': { x: 10, y: 60 }, 'a-copy': { x: 310, y: 20 } }, 'the canvas menu pastes where it opened');
+  const elsewhere = 'Node b-copy:\n  type: file\n  to: a-copy\n\nNode a-copy:\n  type: file\n';
+  const laidOut = pastedNodePositions({ ...placement, text: elsewhere, edges: [{ from: 'b-copy', to: 'a-copy' }], selectedNodes: [{ x: 100, y: 50 }] });
+  assert.deepEqual(laidOut, { 'b-copy': { x: 400, y: 50 }, 'a-copy': { x: 730, y: 50 } }, 'text from elsewhere is laid out beside the selection');
+});
+
 test('graph Undo treats a 409 from the save as a changed file and clears both stacks', async () => {
   const calls = [];
   const harness = workflowDocumentWriteHarness((url, init) => {
@@ -16720,11 +17900,11 @@ test("legacy editor defaults migrate to sidebar activities", () => {
 });
 
 test("persistent project picker names its browsing project and loading target", () => {
-  const html = renderToStaticMarkup(React.createElement(appModule.RecentProjectSelector, { projectRoot: "/projects/Atlas", recentProjectRoots: ["/projects/Beacon"] }));
+  const html = renderToStaticMarkup(React.createElement(workflowSidebarModule.RecentProjectSelector, { projectRoot: "/projects/Atlas", recentProjectRoots: ["/projects/Beacon"] }));
   assert.match(html, /aria-label="Recent projects"/);
   assert.match(html, /Atlas/);
   assert.doesNotMatch(html, /Studio view/);
-  const loading = renderToStaticMarkup(React.createElement(appModule.RecentProjectSelector, { projectRoot: "/projects/Atlas", openingProjectRoot: "/projects/Beacon" }));
+  const loading = renderToStaticMarkup(React.createElement(workflowSidebarModule.RecentProjectSelector, { projectRoot: "/projects/Atlas", openingProjectRoot: "/projects/Beacon" }));
   assert.match(loading, /Opening Beacon/);
   assert.match(loading, /aria-busy="true"/);
 });
@@ -18314,7 +19494,7 @@ test("thread model picker chooses the thread's account, sends it each turn and w
     await dom.click(accountTrigger());
     assert.deepEqual(accountOptions().map(el => textOf(el).split(/(?=The provider|Choose by|Signed in|Needs sign-in)/)[0]),
       ["Rem’s setting", "Default sign-in", "work", "old"]);
-    assert.match(textOf(option("work")), /Signed in · Week 42% · 5h 10% used, 2h ago/);
+    assert.match(textOf(option("work")), /Signed in · Week 42% · 5h 10% used, 2 h ago/);
     // An account that needs sign-in is shown but can't be picked; its Sign in link starts the sign-in.
     assert.equal(reactProps(option("old")).disabled, true);
     assert.match(textOf(option("old")), /Needs sign-in/);
@@ -18655,7 +19835,7 @@ test("equivalent Windows roots keep discovered workflows visible and available t
     assert.deepEqual(projectsModule.mergeRecentProjects([workflow.projectRoot], [root]), [workflow.projectRoot]);
     assert.deepEqual(appModule.rememberRecentProject([workflow.projectRoot], root), [root]);
     assert.equal(chatThreadsModule.scopeChatThreadToProject({ projectRoot: workflow.projectRoot, projectBranch: "main" }, root).projectBranch, "main");
-    const groups = appModule.groupWorkflowsByProject([workflow, { ...workflow, id: "second", projectRoot: root }], { [root]: "My project" });
+    const groups = workflowSidebarModule.groupWorkflowsByProject([workflow, { ...workflow, id: "second", projectRoot: root }], { [root]: "My project" });
     assert.equal(groups.length, 1);
     assert.equal(groups[0].name, "My project");
     assert.equal(groups[0].items.length, 2);
@@ -18679,7 +19859,7 @@ test("Git changes do not hide distinct POSIX filenames with different case", () 
 test("Windows workflow sidebar renders discovered workflows for an equivalent selected root", () => {
   const workflow = workflowFixture({ id: "windows-sidebar", name: "Windows workflow" });
   workflow.projectRoot = "C:\\Users\\Alice\\repo";
-  const markup = renderToStaticMarkup(React.createElement(appModule.WorkflowSidebar, {
+  const markup = renderToStaticMarkup(React.createElement(workflowSidebarModule.WorkflowSidebar, {
     activeWorkflow: { ...workflow, projectRoot: "c:/Users/Alice/repo/" },
     activeWorkflowId: workflow.id, workflows: [workflow], query: "", runState: {}, view: "graph",
   }));
@@ -20243,7 +21423,7 @@ test("Runs lives beside Run Timeline and preserves filters across panel switches
     { key: "two", workflowId: "b", workflowName: "Other workflow", projectPath: "/other", runId: "two", status: "error", unread: true },
   ];
   const dom = await mountReact(React.createElement(React.Fragment, null,
-    React.createElement(appModule.GlobalToolbar),
+    React.createElement(appChromeModule.GlobalToolbar),
     React.createElement(bottomPanelModule.default, { runsProps: { records, projectPath: "/repo", onReview: record => reviewed.push(record), onStop: record => stopped.push(record) } }),
   ), createFetchMock([]));
   try {
@@ -21255,6 +22435,333 @@ test("Self-work is set up in Settings > Rem and saves to Rem's backend", async (
   } finally { await dom.unmount(); }
 });
 
+function projectEffortFixture({ projects = ["/work/app", "/work/site"], revision = 3 } = {}) {
+  const base = selfWorkFixture({ revision });
+  const rows = { "/work/app": { root: "/work/app", name: "app", effort_percent: 70, target_threads: 7, running_threads: 6 },
+    "/work/site": { root: "/work/site", name: "site", effort_percent: 30, target_threads: 3, running_threads: 3 } };
+  const objectives = { revision: 9, items: [{ id: "g1", text: "Raise UX quality of the studio", done: false, created_by: "user" }], open: 1, done: 0, stale: 0, total: 1,
+    projects: { "/work/site": { revision: 9, items: [{ id: "s1", text: "Make the site load in under a second", done: false, created_by: "user" }], open: 1, done: 0, stale: 0, total: 1 } } };
+  return { ...base,
+    board: { ...base.board, participants: [{ ...base.board.participants[0], projects }] },
+    self_work: { ...base.self_work, settings: { ...base.self_work.settings, project_effort: { "/work/app": 70, "/work/site": 30 } },
+      projects: projects.map(root => rows[root]), objectives } };
+}
+
+test("Settings > Rem lists each of Rem's projects under Objectives with its own objectives and level of effort", async () => {
+  let view = projectEffortFixture();
+  const fetchMock = createFetchMock([
+    (url, options) => url === "/api/rem/kanban" && (options?.method || "GET") === "GET" ? { ok: true, status: 200, json: async () => view } : null,
+    jsonResponse("/api/rem/kanban/settings", projectEffortFixture({ revision: 4 }), { method: "PUT" }),
+    jsonResponse("/api/rem/objectives", { revision: 10, items: [] }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange() {}, onClose() {}, onResetAll() {},
+  }), fetchMock);
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => { for (let attempt = 0; attempt < 60 && !predicate(); attempt += 1) { await new Promise(resolve => setTimeout(resolve, 10)); await dom.flush(); } };
+  const child = name => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === `${name} objectives`);
+  const sent = path => fetchMock.calls.filter(call => call.url === path && call.options?.method !== "GET" && call.options?.method);
+  try {
+    await until(() => child("site"));
+    const group = find(node => node.getAttribute?.("data-testid") === "self-work-objectives");
+    assert.ok(group, "Settings > Rem has an Objectives group");
+    assert.match(textOf(group), /^Objectives/);
+    // One folded child per enabled project, each with its level of effort and threads now/target.
+    assert.ok(child("app") && child("site"));
+    assert.match(textOf(child("app")), /70% · 6 of 7 threads/);
+    assert.match(textOf(child("site")), /30% · 3 of 3 threads/);
+    const shares = allElements(dom.container).filter(node => node.getAttribute?.("data-testid") === "self-work-project-share").map(textOf);
+    assert.deepEqual(shares, ["70% · 6 of 7 threads", "30% · 3 of 3 threads"], "Rem's projects show each share too");
+    // Opening one shows its own objectives and its effort field.
+    await dom.click(allElements(child("site")).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") === "false"));
+    assert.match(textOf(child("site")), /Make the site load in under a second/);
+    assert.doesNotMatch(textOf(child("site")), /Raise UX quality/, "global objectives aren't listed as the project's own");
+    assert.equal(globalThis.window.localStorage.getItem("raticode.rem.projectObjectivesOpen:/work/site"), "open");
+    const effort = dom.byLabel("Level of effort for site");
+    // Focus, clear and leave: nothing is sent and the saved number comes back.
+    await dom.focus(effort);
+    await dom.change(effort, "");
+    assert.equal(effort.value, "", "a cleared field stays empty while focused");
+    await dom.blur(effort);
+    assert.equal(effort.value, "30");
+    assert.equal(sent("/api/rem/kanban/settings").length, 0);
+    // Focus, clear, type and leave: the new share is saved with the settings' revision.
+    await dom.focus(effort);
+    await dom.change(effort, "");
+    await dom.change(effort, "4");
+    assert.equal(effort.value, "4", "typing isn't snapped back while focused");
+    await dom.change(effort, "40");
+    await dom.blur(effort);
+    await until(() => sent("/api/rem/kanban/settings").length);
+    assert.deepEqual(JSON.parse(sent("/api/rem/kanban/settings")[0].options.body), { project_effort: { "/work/site": 40 }, expected_revision: 3 });
+    // Adding an objective here gives it to that project only.
+    await dom.click(dom.byLabel("Add objective to site"));
+    await dom.change(dom.byLabel("Objective"), "Ship the docs search");
+    // Meanwhile site is taken off Rem's projects; the page reads the view back after saving.
+    view = projectEffortFixture({ projects: ["/work/app"] });
+    await dom.pointer(dom.ancestor(dom.byLabel("Objective"), "FORM"), "onSubmit", { preventDefault() {} });
+    await until(() => sent("/api/rem/objectives").length);
+    assert.deepEqual(JSON.parse(sent("/api/rem/objectives")[0].options.body), { action: "add", text: "Ship the docs search", done_when: "", project: "/work/site", expected_revision: 9 });
+    // Taking a project off Rem's projects removes its section.
+    await until(() => !child("site"));
+    assert.equal(child("site"), undefined);
+    assert.ok(child("app"));
+  } finally { await dom.unmount(); }
+});
+
+test("editing an objective in Settings > Rem moves it to the project chosen under Applies to", async () => {
+  let view = projectEffortFixture();
+  const fetchMock = createFetchMock([
+    (url, options) => url === "/api/rem/kanban" && (options?.method || "GET") === "GET" ? { ok: true, status: 200, json: async () => view } : null,
+    jsonResponse("/api/rem/objectives", { revision: 10, items: [] }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange() {}, onClose() {}, onResetAll() {},
+  }), fetchMock);
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => { for (let attempt = 0; attempt < 60 && !predicate(); attempt += 1) { await new Promise(resolve => setTimeout(resolve, 10)); await dom.flush(); } };
+  const child = name => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === `${name} objectives`);
+  const unfold = async name => dom.click(allElements(child(name)).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") === "false"));
+  const sent = () => fetchMock.calls.filter(call => call.url === "/api/rem/objectives" && call.options?.method === "POST");
+  try {
+    await until(() => child("site"));
+    await unfold("site");
+    await unfold("app");
+    const goal = "Make the site load in under a second";
+    await dom.click(find(node => node.tagName === "BUTTON" && node.getAttribute("aria-label") === `${goal} actions`));
+    await dom.click(find(node => node.getAttribute?.("role") === "menuitem" && textOf(node) === "Edit"));
+    // Applies to lists Every project and Rem's enabled projects.
+    const picker = dom.byLabel("Applies to");
+    assert.deepEqual(allElements(picker).filter(node => node.tagName === "OPTION").map(textOf), ["Every project", "app", "site"]);
+    assert.equal(dom.byLabel("Objective").value, goal);
+    await dom.change(picker, "/work/app");
+    // The backend moves it; the page reads the view back with it under app.
+    const moved = { ...view.self_work.objectives, projects: { "/work/app": { ...view.self_work.objectives.projects["/work/site"], items: [{ id: "s1", text: goal, done: false, created_by: "user", project: "/work/app" }] } } };
+    view = { ...view, self_work: { ...view.self_work, objectives: moved } };
+    await dom.pointer(dom.ancestor(picker, "FORM"), "onSubmit", { preventDefault() {} });
+    await until(() => sent().length);
+    assert.deepEqual(JSON.parse(sent()[0].options.body), { action: "edit", id: "s1", text: goal, done_when: "", project: "/work/app", expected_revision: 9 });
+    await until(() => textOf(child("app")).includes(goal));
+    assert.match(textOf(child("app")), /Make the site load in under a second/, "the row moves to its new section");
+    assert.doesNotMatch(textOf(child("site")), /Make the site load/);
+  } finally { await dom.unmount(); }
+});
+
+test("Rem's side pane nests each enabled project under Objectives with its effort and own list", async () => {
+  const objectivesModule = await viteServer.ssrLoadModule("/src/components/RemObjectives.jsx");
+  const efforts = [];
+  const props = projects => ({
+    objectives: projectEffortFixture().self_work.objectives, tasks: [], projects,
+    onEffort: (root, percent) => efforts.push([root, percent]),
+  });
+  const all = projectEffortFixture().self_work.projects;
+  let dom = await mountReact(React.createElement(objectivesModule.default, props(all)), createFetchMock([() => null]));
+  const find = predicate => allElements(dom.container).find(predicate);
+  const child = name => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === `${name} objectives`);
+  try {
+    await dom.flush();
+    const top = find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === "Objectives");
+    assert.ok(top && child("app") && child("site"));
+    const order = allElements(top);
+    assert.ok(order.indexOf(child("app")) > order.indexOf(find(node => node.tagName === "INPUT" && node.getAttribute("aria-label")?.endsWith(": Raise UX quality of the studio"))),
+      "projects sit under the global objectives");
+    assert.match(textOf(child("app")), /app.*70% · 6 of 7 threads/);
+    await dom.click(allElements(child("app")).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") === "false"));
+    assert.match(textOf(child("app")), /None of its own/);
+    const effort = dom.byLabel("Level of effort for app");
+    await dom.focus(effort);
+    await dom.change(effort, "");
+    await dom.change(effort, "65");
+    await dom.blur(effort);
+    assert.deepEqual(efforts, [["/work/app", 65]]);
+    await dom.unmount();
+    dom = await mountReact(React.createElement(objectivesModule.default, props(all.slice(0, 1))), createFetchMock([() => null]));
+    await dom.flush();
+    assert.ok(child("app"));
+    assert.equal(child("site"), undefined, "a project taken off Rem's projects has no section");
+  } finally { await dom.unmount(); }
+});
+
+test("Ask Rem in a project's section in Settings > Rem asks the backend and shows how it goes", async () => {
+  let view = projectEffortFixture();
+  let refuse = false;
+  const fetchMock = createFetchMock([
+    (url, options) => url === "/api/rem/kanban" && (options?.method || "GET") === "GET" ? { ok: true, status: 200, json: async () => view } : null,
+    (url, options) => url === "/api/rem/objectives/ask" && options?.method === "POST"
+      ? (refuse ? { ok: false, status: 409, json: async () => ({ error: "Rem is already writing objectives for site.", code: "conflict" }) } : { ok: true, status: 200, json: async () => ({ revision: 9, items: [] }) })
+      : null,
+  ]);
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange() {}, onClose() {}, onResetAll() {},
+  }), fetchMock);
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => { for (let attempt = 0; attempt < 60 && !predicate(); attempt += 1) { await new Promise(resolve => setTimeout(resolve, 10)); await dom.flush(); } };
+  const child = name => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === `${name} objectives`);
+  const sent = () => fetchMock.calls.filter(call => call.url === "/api/rem/objectives/ask");
+  const withAsk = ask => { const next = projectEffortFixture(); next.self_work.objectives = { ...next.self_work.objectives, asking: { "/work/site": ask } }; return next; };
+  try {
+    await until(() => child("site"));
+    await dom.click(allElements(child("site")).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") === "false"));
+    const button = dom.byLabel("Ask Rem for site objectives");
+    assert.match(button.getAttribute("title"), /3 to 5 broad, open-ended objectives self-work can follow for a whole session/);
+    // A refused press says why, in the section.
+    refuse = true;
+    await dom.click(button);
+    await until(() => /already writing objectives/.test(textOf(child("site"))));
+    const alert = allElements(child("site")).find(node => node.getAttribute?.("role") === "alert");
+    assert.match(textOf(alert), /Couldn't ask Rem\. Rem is already writing objectives for site\./);
+    assert.equal(reactProps(dom.byLabel("Ask Rem for site objectives")).disabled, false);
+    // The backend starts it; the page reads the view again, whose asking shows it under way.
+    refuse = false;
+    view = withAsk({ state: "asking", message: "Rem is reading site to write objectives…", added: 0, at: "2026-11-26T12:00:00Z" });
+    await dom.click(dom.byLabel("Ask Rem for site objectives"));
+    await until(() => /Rem is reading site/.test(textOf(child("site"))));
+    assert.deepEqual(JSON.parse(sent().at(-1).options.body), { project: "/work/site" });
+    assert.equal(reactProps(dom.byLabel("Ask Rem for site objectives")).disabled, true, "one ask at a time");
+    assert.match(textOf(child("site")), /Asking Rem…/);
+    assert.equal(allElements(child("site")).find(node => node.getAttribute?.("role") === "alert"), undefined, "the refusal is gone");
+  } finally { await dom.unmount(); }
+});
+
+test("Ask Rem in the side pane shows a project's ask as it goes, from any device", async () => {
+  const objectivesModule = await viteServer.ssrLoadModule("/src/components/RemObjectives.jsx");
+  const fixture = projectEffortFixture().self_work;
+  const objectives = { ...fixture.objectives, asking: { "/work/app": { state: "added", message: "Added 4 objectives for app.", added: 4, at: "2026-11-26T12:00:00Z" },
+    "/work/site": { state: "asking", message: "Rem is reading site to write objectives…", added: 0, at: "2026-11-26T12:00:00Z" } } };
+  let show = null;
+  const Harness = () => { const [shown, setShown] = React.useState(objectives); show = setShown; return React.createElement(objectivesModule.default, { objectives: shown, tasks: [], projects: fixture.projects }); };
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([() => null]));
+  const find = predicate => allElements(dom.container).find(predicate);
+  const child = name => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === `${name} objectives`);
+  try {
+    await dom.flush();
+    for (const name of ["app", "site"]) await dom.click(allElements(child(name)).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") === "false"));
+    assert.equal(reactProps(dom.byLabel("Ask Rem for app objectives")).disabled, false);
+    assert.match(textOf(child("app")), /Added 4 objectives for app\./);
+    assert.equal(reactProps(dom.byLabel("Ask Rem for site objectives")).disabled, true, "an ask started on the phone or CLI shows here too");
+    assert.match(textOf(child("site")), /Asking Rem….*Rem is reading site to write objectives…/);
+    // A failed ask is an alert with the backend's reason, and the button works again.
+    await React.act(async () => show({ ...objectives, asking: { "/work/site": { state: "failed", message: "Rem's model couldn't answer: usage limit.", added: 0, at: "2026-11-26T12:01:00Z" } } }));
+    const alert = allElements(child("site")).find(node => node.getAttribute?.("role") === "alert");
+    assert.match(textOf(alert), /Rem's model couldn't answer: usage limit\./);
+    assert.equal(reactProps(dom.byLabel("Ask Rem for site objectives")).disabled, false);
+  } finally {
+    globalThis.window.localStorage.removeItem("raticode.rem.projectObjectivesOpen:/work/app");
+    globalThis.window.localStorage.removeItem("raticode.rem.projectObjectivesOpen:/work/site");
+    await dom.unmount();
+  }
+});
+
+test("a project's section folds its stale objectives under Stale, in the side pane and in Settings > Rem", async () => {
+  const objectivesModule = await viteServer.ssrLoadModule("/src/components/RemObjectives.jsx");
+  const stale = n => ({ id: `old${n}`, text: `Site goal from an earlier session ${n}`, done: true, stale: true, done_by: "rem", created_by: "rem" });
+  const base = projectEffortFixture().self_work;
+  const site = base.objectives.projects["/work/site"];
+  const objectives = { ...base.objectives, projects: { "/work/site": { ...site, items: [...site.items, stale(1), stale(2)], stale: 2, total: 3 } } };
+  const find = (dom, predicate) => allElements(dom.container).find(predicate);
+  const child = dom => find(dom, node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === "site objectives");
+  const staleHeading = dom => allElements(child(dom)).find(node => node.tagName === "BUTTON" && node.getAttribute("class") === "rem-objectives-stale-heading");
+  const row = (dom, text) => allElements(child(dom)).find(node => node.tagName === "INPUT" && node.getAttribute("aria-label")?.endsWith(`: ${text}`));
+  const openSite = async dom => dom.click(allElements(child(dom)).find(node => node.getAttribute?.("class") === "rem-project-heading"));
+  let dom = await mountReact(React.createElement(objectivesModule.default, { objectives, tasks: [], projects: base.projects }), createFetchMock([() => null]));
+  try {
+    await dom.flush();
+    await openSite(dom);
+    assert.match(textOf(child(dom)), /Make the site load in under a second/);
+    assert.doesNotMatch(textOf(child(dom)), /stale from earlier sessions/, "the old one-line note is gone");
+    // The same fold as the global list's: Stale and the count, closed at first.
+    const heading = staleHeading(dom);
+    assert.ok(heading, "the section has a Stale button");
+    assert.equal(textOf(allElements(heading).find(node => node.tagName === "SPAN")), "Stale");
+    assert.equal(textOf(allElements(heading).find(node => node.tagName === "SMALL")), "2");
+    assert.equal(heading.getAttribute("aria-expanded"), "false");
+    assert.match(heading.getAttribute("title"), /^Done in earlier self-work sessions/);
+    assert.equal(row(dom, "Site goal from an earlier session 1"), undefined, "folded, its rows don't show");
+    // Open, it lists both, faded as stale, and the choice is kept for this project.
+    await dom.click(heading);
+    assert.equal(staleHeading(dom).getAttribute("aria-expanded"), "true");
+    for (const n of [1, 2]) assert.equal(dom.ancestor(row(dom, `Site goal from an earlier session ${n}`), "LI").getAttribute("data-stale"), "true");
+    const kept = Object.fromEntries(["raticode.rem.projectObjectivesOpen:/work/site", "raticode.rem.projectStaleObjectivesOpen:/work/site"]
+      .map(key => [key, globalThis.window.localStorage.getItem(key)]));
+    assert.deepEqual(Object.values(kept), ["open", "open"]);
+    await dom.unmount();
+    // Mounted again with what was kept, the stale group opens as it was left.
+    dom = await mountReact(React.createElement(objectivesModule.default, { objectives, tasks: [], projects: base.projects }), createFetchMock([() => null]), { storage: kept });
+    await dom.flush();
+    assert.equal(staleHeading(dom).getAttribute("aria-expanded"), "true");
+    assert.ok(row(dom, "Site goal from an earlier session 2"));
+    await dom.unmount();
+    // Settings > Rem has the same fold. Its list is the first page, so a longer one points to the side pane.
+    const long = { ...objectives, projects: { "/work/site": { ...objectives.projects["/work/site"], total: 40, open: 38 } } };
+    const changes = [];
+    dom = await mountReact(React.createElement(objectivesModule.ProjectObjectivesList, { objectives: long, projects: base.projects, onChange: async change => { changes.push(change); return true; } }), createFetchMock([() => null]));
+    await dom.flush();
+    await openSite(dom);
+    assert.equal(textOf(staleHeading(dom)), "Stale2");
+    await dom.click(staleHeading(dom));
+    assert.ok(row(dom, "Site goal from an earlier session 1") && row(dom, "Site goal from an earlier session 2"));
+    assert.equal(allElements(child(dom)).find(node => node.tagName === "BUTTON" && textOf(node) === "Show more"), undefined);
+    assert.match(textOf(child(dom)), /More in Rem’s side pane\./);
+    // A stale row's checkbox reopens it through Settings' own change.
+    await dom.change(row(dom, "Site goal from an earlier session 1"), false);
+    assert.deepEqual(changes, [{ action: "uncheck", id: "old1" }]);
+  } finally { await dom.unmount(); }
+});
+
+test("Show more in a project's section loads its next page into the side pane", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const own = Array.from({ length: 34 }, (_, n) => ({ id: `p${n}`, text: `Site goal number ${n}`, done: false, created_by: "user" }));
+  const section = (items, offset = 0) => ({ revision: 9, items, offset, total: own.length, open: own.length, done: 0, stale: 0 });
+  const kanban = projectEffortFixture();
+  const objectives = { ...kanban.self_work.objectives, offset: 0, projects: { "/work/site": section(own.slice(0, 30)) } };
+  const pages = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    (url, options) => url === "/api/rem/kanban" && (options?.method || "GET") === "GET" ? { ok: true, status: 200, json: async () => kanban } : null,
+    (url, options) => {
+      if (!url.startsWith("/api/rem/objectives?") || options?.method === "POST") return null;
+      const query = new URL(url, "http://x").searchParams;
+      pages.push(url);
+      const offset = Number(query.get("offset"));
+      return { ok: true, status: 200, json: async () => ({ ...section(own.slice(offset, offset + Number(query.get("limit"))), offset), project: query.get("project") }) };
+    },
+    url => url.startsWith("/api/rem/tasks") ? { ok: true, status: 200, json: async () => ({ objectives, tasks: [] }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: { ...experimentalPluginStorage(), "raticode.rem.projectObjectivesOpen:/work/site": "open" } });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const child = () => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === "site objectives");
+  const row = text => child() && allElements(child()).find(node => node.tagName === "INPUT" && node.getAttribute("aria-label")?.endsWith(`: ${text}`));
+  const more = () => child() && allElements(child()).find(node => node.tagName === "BUTTON" && node.textContent === "Show more");
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => row("Site goal number 29"));
+    assert.equal(row("Site goal number 30"), undefined, "the poll sends the project's first 30");
+    assert.ok(more(), "34 in the project, 30 loaded: its section shows Show more");
+    await dom.click(more());
+    await until(() => row("Site goal number 33"));
+    assert.deepEqual(pages, ["/api/rem/objectives?project=%2Fwork%2Fsite&limit=30&offset=30"], "one page of that project, from where its list ends");
+    assert.ok(row("Site goal number 0"), "the page joins the rows already loaded");
+    assert.equal(more(), undefined, "everything is loaded");
+    // The global list wasn't paged.
+    assert.ok(find(node => node.tagName === "INPUT" && node.getAttribute("aria-label")?.endsWith(": Raise UX quality of the studio")));
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
 test("Settings > Rem asks before self-work may approve its own tickets, and an older desktop shows no switch", async () => {
   const withAuto = (on, revision = 3) => {
     const base = selfWorkFixture({ revision, autoPull: true });
@@ -21836,6 +23343,151 @@ test("New ticket keeps typed text on a press outside and asks on Escape; the she
     await dom.change(reason, "");
     await dom.dispatchWindow("keydown", { key: "Escape" });
     assert.equal(sheet(), undefined, "with no reason Escape closes it");
+  } finally { await dom.unmount(); }
+});
+
+test("Edit on a Backlog Rem ticket's sheet saves only the changed title, priority and Done when at the ticket's revision", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  let ticket = { ticket_id: "t-14", scope: "rem", organization_id: "", organization_name: "", key: "REM-14", title: "Tidy the logs", description: "Shorter lines",
+    done_when: "The log has no blank lines", status: "backlog", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: false,
+    proposal_reason: "", duplicate_of: "", created_by: "user", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 5, running: false,
+    paused: "", block_reason: "", summary: "", type: "maintain", project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned",
+    run_id: "", thread_id: "", branch: "", landed: false };
+  const sent = [];
+  const state = () => ({ ...base, board: { ...base.board, tickets: [ticket] } });
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (url !== "/api/rem/kanban/ticket" || options.method !== "POST") return null;
+      const body = JSON.parse(options.body);
+      sent.push(body);
+      ticket = { ...ticket, ...Object.fromEntries(["title", "description", "priority", "type", "done_when"].filter(key => key in body).map(key => [key, body[key]])), revision: ticket.revision + 1 };
+      return { ok: true, status: 200, json: async () => state() };
+    },
+    (url) => url === "/api/rem/kanban/timeline" ? { ok: true, status: 200, json: async () => ({ ticket, comments: [], earlier: 0, can_comment: true }) } : null,
+    (url, options = {}) => url === "/api/rem/kanban" && (options.method ?? "GET") === "GET" ? { ok: true, status: 200, json: async () => state() } : null,
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const sheet = () => allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "Ticket REM-14");
+  const form = () => allElements(dom.container).find(el => el.tagName === "FORM" && el.getAttribute?.("aria-label") === "Edit REM-14");
+  try {
+    for (let attempt = 0; attempt < 40 && !textOf(dom.container).includes("Tidy the logs"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "REM-14 Tidy the logs"));
+    await dom.flush();
+    // Priority and Kind show as plain facts.
+    assert.match(textOf(sheet()), /PriorityMedium/);
+    assert.match(textOf(sheet()), /KindMaintain/);
+    await dom.click(dom.ancestor(dom.byExactText("Edit"), "BUTTON"));
+    assert.ok(form(), "Edit opens a form in the sheet");
+    assert.equal(document.activeElement, dom.controlAfterLabel("Title"), "the form starts at its title");
+    assert.equal(dom.controlAfterLabel("Description").value, "Shorter lines");
+    assert.deepEqual(allElements(dom.controlAfterLabel("Kind")).filter(el => el.tagName === "OPTION").map(textOf), ["Build", "Research", "Maintain"]);
+    assert.equal(dom.controlAfterLabel("Done when").value, "The log has no blank lines");
+    await dom.change(dom.controlAfterLabel("Title"), "  Tidy the server logs ");
+    await dom.change(dom.controlAfterLabel("Priority"), "high");
+    await dom.change(dom.controlAfterLabel("Done when"), "The log has no blank lines\n\n  Each line is under 120 characters  \n");
+    await dom.pointer(form(), "onSubmit");
+    for (let attempt = 0; attempt < 20 && form(); attempt += 1) await dom.flush();
+    assert.equal(sent.length, 1, "one request");
+    const { request_id: requestId, ...body } = sent[0];
+    assert.match(requestId, /^kanban-/);
+    assert.deepEqual(body, { action: "edit", ticket_id: "t-14", scope: "rem", expected_revision: 5, title: "Tidy the server logs", priority: "high",
+      done_when: "The log has no blank lines\nEach line is under 120 characters" }, "only the changed fields, at the ticket's revision");
+    assert.equal(form(), undefined, "Save closes the form");
+    assert.match(textOf(sheet()), /Tidy the server logs/);
+    assert.match(textOf(sheet()), /PriorityHigh/);
+    assert.match(textOf(sheet()), /Each line is under 120 characters/);
+  } finally { await dom.unmount(); }
+});
+
+test("A refused ticket edit keeps the typed text and shows why; unsaved edits ask before closing, and a running ticket has no Edit", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const make = (id, number, title, extra = {}) => ({ ticket_id: id, scope: "rem", organization_id: "", organization_name: "", key: `REM-${number}`, title,
+    description: "", done_when: "", status: "todo", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: false, proposal_reason: "",
+    duplicate_of: "", created_by: "user", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 2, running: false, paused: "",
+    block_reason: "", summary: "", type: "develop", project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned",
+    run_id: "", thread_id: "", branch: "", landed: false, ...extra });
+  const tickets = [make("t-20", 20, "Cache the index"), make("t-21", 21, "Rename the setting", { status: "in_progress", running: true }),
+    make("t-22", 22, "Faster startup", { status: "backlog", proposed: true })];
+  const sent = [];
+  const fixture = { ...base, board: { ...base.board, tickets } };
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (url !== "/api/rem/kanban/ticket" || options.method !== "POST") return null;
+      const body = JSON.parse(options.body);
+      sent.push(body);
+      if (body.action === "edit") return { ok: false, status: 409, json: async () => ({ error: "Stop this ticket's run before editing its plan." }) };
+      return { ok: true, status: 200, json: async () => fixture };
+    },
+    (url, options = {}) => url === "/api/rem/kanban/timeline" ? { ok: true, status: 200, json: async () => ({ ticket: tickets.find(t => t.ticket_id === JSON.parse(options.body).ticket_id), comments: [], earlier: 0, can_comment: true }) } : null,
+    jsonResponse("/api/rem/kanban", fixture),
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const sheet = key => allElements(dom.container).find(el => el.getAttribute?.("aria-label") === `Ticket ${key}`);
+  const form = () => allElements(dom.container).find(el => el.tagName === "FORM" && el.getAttribute?.("aria-label")?.startsWith("Edit "));
+  const card = label => allElements(dom.container).find(el => el.getAttribute?.("aria-label") === label);
+  const editButton = key => allElements(sheet(key)).find(el => el.tagName === "BUTTON" && textOf(el) === "Edit");
+  try {
+    for (let attempt = 0; attempt < 40 && !textOf(dom.container).includes("Cache the index"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    // A running ticket can't change its plan, so its sheet has no Edit; a proposal can.
+    await dom.click(card("REM-21 Rename the setting"));
+    await dom.flush();
+    assert.ok(sheet("REM-21"));
+    assert.equal(editButton("REM-21"), undefined, "a running ticket has no Edit");
+    await dom.click(card("REM-22 Faster startup"));
+    await dom.flush();
+    assert.ok(editButton("REM-22"), "a proposal can be edited");
+
+    await dom.click(card("REM-20 Cache the index"));
+    await dom.flush();
+    await dom.click(editButton("REM-20"));
+    // Unchanged, Escape just closes the form.
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    assert.equal(form(), undefined);
+    assert.ok(sheet("REM-20"), "the sheet stays open");
+    await dom.click(editButton("REM-20"));
+    await dom.change(dom.controlAfterLabel("Title"), "Cache the search index");
+    await dom.change(dom.controlAfterLabel("Kind"), "research");
+    await dom.pointer(form(), "onSubmit");
+    let alert;
+    for (let attempt = 0; attempt < 20 && !alert; attempt += 1) {
+      await dom.flush();
+      alert = allElements(form() || dom.container).find(el => el.getAttribute?.("role") === "alert" && el.getAttribute("class") === "kb-edit-error");
+    }
+    assert.equal(textOf(alert), "Stop this ticket's run before editing its plan.", "the refusal shows in the form");
+    assert.deepEqual(sent.map(({ action, title, type, expected_revision }) => [action, title, type, expected_revision]), [["edit", "Cache the search index", "research", 2]]);
+    assert.ok(form(), "the form stays open");
+    assert.equal(dom.controlAfterLabel("Title").value, "Cache the search index", "the typed title stays");
+    assert.equal(dom.controlAfterLabel("Kind").value, "research");
+
+    // With changes, Escape, × and opening another ticket ask first.
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    assert.deepEqual(await answerDiscard(dom, false), { message: "Discard your changes to this ticket? They aren't saved.", buttons: ["Keep editing", "Discard"], focused: true });
+    assert.equal(dom.controlAfterLabel("Title").value, "Cache the search index", "Keep editing keeps the text");
+    await dom.click(card("REM-22 Faster startup"));
+    await answerDiscard(dom, false);
+    assert.ok(sheet("REM-20"), "Keep editing stays on this ticket");
+    assert.equal(sheet("REM-22"), undefined);
+    await dom.click(allElements(sheet("REM-20")).find(el => el.getAttribute?.("aria-label") === "Close"));
+    await answerDiscard(dom, true);
+    assert.equal(sheet("REM-20"), undefined, "Discard closes the sheet");
+    assert.equal(sent.length, 1, "nothing more was sent");
+
+    // New ticket sends its Done when, one check per line.
+    await dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node) === "New ticket"));
+    await dom.change(dom.controlAfterLabel("Title"), "Fix the login page");
+    await dom.change(dom.controlAfterLabel("Done when"), "  The login page loads \n\nA wrong password says so");
+    await dom.pointer(dom.ancestor(dom.controlAfterLabel("Done when"), "FORM"), "onSubmit");
+    for (let attempt = 0; attempt < 20 && sent.length < 2; attempt += 1) await dom.flush();
+    assert.equal(sent[1].action, "create");
+    assert.equal(sent[1].done_when, "The login page loads\nA wrong password says so");
   } finally { await dom.unmount(); }
 });
 
@@ -23435,7 +25087,7 @@ test("update notices and upgrade actions share the toolbar group with the check 
   let checks = 0, upgrades = 0;
   function Toolbar({ updateState, updateNotice }) {
     window.goferUpdates = { check: async () => ({}) };
-    return React.createElement(appModule.GlobalToolbar, {
+    return React.createElement(appChromeModule.GlobalToolbar, {
       updateState, updateNotice,
       onCheckForUpdates: () => checks++, onApplyUpdate: () => upgrades++,
     });
@@ -23492,6 +25144,117 @@ test("an available update shows only the toolbar's update button, with no separa
     assert.doesNotMatch(dom.text(), /You have 0\.6\.0/);
     await dom.click(upgrade);
     assert.equal(installs, 1);
+  } finally { await dom.unmount(); }
+});
+
+const LAST_RUN_VERSION_KEY = "raticode.lastRunVersion.v1";
+
+function runningVersionUpdates(currentVersion) {
+  const state = { available: false, currentVersion, info: { version: currentVersion } };
+  return { check: async () => state, getState: async () => state, onState: () => () => {}, setAutomatic: async () => state };
+}
+
+async function mountRunningVersion(currentVersion, storage = {}) {
+  const fetchMock = createFetchMock([jsonResponse("/api/workflows", workflowsPayload([workflowFixture()]))]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { updates: runningVersionUpdates(currentVersion), storage });
+  for (let index = 0; index < 4; index += 1) await dom.flush();
+  return dom;
+}
+
+const updatedNotices = (dom) => allElements(dom.container).filter((node) => node.getAttribute?.("aria-label") === "Raticode updated");
+
+async function whatsNewDialog(dom) {
+  let dialog;
+  for (let index = 0; index < 40 && !dialog; index += 1) {
+    await dom.flush(5);
+    dialog = allElements(dom.container).find((node) => node.getAttribute?.("data-testid") === "whats-new");
+  }
+  assert.ok(dialog, "What's new opens");
+  return dialog;
+}
+
+test("after an update from 0.6.0 to 0.6.1, one notice opens What's new with the 0.6.1 CHANGELOG section, and a reload shows no notice", async () => {
+  const opened = [];
+  let dom = await mountRunningVersion("0.6.1", { [LAST_RUN_VERSION_KEY]: "0.6.0" });
+  let stored;
+  try {
+    window.open = (...args) => opened.push(args);
+    const notices = updatedNotices(dom);
+    assert.equal(notices.length, 1);
+    assert.match(textOf(notices[0]), /Raticode updated to 0\.6\.1/);
+    // The notice alone doesn't count as seen: a restart before acting on it shows it again.
+    assert.equal(window.localStorage.getItem(LAST_RUN_VERSION_KEY), "0.6.0");
+    await dom.click(allElements(notices[0]).find((node) => node.tagName === "BUTTON" && textOf(node).trim() === "What's new"));
+    const dialog = await whatsNewDialog(dom);
+    const headings = allElements(dialog).filter((node) => node.tagName === "H2").map((node) => textOf(node).trim());
+    assert.ok(headings.some((text) => /^0\.6\.1\b/.test(text)), headings.join(" | "));
+    // Only sections after the stored version: 0.6.0's own notes stay out.
+    assert.equal(headings.some((text) => /^0\.6\.0\b/.test(text)), false, headings.join(" | "));
+    assert.match(textOf(dialog), /Changes since 0\.6\.0/);
+    await dom.click(allElements(dialog).find((node) => node.tagName === "BUTTON" && textOf(node).includes("release page")));
+    assert.deepEqual(opened.at(-1), ["https://github.com/zacharyivie/Raticode/releases/tag/v0.6.1", "_blank", "noopener,noreferrer"]);
+    assert.equal(updatedNotices(dom).length, 0, "opening What's new clears the notice");
+    stored = window.localStorage.getItem(LAST_RUN_VERSION_KEY);
+    assert.equal(stored, "0.6.1");
+  } finally { await dom.unmount(); }
+  dom = await mountRunningVersion("0.6.1", { [LAST_RUN_VERSION_KEY]: stored });
+  try {
+    assert.equal(updatedNotices(dom).length, 0, "a reload shows no notice");
+  } finally { await dom.unmount(); }
+});
+
+test("a fresh install shows no update notice and stores the running version", async () => {
+  const dom = await mountRunningVersion("0.6.1");
+  try {
+    assert.equal(updatedNotices(dom).length, 0);
+    assert.doesNotMatch(dom.text(), /Raticode updated/);
+    assert.equal(window.localStorage.getItem(LAST_RUN_VERSION_KEY), "0.6.1");
+  } finally { await dom.unmount(); }
+});
+
+test("an update from a version before What's new, which kept no last version, still shows the notice with this version's notes", async () => {
+  // 0.6.1 and earlier kept projects and settings here, but no last version.
+  const dom = await mountRunningVersion("0.6.1", { "gofer.recentProjects": JSON.stringify(["/workspace"]) });
+  try {
+    const notices = updatedNotices(dom);
+    assert.equal(notices.length, 1);
+    await dom.click(allElements(notices[0]).find((node) => node.tagName === "BUTTON" && textOf(node).trim() === "What's new"));
+    const dialog = await whatsNewDialog(dom);
+    const headings = allElements(dialog).filter((node) => node.tagName === "H2").map((node) => textOf(node).trim());
+    assert.deepEqual(headings.filter((text) => /^\d+\.\d+\.\d+/.test(text)).map((text) => text.split(" ")[0]), ["0.6.1"]);
+    assert.match(textOf(dialog), /Raticode 0\.6\.1/);
+    assert.equal(window.localStorage.getItem(LAST_RUN_VERSION_KEY), "0.6.1");
+  } finally { await dom.unmount(); }
+});
+
+test("dismissing the update notice stores the running version, and Help › What's New still opens that version's notes", async () => {
+  const dom = await mountRunningVersion("0.6.1", { [LAST_RUN_VERSION_KEY]: "0.5.5" });
+  try {
+    assert.equal(updatedNotices(dom).length, 1);
+    await dom.click(dom.byLabel("Dismiss update notice"));
+    assert.equal(updatedNotices(dom).length, 0);
+    assert.equal(window.localStorage.getItem(LAST_RUN_VERSION_KEY), "0.6.1");
+    await dom.click(allElements(dom.container).find((node) => node.getAttribute?.("data-menu-trigger") === "Help"));
+    const menu = allElements(dom.container).find((node) => node.getAttribute?.("role") === "menu");
+    await dom.click(allElements(menu).find((node) => node.getAttribute?.("role") === "menuitem" && textOf(node).trim().startsWith("What's New")));
+    const dialog = await whatsNewDialog(dom);
+    const headings = allElements(dialog).filter((node) => node.tagName === "H2").map((node) => textOf(node).trim());
+    assert.deepEqual(headings.filter((text) => /^\d+\.\d+\.\d+/.test(text)).map((text) => text.split(" ")[0]), ["0.6.1"]);
+    assert.match(textOf(dialog), /Raticode 0\.6\.1/);
+  } finally { await dom.unmount(); }
+});
+
+test("What's new for a version the CHANGELOG has no section for says so and links its release page", async () => {
+  const opened = [];
+  const dom = await mountRunningVersion("99.0.0", { [LAST_RUN_VERSION_KEY]: "0.6.1" });
+  try {
+    window.open = (...args) => opened.push(args);
+    await dom.click(allElements(updatedNotices(dom)[0]).find((node) => node.tagName === "BUTTON" && textOf(node).trim() === "What's new"));
+    const dialog = await whatsNewDialog(dom);
+    assert.match(textOf(dialog), /has no notes for 99\.0\.0/);
+    assert.equal(allElements(dialog).filter((node) => node.tagName === "H2" && /^\d+\.\d+\.\d+/.test(textOf(node).trim())).length, 0);
+    await dom.click(allElements(dialog).find((node) => node.tagName === "BUTTON" && textOf(node).includes("99.0.0 release page")));
+    assert.deepEqual(opened.at(-1), ["https://github.com/zacharyivie/Raticode/releases/tag/v99.0.0", "_blank", "noopener,noreferrer"]);
   } finally { await dom.unmount(); }
 });
 
@@ -26352,6 +28115,40 @@ test("pictures and videos on Rem's replies show inline, open large, and say when
   assert.deepEqual(released.sort(), ["id-/home/me/Pictures/cat.png", "id-/home/me/Videos/demo.mp4"]);
 });
 
+test("files a Rem message links to show under it as attachment tiles, like the user's", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const linked = [
+    { id: "/home/me/shots/after.png", name: "after.png", path: "/home/me/shots/after.png", href: "/home/me/shots/after.png", size: 2048, type: "image/png" },
+    { id: "/home/me/run.log", name: "run.log", path: "/home/me/run.log", href: "/home/me/run.log", size: 12, type: "text/plain" },
+  ];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [
+      { id: "update", role: "rem", body: "Fixed. See [the screenshot](</home/me/shots/after.png>) and [the log](</home/me/run.log>).", created_at: new Date().toISOString(), linked_files: linked },
+      { id: "plain", role: "rem", body: "No files here.", created_at: new Date().toISOString() },
+    ] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const desktop = { textFiles: { openPreview: async target => ({ id: `id-${target}`, url: `raticode-media://preview/${target.split("/").at(-1)}` }), closePreview: async () => {} } };
+  const dom = await mountReact(React.createElement(workspace.default, { onOpenLink: () => {} }), fetchMock, { desktop });
+  try {
+    const group = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("aria-label") === "Linked files"));
+    assert.ok(group, "linked files show as a group under the message");
+    // The same tiles as the user's attachments: one per file, with its kind.
+    const tiles = allElements(group).filter(node => node.getAttribute?.("data-attachment-kind"));
+    assert.deepEqual(tiles.map(node => node.getAttribute("data-attachment-kind")), ["image", "text"]);
+    assert.ok(dom.byLabel("Preview after.png"));
+    assert.ok(dom.byLabel("Preview run.log"));
+    const plain = allElements(dom.container).find(node => node.getAttribute?.("data-message-id") === "plain");
+    assert.equal(allElements(plain).find(node => node.getAttribute?.("aria-label") === "Linked files"), undefined);
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
 test("a web image in chat opens large with a button for the browser tab", async () => {
   const image = await viteServer.ssrLoadModule("/src/components/WebImage.jsx");
   const tabs = [];
@@ -27448,7 +29245,11 @@ test("Rem folder links open projects, and its menu opens provider settings", asy
   const opened = [];
   const workspace = {
     grantUserPath: async path => { opened.push(path); return { path }; },
-    getPathInfo: async path => ({ path, exists: true, isDirectory: path === "/linked-project", isFile: path !== "/linked-project" }),
+    // "/shortcut" is a symlink to the linked folder: path info gives the real path.
+    getPathInfo: async target => {
+      const path = target === "/shortcut" ? "/linked-project" : target;
+      return { path, exists: true, isDirectory: path === "/linked-project", isFile: path !== "/linked-project" };
+    },
     trustProjectRoot: async path => path,
     listDirectory: async ({ currentPath }) => ({ directory: currentPath, entries: [] }),
     gitStatus: async () => ({ active: false }),
@@ -27456,7 +29257,7 @@ test("Rem folder links open projects, and its menu opens provider settings", asy
   };
   const fetchMock = createFetchMock([
     jsonResponse("/api/workflows", workflowsPayload([])),
-    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [{ id: "result", role: "rem", created_at: new Date().toISOString(), body: "[Tool folder](/linked-project)" }] }),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [{ id: "result", role: "rem", created_at: new Date().toISOString(), body: "[Tool folder](/linked-project) and [Shortcut folder](/shortcut)" }] }),
     jsonResponse("/api/rem/tasks", { tasks: [] }),
     jsonResponse("/api/projects/open", { projectRoot: "/linked-project", workflows: [] }),
   ]);
@@ -27476,10 +29277,17 @@ test("Rem folder links open projects, and its menu opens provider settings", asy
     assert.match(asked.message, /Open "\/linked-project" as a project\?/);
     assert.equal(asked.confirmLabel, "Open project");
     assert.equal(fetchMock.calls.some(call => call.url === "/api/projects/open"), false);
+    assert.deepEqual(opened, [], "Cancel leaves the window no grant for the folder");
+    // A link through a symlink asks about the folder it really leads to.
+    await dom.click(dom.ancestor(dom.byText("Shortcut folder"), "A"));
+    await dom.flush();
+    const askedShortcut = await answerConfirm(dom, false);
+    assert.match(askedShortcut.message, /Open "\/linked-project" as a project\?/);
+    assert.deepEqual(opened, []);
     await dom.click(dom.ancestor(dom.byText("Tool folder"), "A"));
     await dom.flush();
     await answerConfirm(dom, true);
-    assert.ok(opened.includes("/linked-project"));
+    assert.deepEqual(opened, ["/linked-project"]);
     assert.ok(fetchMock.calls.some(call => call.url === "/api/projects/open" && JSON.parse(call.options.body).projectRoot === "/linked-project"));
     assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
   } finally { await dom.unmount(); store.resetRemHomeStore(); }
@@ -27488,7 +29296,7 @@ test("Rem folder links open projects, and its menu opens provider settings", asy
 test("recent project selector retains ten projects and gives their rows room", async () => {
   const roots = Array.from({ length: 10 }, (_, n) => `/projects/project-${n}`);
   const selected = [];
-  const dom = await mountReact(React.createElement(appModule.RecentProjectSelector, { recentProjectRoots: roots, onSelectProject: root => selected.push(root) }), createFetchMock([]));
+  const dom = await mountReact(React.createElement(workflowSidebarModule.RecentProjectSelector, { recentProjectRoots: roots, onSelectProject: root => selected.push(root) }), createFetchMock([]));
   try {
     await dom.click(dom.byLabel("Recent projects"));
     const menu = allElements(dom.container).find(node => node.getAttribute?.("role") === "menu");
@@ -27532,6 +29340,47 @@ test("Problems show runtime node failures and let the user reveal the failed run
     await dom.click(problem);
     assert.equal(revealed[0].nodeId, "digest");
     assert.equal(revealed[0].runtime, true);
+  } finally { await dom.unmount(); }
+});
+
+
+test("Problems turns a Did you mean hint into a Change button that edits the workflow source", async () => {
+  const panel = await viteServer.ssrLoadModule("/src/components/UnifiedBottomPanel.jsx");
+  const fixes = await viteServer.ssrLoadModule("/src/lib/rattishQuickFixes.js");
+  const source = "Rattish: 1\nWorkflow:\n  name: Hints\nNode greet:\n  type: bash-command\n  command: echo hi\n  to: sumary\n"
+    + "Node summary:\n  type: bash-command\n  command: echo done\n  needs: greet\n";
+  const start = source.indexOf("sumary");
+  const route = {
+    code: "RATTISH_UNRESOLVED_NODE", severity: "error", phase: "semantic",
+    message: "Route target 'sumary' does not name a Node.",
+    span: { start: { offset: start, line: 7, column: 7 }, end: { offset: start + 6, line: 7, column: 13 } },
+    details: { source_node: "greet", target: "sumary", replacements: ["summary"] },
+    suggestions: ["Did you mean 'summary'?"],
+  };
+  const stranded = { code: "RATTISH_INCOMPATIBLE_ACTIVATION_LINEAGE", severity: "error", phase: "semantic", message: "Node 'summary' never runs.", span: { start: { offset: 0, line: 1, column: 1 }, end: { offset: 7, line: 1, column: 8 } }, details: {} };
+  const { editor, model, monaco } = fakeMonacoEditor(source);
+  const applied = [];
+  const dom = await mountReact(React.createElement(panel.default, {
+    diagnostics: [route, stranded],
+    diagnosticSource: source,
+    onApplyReplacement: (diagnostic, replacement, expected) => applied.push(fixes.applyDiagnosticReplacement(monaco, editor, diagnostic, replacement, expected)),
+    onAskRemAboutDiagnostic: () => {},
+  }), createFetchMock([]));
+  try {
+    await dom.click(dom.byText("Problems"));
+    const changeButtons = () => allElements(dom.container).filter(node => node.tagName === "BUTTON" && textOf(node).startsWith("Change "));
+    // Only the problem with replacements gets one, placed before its Ask Rem button.
+    assert.deepEqual(changeButtons().map(textOf), ["Change 'sumary' to 'summary'"]);
+    const row = changeButtons()[0].parentNode;
+    const rowButtons = allElements(row).filter(node => node.tagName === "BUTTON");
+    assert.ok(rowButtons.indexOf(changeButtons()[0]) < rowButtons.findIndex(node => node.getAttribute("data-testid") === "ask-rem-failure"));
+    await dom.click(changeButtons()[0]);
+    assert.deepEqual(applied, [true]);
+    assert.match(model.getValue(), /\n {2}to: summary\n/);
+    assert.doesNotMatch(model.getValue(), /sumary/);
+    // One edit, so one undo puts the old text back.
+    editor.undo();
+    assert.equal(model.getValue(), source);
   } finally { await dom.unmount(); }
 });
 
@@ -27725,6 +29574,34 @@ test("Studio's All runs list names each run's status and why a failed run stoppe
     // The running spinner stays still for people who ask for less motion.
     const spinner = allElements(row("run-3")).find(node => /animate-spin/.test(node.getAttribute?.("class") ?? ""));
     assert.match(spinner.getAttribute("class"), /motion-reduce:animate-none/);
+  } finally { await dom.unmount(); }
+});
+
+test("the All runs list's off Resume keeps its name and says why in text under the run", async () => {
+  const reason = "This run finished successfully, so there is nothing to resume.";
+  const runs = [
+    { id: "run-2", status: "error", startedAt: "2026-11-25T09:20:00Z", resume: { allowed: true, reason: "" } },
+    { id: "run-1", status: "success", startedAt: "2026-11-25T09:10:00Z", resume: { allowed: false, reason } },
+  ];
+  const resumed = [];
+  const dom = await mountReact(React.createElement(runTimelineModule.RunTimelinePanel, {
+    embedded: true, text: "run", title: "Workflow log", runs,
+    onResumeRun: (runId, options) => resumed.push({ runId, options }),
+  }), createFetchMock([]));
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("All runs"));
+    const resumeButtons = allElements(dom.container).filter((node) => node.tagName === "BUTTON" && node.getAttribute("aria-label") === "Resume this run");
+    assert.equal(resumeButtons.length, 2, "on and off, the icon button is named Resume this run");
+    const [ready, off] = resumeButtons;
+    assert.equal(ready.getAttribute("aria-disabled"), null);
+    assert.equal(ready.getAttribute("aria-describedby"), null);
+    assertOffWithReason(dom, off, reason);
+    assert.equal(off.getAttribute("aria-label"), "Resume this run");
+    await dom.click(off);
+    assert.deepEqual(resumed, [], "the off Resume starts no run");
+    await dom.click(ready);
+    assert.deepEqual(resumed, [{ runId: "run-2", options: {} }]);
   } finally { await dom.unmount(); }
 });
 
@@ -28003,8 +29880,8 @@ test("standard browser keys apply while the browser chrome has focus", async () 
   const before = fake.calls.length;
   await dom.dispatchWindow("keydown", { key: "R", ctrlKey: true, shiftKey: true, target: null });
   assert.equal(fake.calls.length, before);
-  assert.equal(appModule.browserChromeOwnsShortcut({ key: "l", ctrlKey: true, target: address }), true);
-  assert.equal(appModule.browserChromeOwnsShortcut({ key: "l", ctrlKey: true, target: { closest: () => null } }), false);
+  assert.equal(browserTabsModule.browserChromeOwnsShortcut({ key: "l", ctrlKey: true, target: address }), true);
+  assert.equal(browserTabsModule.browserChromeOwnsShortcut({ key: "l", ctrlKey: true, target: { closest: () => null } }), false);
   await dom.unmount();
 });
 
@@ -28119,7 +29996,7 @@ test("terminal, code tab, project, Rem scope and Second Brain menus move with th
     } finally { await dom.unmount(); }
 
     // The sidebar's project actions, from the row's ⋯ button.
-    dom = await mountReact(React.createElement(appModule.WorkflowSidebar, {
+    dom = await mountReact(React.createElement(workflowSidebarModule.WorkflowSidebar, {
       activeWorkflowId: "review", loading: false, query: "", runState: {}, width: 272,
       workflows: [{ ...workflowFixture({ id: "review", name: "Review PR" }), projectRoot: "/workspace/gofer-flow" }],
       onCreate() {}, onDeleteWorkflow() {}, onDuplicateWorkflow() {}, onQueryChange() {}, onRefresh() {}, onRenameWorkflow() {},
@@ -28320,7 +30197,7 @@ test("each radio group and tab list moves its choice with ArrowRight and wraps",
     await done(dom);
 
     // The New workflow dialog's source switch.
-    dom = await mount(React.createElement(appModule.CreateWorkflowDialog, {
+    dom = await mount(React.createElement(workflowDialogsModule.CreateWorkflowDialog, {
       defaultProjectRoot: "/repos/raticode", error: "", open: true, saving: false, onClose() {}, onCreate() {}, onImport() {},
     }));
     await checkArrowRight(dom, "Workflow source");
@@ -28356,7 +30233,7 @@ test("browser settings normalize Rem's site lists and safety options", () => {
   assert.deepEqual(defaults.browser.remSignInSites, []);
   assert.equal(defaults.browser.remDownloads, "block");
   assert.equal(defaults.browser.discardAfterMinutes, 30);
-  assert.deepEqual(toPlainObject(appModule.browserPolicyFromSettings(settings.browser)).remSignInSites, ["github.com", "mail.google.com"]);
+  assert.deepEqual(toPlainObject(browserTabsModule.browserPolicyFromSettings(settings.browser)).remSignInSites, ["github.com", "mail.google.com"]);
 });
 
 test("Settings > Browser lets Raticode become the computer's default browser and picks the browser for links from other apps", () => {
@@ -28418,8 +30295,8 @@ test("Settings > Browser offers Raticode (chromium), Raticode (gecko), Firefox, 
   }));
   assert.doesNotMatch(raticode, /data-testid="firefox-settings"/);
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("extensions"), ["browser"]);
-  assert.equal(appModule.browserPolicyFromSettings(settings.browser).engine, "firefox");
-  assert.equal(appModule.browserPolicyFromSettings({}).engine, "raticode");
+  assert.equal(browserTabsModule.browserPolicyFromSettings(settings.browser).engine, "firefox");
+  assert.equal(browserTabsModule.browserPolicyFromSettings({}).engine, "raticode");
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("firefox"), ["browser"]);
 });
 
@@ -28761,6 +30638,74 @@ test("Quick open chooses a Settings section and remembers it as recent", async (
   }
 });
 
+test("Quick open finds a board ticket by its key and Enter opens its sheet on the global board", async () => {
+  const base = selfWorkFixture();
+  const ticket = { ticket_id: "t-12", scope: "rem", organization_id: "", organization_name: "", key: "REM-12", title: "Tidy the settings page", description: "",
+    status: "blocked", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: false, proposal_reason: "",
+    duplicate_of: "", created_by: "user", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 3, running: false, paused: "",
+    block_reason: "", summary: "", type: "develop", project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned",
+    run_id: "", thread_id: "", branch: "", landed: false };
+  const other = { ...ticket, ticket_id: "t-120", key: "REM-120", title: "Shorter log lines", status: "todo", updated_at: "2026-11-20T11:00:00Z" };
+  const board = { ...base, board: { ...base.board, tickets: [other, ticket] } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    jsonResponse("/api/rem/kanban", board),
+    jsonResponse("/api/rem/kanban/timeline", { ticket, comments: [], earlier: 0, can_comment: true }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  const sheet = () => allElements(dom.container).find((element) => element.tagName === "ASIDE" && element.getAttribute?.("aria-label") === "Ticket REM-12");
+  try {
+    window.localStorage.setItem("raticode.palette.recent.v1", "{}");
+    await dom.flush();
+    await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, key: "p" });
+    await flushPalette(dom, { open: true });
+    for (let attempt = 0; attempt < 40 && !paletteRows(dom).some((row) => textOf(row).includes("REM-12")); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const input = allElements(dom.container).find((element) => element.getAttribute?.("role") === "combobox");
+    await dom.change(input, "REM-12");
+    const first = paletteRows(dom)[0];
+    assert.match(textOf(first), /Tidy the settings page/);
+    assert.match(textOf(first), /REM-12 · Blocked/);
+    assert.match(textOf(first), /Ticket/);
+    await dom.keyDown(input, "Enter");
+    for (let attempt = 0; attempt < 80 && !sheet(); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.equal(paletteDialog(dom), undefined);
+    assert.ok(sheet(), "ticket REM-12's sheet is open");
+    assert.equal(allElements(dom.container).find((element) => element.getAttribute?.("id") === "sidebar-tab-kanban")?.getAttribute("aria-selected"), "true", "on the global board");
+    assert.deepEqual(JSON.parse(window.localStorage.getItem("raticode.palette.recent.v1")).files, ["ticket:t-12"]);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("Quick open lists no tickets while the Kanban board is hidden", async () => {
+  const base = selfWorkFixture();
+  const ticket = { ticket_id: "t-12", scope: "rem", key: "REM-12", title: "Tidy the settings page", status: "todo", updated_at: "2026-11-10T11:00:00Z" };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    jsonResponse("/api/rem/kanban", { ...base, board: { ...base.board, tickets: [ticket] } }),
+  ]);
+  const storage = { [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ plugins: { enabled: { kanban: false } } }) };
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage });
+  try {
+    await dom.flush();
+    await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, key: "p" });
+    await flushPalette(dom, { open: true });
+    await flushPalette(dom);
+    const input = allElements(dom.container).find((element) => element.getAttribute?.("role") === "combobox");
+    await dom.change(input, "REM-12");
+    assert.ok(!paletteRows(dom).some((row) => textOf(row).includes("REM-12")), "no ticket rows");
+    assert.ok(!fetchMock.calls.some((call) => call.url === "/api/rem/kanban"), "the board isn't read");
+  } finally {
+    await dom.unmount();
+  }
+});
+
 test("Go to entries in the palette open the rail's plugins, and Go to Rem opens Rem's home", async () => {
   const dom = await mountReact(React.createElement(appModule.default), createFetchMock([jsonResponse("/api/workflows", workflowsPayload([]))]));
   const railTab = (id) => allElements(dom.container).find((element) => element.getAttribute?.("id") === `sidebar-tab-${id}`);
@@ -29096,6 +31041,41 @@ test("Rem task threads show whether Rem or the user wrote each instruction", () 
   assert.doesNotMatch(render({ id: "reply", role: "assistant", kind: "final", sender: "rem", body: "Done" }), /data-author|Written by/);
 });
 
+test("a worker thread reply shows the files it links as tiles, and says when one is gone", async () => {
+  const linked = [
+    { id: "/home/me/shots/after.png", name: "after.png", path: "/home/me/shots/after.png", href: "/home/me/shots/after.png", size: 2048, type: "image/png" },
+    { id: "/home/me/shots/deleted.png", name: "deleted.png", path: "/home/me/shots/deleted.png", href: "/home/me/shots/deleted.png", size: 10, type: "image/png" },
+    { id: "/home/me/run.log", name: "run.log", path: "/home/me/run.log", href: "/home/me/run.log", size: 12, type: "text/plain" },
+  ];
+  const reply = { id: "final", role: "assistant", kind: "final", body: "Done. See [the screenshot](</home/me/shots/after.png>).", linked_files: linked };
+  // Thread messages are mirrored into the local store, so a file may be deleted since.
+  const desktop = { textFiles: { openPreview: async target => {
+    if (target.endsWith("deleted.png")) throw new Error("ENOENT");
+    return { id: `id-${target}`, url: `raticode-media://preview/${target.split("/").at(-1)}` };
+  }, closePreview: async () => {} } };
+  const element = React.createElement("div", null,
+    React.createElement(chatMessagesModule.ChatMessageBubble, { message: reply, onOpenLink: () => {} }),
+    React.createElement(chatMessagesModule.ChatMessageBubble, { message: { id: "ask", role: "user", sender: "rem", body: "Fix it", linked_files: linked } }),
+    React.createElement(chatMessagesModule.ChatMessageBubble, { message: { id: "plain", role: "assistant", kind: "final", body: "No files." } }));
+  const dom = await mountReact(element, createFetchMock([]), { desktop });
+  try {
+    const group = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("aria-label") === "Linked files"));
+    assert.ok(group, "the reply's linked files show as a group under it");
+    const tiles = allElements(group).filter(node => node.getAttribute?.("data-attachment-kind"));
+    assert.deepEqual(tiles.map(node => node.getAttribute("data-attachment-kind")), ["image", "image", "text"]);
+    assert.ok(dom.byLabel("Preview after.png"));
+    assert.ok(dom.byLabel("Preview run.log"));
+    const gone = await waitForNode(dom, () => tiles.find(node => node.getAttribute("data-attachment-missing") === "true"));
+    assert.match(textOf(gone), /deleted\.png/);
+    assert.match(textOf(gone), /No longer available/);
+    // Only the worker's replies: not an instruction, and not a reply without links.
+    const groups = allElements(dom.container).filter(node => node.getAttribute?.("aria-label") === "Linked files");
+    assert.equal(groups.length, 1);
+  } finally {
+    await dom.unmount();
+  }
+});
+
 test("a Firefox tab Google refused offers a Firefox window to sign in, and Settings opens Firefox's own pages there", async () => {
   const signIns = [];
   const fake = fakeBrowserBridge({ firefoxSignIn: async (id) => { signIns.push(id); return { opened: true }; } });
@@ -29147,8 +31127,8 @@ test("Settings > Browser offers Chrome, with Chrome's own pages opening in a Chr
   assert.match(markup, /<option value="firefox">Firefox<\/option>/);
   assert.match(markup, /data-testid="chrome-settings"/);
   assert.doesNotMatch(markup, /data-testid="firefox-settings"/);
-  assert.equal(appModule.browserPolicyFromSettings(settings.browser).engine, "chrome");
-  assert.equal(appModule.browserPolicyFromSettings({ engine: "edge-of-tomorrow" }).engine, "raticode");
+  assert.equal(browserTabsModule.browserPolicyFromSettings(settings.browser).engine, "chrome");
+  assert.equal(browserTabsModule.browserPolicyFromSettings({ engine: "edge-of-tomorrow" }).engine, "raticode");
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("chrome"), ["browser"]);
 
   const { default: ChromiumBrowserSettings, CHROMIUM_BROWSERS } = await viteServer.ssrLoadModule("/src/components/ChromiumBrowserSettings.jsx");
@@ -29184,7 +31164,7 @@ test("Settings > Browser offers Microsoft Edge, with Edge's own pages opening in
   assert.match(markup, /<option value="firefox">Firefox<\/option>/);
   assert.match(markup, /data-testid="edge-settings"/);
   assert.doesNotMatch(markup, /data-testid="chrome-settings"|data-testid="firefox-settings"/);
-  assert.equal(appModule.browserPolicyFromSettings(settings.browser).engine, "edge");
+  assert.equal(browserTabsModule.browserPolicyFromSettings(settings.browser).engine, "edge");
   // "edge" also matches words such as "knowledge" in other categories.
   assert.ok(settingsPopoverModule.settingsCategoriesForQuery("edge").includes("browser"));
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("microsoft edge"), ["browser"]);
@@ -29359,7 +31339,7 @@ function rattishTriggersFetch(state) {
         state.payload = { ...state.payload, login: { ...state.payload.login, enabled: body.enabled } };
         return json({ login: state.payload.login });
       }
-      if (String(url).endsWith("/preview")) return json({ nextRuns: ["2026-11-10T14:00:00+00:00"] });
+      if (String(url).endsWith("/preview")) return json({ nextRuns: ["2026-11-10T14:00:00+00:00"], summary: "" });
       state.saved.push({ url: String(url), body });
       return state.respond(body);
     },
@@ -29389,6 +31369,78 @@ test("Rattish triggers state plainly when they can fire and offer Start at login
     assert.ok(String(request.url).endsWith("/rattish/triggers/login"));
     assert.deepEqual(JSON.parse(request.options.body), { enabled: true });
     assert.equal(dom.controlAfterLabel("Start at login").checked, true);
+  } finally { await dom.unmount(); }
+});
+
+// The preview route as the server answers it: words for a common schedule, the parser's
+// message for one it can't read.
+function cronPreviewFetch(previews) {
+  return createFetchMock([
+    (url, options) => {
+      if (!String(url).endsWith("/rattish/triggers/preview")) return null;
+      const body = JSON.parse(options.body);
+      previews.push(body);
+      if (body.expression === "0 9 * * 1") {
+        return { ok: true, status: 200, json: async () => ({ nextRuns: ["2026-11-30T12:00:00+00:00", "2026-12-07T12:00:00+00:00", "2026-12-14T12:00:00+00:00"], summary: "Every Monday at 9:00" }) };
+      }
+      return { ok: false, status: 400, json: async () => ({ error: "A cron expression needs five fields: minute, hour, day of month, month, weekday." }) };
+    },
+  ]);
+}
+
+test("a Rem task's Custom field shows the schedule in words, its next times or the parser's message before Save", async () => {
+  const { default: TaskSheet } = await viteServer.ssrLoadModule("/src/components/RemTaskSheet.jsx");
+  const previews = [];
+  const dom = await mountReact(
+    React.createElement(TaskSheet, { sheet: { mode: "new" }, tasks: [], projectOptions: [], now: Date.now(), messages: [] }),
+    cronPreviewFetch(previews),
+  );
+  const preview = () => allElements(dom.container).find(node => node.getAttribute?.("data-testid") === "cron-preview");
+  const problem = () => allElements(dom.container).find(node => node.getAttribute?.("data-testid") === "cron-preview-error");
+  const until = async ready => {
+    for (let attempt = 0; attempt < 100 && !ready(); attempt += 1) {
+      await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+    }
+  };
+  try {
+    await dom.click(dom.byExactText("Custom"));
+    const cron = allElements(dom.container).find(node => node.tagName === "INPUT" && node.getAttribute("placeholder") === "0 9 * * 1");
+    await dom.change(cron, "0 9 * * 1");
+    await until(preview);
+    const shown = textOf(preview());
+    assert.match(shown, /^Every Monday at 9:00 · /);
+    assert.match(shown, /Next: .*Mon, Nov 30/);
+    assert.equal(previews.at(-1).expression, "0 9 * * 1");
+    assert.doesNotMatch(dom.text(), /Custom \(0 9 \* \* 1\)/);
+
+    await dom.change(cron, "0 9 *");
+    await until(problem);
+    assert.equal(textOf(problem()), "A cron expression needs five fields: minute, hour, day of month, month, weekday.");
+    assert.equal(preview(), undefined);
+  } finally { await dom.unmount(); }
+});
+
+test("a cron trigger card reads in words with its expression in small text under them", async () => {
+  const trigger = {
+    id: "trg_1", kind: "cron", label: "", enabled: true, overlap: "skip", missed: "skip",
+    config: { expression: "0 9 * * 1-5", timezone: "Europe/London" }, summary: "Weekdays at 9:00",
+    nextRunAt: null, latestEvent: null, dailyLimit: null, approval: { state: "approved" },
+  };
+  const unusual = { ...trigger, id: "trg_2", label: "Odd hours", config: { expression: "0 9-17 * * 1-5", timezone: "UTC" }, summary: "" };
+  const state = { payload: rattishTriggersPayload({ triggers: [trigger, unusual] }), saved: [], respond: () => null };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    const lines = allElements(dom.container).filter(node => node.tagName === "P").map(node => ({ text: textOf(node), className: node.getAttribute("class") || "" }));
+    const words = lines.findIndex(line => line.text === "Weekdays at 9:00 · Europe/London");
+    assert.ok(words >= 0, "the words line");
+    assert.equal(lines[words + 1].text, "0 9 * * 1-5");
+    assert.match(lines[words + 1].className, /font-mono/);
+    // An unusual schedule shows its expression alone, never made-up words.
+    assert.ok(lines.some(line => line.text === "0 9-17 * * 1-5 · UTC" && /font-mono/.test(line.className)));
   } finally { await dom.unmount(); }
 });
 
@@ -30291,6 +32343,140 @@ test("the worker editor lists its provider's accounts and saves the chosen accou
     assert.equal(params.config.employees[0].account, "aaaaaaaaaaaaaaaa");
     assert.match(params.reason, /Updated Builder: account/);
   } finally { await dom.unmount(); }
+});
+
+// Field labels name what to enter, never the stored format.
+const formatLabels = container => allElements(container).filter(node => ["LABEL", "LEGEND"].includes(node.tagName)).map(textOf).filter(text => /in seconds|ISO timestamp/i.test(text));
+
+test("the worker editor takes its check-in interval as a number and a unit and saves seconds", async () => {
+  const worker = { id: "builder", name: "Builder", provider: "codex", model: "cli-default", permissionMode: "workspace-write", instructions: "", paused: false, heartbeatSeconds: 7200 };
+  const config = { name: "Desk", projectRoots: [], employees: [worker] };
+  const saves = [];
+  const dom = await mountReact(React.createElement(organizationWorkspaceModule.EmployeeEditor, { employee: worker, config, tasks: [], revision: 4, defaults: {}, busy: false, onSave: (...args) => saves.push(args), onCancel: () => {} }),
+    createFetchMock([jsonResponse("/api/provider/accounts", { accounts: [] })]));
+  try {
+    await dom.flush();
+    assert.deepEqual(formatLabels(dom.container), []);
+    const amount = dom.controlAfterLabel("Check-in interval");
+    const unit = dom.byLabel("Check-in interval, 0 is automatic unit");
+    // Two hours opens as 2 hours, the largest unit that divides it evenly.
+    assert.equal(amount.value, "2");
+    assert.equal(reactProps(unit).value, "hours");
+    await dom.change(unit, "minutes");
+    await dom.change(amount, "10");
+    assert.match(textOf(dom.container), /Check-ins must be at least 15 minutes apart\./);
+    assert.doesNotMatch(textOf(dom.container), /heartbeat|900 seconds/i);
+    await dom.change(amount, "20");
+    assert.doesNotMatch(textOf(dom.container), /at least 15 minutes/);
+    await dom.pointer(dom.ancestor(amount, "FORM"), "onSubmit");
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0][0].employees[0].heartbeatSeconds, 1200);
+    assert.equal(saves[0][2], 4);
+  } finally { await dom.unmount(); }
+});
+
+test("the task editor picks a due date and time, lists tasks to wait for with their status, and saves an ISO time with this computer's offset", async () => {
+  const config = { name: "Desk", projectRoots: [], employees: [], projects: [], goalRecords: [], executionTargets: [] };
+  const tasks = [{ id: "t1", title: "Write the docs", status: "todo" }, { id: "t2", title: "Ship the build", status: "done" }];
+  const saves = [];
+  const dom = await mountReact(React.createElement(organizationWorkspaceModule.TaskEditor, { task: null, config, tasks, busy: false, onSave: value => saves.push(value), onCancel: () => {} }), createFetchMock([]));
+  try {
+    await dom.flush();
+    assert.deepEqual(formatLabels(dom.container), []);
+    const due = allElements(dom.container).find(node => node.tagName === "INPUT" && node.getAttribute("type") === "datetime-local");
+    assert.ok(due, "the due date is a date and time field");
+    assert.equal(textOf(dom.ancestor(due, "LABEL")), "Due date and time, optional");
+    await dom.change(due, "2026-12-01T09:30");
+    assert.equal(due.value, "2026-12-01T09:30");
+    // Each task to wait for is a checkbox with its title and status, not a multi-select.
+    assert.equal(allElements(dom.container).filter(node => node.tagName === "SELECT" && node.multiple).length, 0);
+    const ship = dom.ancestor(dom.byText("Ship the build"), "LABEL");
+    assert.match(textOf(ship), /Ship the build\s*Done/);
+    await dom.change(allElements(ship).find(node => node.tagName === "INPUT"), true);
+    await dom.change(dom.controlAfterLabel("Ticket title"), "Release notes");
+    const form = dom.ancestor(due, "FORM");
+    await dom.pointer(form, "onSubmit");
+    assert.equal(saves.length, 1);
+    const { dueAt, dependsOn } = saves[0];
+    assert.match(dueAt, /^2026-12-01T09:30:00[+-]\d{2}:\d{2}$/);
+    assert.equal(Date.parse(dueAt), new Date(2026, 11, 1, 9, 30).getTime());
+    const offset = -new Date(2026, 11, 1, 9, 30).getTimezoneOffset();
+    assert.equal(dueAt.slice(-6), `${offset < 0 ? "-" : "+"}${String(Math.floor(Math.abs(offset) / 60)).padStart(2, "0")}:${String(Math.abs(offset) % 60).padStart(2, "0")}`);
+    assert.deepEqual(dependsOn, ["t2"]);
+    await dom.click(dom.ancestor(dom.byExactText("Clear"), "BUTTON"));
+    assert.equal(due.value, "");
+    await dom.pointer(form, "onSubmit");
+    assert.equal(saves[1].dueAt, null);
+  } finally { await dom.unmount(); }
+});
+
+test("the organization's Work list, ticket conversation, ticket editor, settings and Operations say ticket, never task", async () => {
+  const ticket = (id, title, status, extras = {}) => ({ id, title, status, revision: 1, number: Number(id.slice(1)), key: `DSK-${id.slice(1)}`, priority: "medium", assignee: "ada", project: "site", description: "Write it down.", comments: [], dependsOn: [], approvalRequired: false, reviewRequired: false, recurring: false, intervalSeconds: 0, claim: null, ...extras });
+  const organization = {
+    id: "o1", version: "v1", revision: 4,
+    config: {
+      name: "Desk", slug: "desk", description: "Ships the docs.", instructions: "", goals: [], projectRoots: ["/p"],
+      employees: [{ id: "ada", name: "Ada", title: "Engineer", provider: "codex", model: "cli-default", permissionMode: "default", heartbeatSeconds: 0, resources: { shell: true, web: false, skills: [], mcpServers: [] }, skills: [], instructions: "", paused: false }],
+      teams: [], projects: [{ id: "site", name: "Site", owner: "ada" }], goalRecords: [], executionTargets: [],
+      maxConcurrency: 1, maxTaskTurns: 20, maxChildTasksPerTurn: 5, maxDelegationDepth: 3, turnTimeoutSeconds: 1800, monthlyTurnLimit: 200, monthlyTokenLimit: 0, monthlyBudgetUsd: 0, workspaceIsolation: "worktree", blockGitPush: true, pullBacklog: true, remSecondBrain: { enabled: false, root: "" },
+    },
+    runtime: {
+      state: "paused", archived: false,
+      tasks: [ticket("t1", "Write the guide", "todo", { comments: [{ kind: "comment", actor: "user", at: "2026-11-20T10:00:00Z", body: "Start with setup." }] }), ticket("t2", "Check the links", "backlog", { dependsOn: ["t1"], recurring: true, intervalSeconds: 86400 }), ticket("t3", "Old draft", "done"),
+        // Blocked at its run limit by an earlier version, which saved the reason with "task".
+        ticket("t4", "Fix the build", "blocked", { turns: 20, blockReason: "Run limit for this task reached. Reopen it to allow more runs." })],
+      routines: { r1: { id: "r1", name: "Daily review", cron: "0 9 * * 1-5", timezone: "UTC", nextAt: "2026-11-28T09:00:00Z", lastTaskId: "t3", enabled: true, revision: 1 } },
+      attempts: { a1: { id: "a1", taskId: "t1", status: "done", startedAt: "2026-11-20T10:00:00Z", elapsedSeconds: 12, usage: { total_tokens: 900 }, costUsd: null } },
+      usage: {}, secrets: {}, memories: {}, webhooks: {}, employeeMemory: {}, consentRequests: {}, claims: {}, knowledge: {}, links: {},
+    },
+    diagnostics: { concurrencyNote: "Up to 1 at once.", configuredConcurrency: 1, taskReasons: { t1: "Ready when the organization starts.", t4: "Run limit for this task reached. Reopen it to allow more runs." }, budgetWarnings: [], delegation: "", isolationNote: "" },
+  };
+  const fetchMock = createFetchMock([url => {
+    if (!url.startsWith("/api/organizations?")) return null;
+    const action = new URLSearchParams(url.split("?")[1]).get("action");
+    return { ok: true, status: 200, json: async () => ({ result: action === "read" ? organization : [] }) };
+  }]);
+  const dom = await mountReact(React.createElement(organizationWorkspaceModule.default, { rootPath: "/p", organizationId: "o1", onSelect: () => {}, onClose: () => {} }), fetchMock);
+  // Text people read: what the page shows, plus tooltips, accessible names and placeholders.
+  const shown = () => [textOf(dom.container), ...allElements(dom.container).flatMap(node => ["title", "aria-label", "placeholder"].map(name => node.getAttribute?.(name) || ""))].join("\n");
+  const saysTicket = (where, words) => {
+    assert.doesNotMatch(shown(), /\btasks?\b/i, `${where} says ticket, not task`);
+    for (const word of words) assert.ok(shown().includes(word), `${where} shows "${word}"`);
+  };
+  const tab = label => allElements(dom.container).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-label") === label);
+  // Editors scroll themselves into view when they open.
+  const hadScrollIntoView = Object.hasOwn(TestElement.prototype, "scrollIntoView");
+  const scrollIntoView = TestElement.prototype.scrollIntoView;
+  TestElement.prototype.scrollIntoView = () => {};
+  try {
+    for (let attempt = 0; attempt < 40 && !tab("Work"); attempt += 1) await dom.flush(10);
+    // The test DOM has no element scrolling; opening a section scrolls the panel to its top.
+    allElements(dom.container).find(node => node.getAttribute?.("class") === "org-scroll").scrollTo = () => {};
+    await dom.click(tab("Work"));
+    saysTicket("the Work list", ["New ticket", "3 open tickets", "Write the guide", "Run limit for this ticket reached. Reopen it to allow more runs."]);
+    await dom.click(dom.ancestor(dom.byText("Fix the build"), "BUTTON"));
+    // The blocked banner and Ticket controls both give the reason.
+    assert.equal(shown().split("Run limit for this ticket reached. Reopen it to allow more runs.").length - 1, 2);
+    saysTicket("a ticket at its run limit", ["Reopen ticket"]);
+    await dom.click(dom.ancestor(dom.byText("Back to work queue"), "BUTTON"));
+    await dom.click(dom.ancestor(dom.byText("Write the guide"), "BUTTON"));
+    saysTicket("the ticket's conversation", ["Edit ticket", "Ticket ID: t1", "Start with setup.", "Ticket controls", "Runs and artifacts"]);
+    await dom.click(dom.ancestor(dom.byExactText("Edit ticket"), "BUTTON"));
+    saysTicket("the ticket editor", ["Edit ticket", "Ticket title", "Waits for these tickets to finish", "Recurring ticket", "Save ticket"]);
+    // Back from the editor to the conversation, then back to the list.
+    await dom.click(dom.ancestor(dom.byText("Back to work queue"), "BUTTON"));
+    await dom.click(dom.ancestor(dom.byText("Back to work queue"), "BUTTON"));
+    await dom.click(dom.ancestor(dom.byText("New ticket"), "BUTTON"));
+    saysTicket("a new ticket", ["New ticket", "Save ticket"]);
+    await dom.click(tab("Operations"));
+    saysTicket("Operations", ["Previous ticket: done", "Each occurrence creates a separate ticket.", "Pending tickets to reassign, up to 10", "Ticket title"]);
+    await dom.click(tab("Organization settings"));
+    saysTicket("the organization's settings", ["Maximum runs per ticket", "Tickets one run can create", "Own git worktree per ticket (recommended)"]);
+  } finally {
+    if (hadScrollIntoView) TestElement.prototype.scrollIntoView = scrollIntoView;
+    else delete TestElement.prototype.scrollIntoView;
+    await dom.unmount();
+  }
 });
 
 test("Run check shows a worker's command in full, hidden characters spelled out, before running it", async () => {
@@ -31618,6 +33804,46 @@ test("The Posts dashboard approves the exact version shown, offers Publish on a 
     await dom.flush();
     const publish = fetchMock.calls.find(call => call.url === "/api/social/posts/p2/variants/v2/publish");
     assert.deepEqual(JSON.parse(publish.options.body), { content_hash: "hash-due" });
+  } finally { await dom.unmount(); }
+});
+
+test("Posts puts a cancelled post whose Facebook copy wasn't deleted in Problems, with the platform's message, the copy's link, Try again and I deleted it", async () => {
+  const postsModule = await viteServer.ssrLoadModule("/src/components/SocialPostsWorkspace.jsx");
+  const copy = { id: "copy-1", account_id: "fb-1", account_name: "Raticode Page", platform: "facebook", platform_label: "Facebook Page", variant_id: "v1",
+    url: "https://www.facebook.com/12345_678", attempts: 1, next_try_at: null, error: "Permissions error", waiting: true };
+  const cancelled = { id: "p1", title: "Launch week", state: "cancelled", review_state: "approved", revision: 2, scheduled_at: "2026-11-30T15:00:00Z", timezone: "UTC",
+    late_window_minutes: 120, created_by: "user", created_at: "2026-11-16T10:00:00Z", updated_at: "2026-11-16T10:00:00Z", rationale: "", sources: [], content_hash: "hash-1",
+    approval: null, flags: [], filled_in: false, previous: null, platform_copies: [copy],
+    variants: [{ id: "v1", account_id: "fb-1", account_name: "Raticode Page", platform: "facebook", platform_label: "Facebook Page", delivery: "api", text: "Launch week starts Monday",
+      link: "", media: [], options: {}, state: "cancelled", remote_id: "", url: "", message: "", chars: 25, limit: 63206, cost_usd: null, next_retry_at: null, open_url: "" }] };
+  const fixture = postsFixture({ posts: [cancelled] });
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/social", fixture),
+    jsonResponse("/api/social/posts/p1/copies/copy-1/retry", cancelled, { method: "POST" }),
+    jsonResponse("/api/social/posts/p1/copies/copy-1/mark-deleted", { ...cancelled, platform_copies: [] }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(postsModule.default), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 40 && !textOf(dom.container).includes("Launch week"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const hasClass = name => node => String(node.getAttribute?.("class") || node.className || "").split(/\s+/).includes(name);
+    const problems = allElements(dom.container).find(hasClass("sp-lane-problems"));
+    assert.ok(problems, "the Problems lane is shown");
+    const lane = textOf(problems);
+    assert.match(lane, /Launch week/);
+    assert.match(lane, /An earlier copy on Facebook Page wasn't deleted/);
+    assert.match(lane, /Facebook Page: Permissions error/);
+    assert.match(lane, /Raticode stopped trying/);
+    assert.ok(allElements(problems).some(hasClass("sp-copy")), "the copy is listed on the card");
+    assert.ok(dom.byText("View the copy"));
+    await dom.click(dom.byExactText("Try again"));
+    for (let index = 0; index < 3; index += 1) await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/social/posts/p1/copies/copy-1/retry" && call.options.method === "POST").length, 1);
+    await dom.click(dom.byExactText("I deleted it"));
+    for (let index = 0; index < 3; index += 1) await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/social/posts/p1/copies/copy-1/mark-deleted" && call.options.method === "POST").length, 1);
   } finally { await dom.unmount(); }
 });
 

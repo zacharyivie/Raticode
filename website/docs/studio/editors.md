@@ -35,6 +35,8 @@ A text field in the inspector saves when you leave it. If Raticode can't save th
 
 List fields, such as an approval gate's approvers or a script's args, show one row per item, with buttons to add, remove and move rows. Name and value fields, such as an HTTP request's headers or a script's `env`, show a Name column and a Value column. A name that is empty or used twice is marked on its row, and the field doesn't save until you fix it. The rows save when you leave the field or press Enter; removing or moving a row saves at once. A value can be a <span v-pre>`{{...}}`</span> placeholder, typed as text. Turn on **Edit as JSON** to edit the whole field as JSON instead. A value the rows can't show, such as a nested object written in code, always opens as JSON. Fields with their own nested settings, such as `retry` or `output-schema`, stay JSON. New in 0.6.1.
 
+Each field on the **Action** tab has a short line under its name that says what it's for, such as "String HTTP headers." under an HTTP request's **Headers**. It's the same text as the field's row in the Configuration table on the [node's page](../nodes/index.md), and screen readers read it as the field's description. New in 0.6.2.
+
 The graph is drawn from the source; it isn't a second definition that runs. Node positions and display settings live in `workflow.metadata.json`, so moving a node never changes a command or route.
 
 <AppScreenshot name="workflow-source" caption="Source on the graph's path bar opens workflow.rattish in its own editor tab." />
@@ -62,11 +64,32 @@ The inspector's **Type** field opens the same picker, with the node's current ty
 
 The list, groups and descriptions come from the installed Rattish node contracts, so a node type that Raticode adds appears in the picker without anything else changing.
 
+### Copy, Cut and Paste nodes
+
+*New in Raticode 0.6.2.*
+
+Select one or more nodes, then copy them within a workflow or into another one:
+
+- **Copy** (Mod+C) puts the selected nodes on the clipboard as their `workflow.rattish` declarations, in plain text. You can also paste that text into a Rem message, a ticket or the code editor.
+- **Cut** (Mod+X) copies the selected nodes, then deletes them in one edit.
+- **Paste** (Mod+V) adds the nodes on the clipboard to the workflow on screen and selects them.
+
+The keys work while the graph has focus, for example after you click a node or an empty part of the graph. In a text field or the code editor they copy and paste text as usual. You can also right-click a node or an empty part of the graph and choose **Cut**, **Copy** or **Paste**, or use **Edit > Cut**, **Edit > Copy** and **Edit > Paste** while the graph is in front. Right-dragging still pans the graph.
+
+When you paste:
+
+- A node whose name the workflow already uses gets a new one, the same way **Duplicate node** names copies: `fetch-copy`, then `fetch-copy-2`. The `needs:` and `to:` entries among the pasted nodes, and their `node.<name>` references, follow the new names.
+- A `needs:` or `to:` entry that names a node you didn't paste is kept if this workflow has a node with that name, and dropped if it doesn't.
+- Nodes you copied in Raticode keep their places relative to each other. They go to the right of the selected nodes, or in the middle of the view when nothing is selected. Paste from the right-click menu on an empty part of the graph puts them where you clicked. Text copied from somewhere else is laid out by its routes.
+- If the workflow compiled before, a paste that would stop it compiling isn't saved, and the toolbar names the first error. Text that isn't node declarations isn't pasted either.
+
+Copy, Cut and Paste work in Rattish workflows only.
+
 ### Undo and Redo graph edits
 
 *New in Raticode 0.6.1.*
 
-Each workflow you have open keeps its own list of graph edits: adding, deleting, duplicating and renaming nodes, changing a node's type, and changing its needs, routes and fields. To step back or forward through them:
+Each workflow you have open keeps its own list of graph edits: adding, deleting, duplicating, renaming, cutting and pasting nodes, changing a node's type, and changing its needs, routes and fields. A cut or a paste of several nodes is one edit, such as **Undo paste 3 nodes** or **Undo cut node fetch**. To step back or forward through them:
 
 - Press **Mod+Z** to undo and **Mod+Shift+Z** to redo while the graph has focus. On Windows, **Ctrl+Y** also redoes.
 - Use the **Undo** and **Redo** buttons beside **Delete selected node** in the graph toolbar. Hover one to see which edit it acts on, for example **Undo delete node fetch**. A button is dimmed when there's nothing to undo or redo.
@@ -84,6 +107,15 @@ Undo saves `workflow.rattish` as it was before the edit. In a text field, Rem's 
 
 - When part of the source is invalid, the graph still shows the pieces it can recover. That doesn't mean the workflow is ready to run.
 - An unknown node field is a compile error. A missing provider binary is a preflight problem.
+
+### Fix a misspelled name in one click
+
+When a problem's hint says "Did you mean", such as `to: sumary` with *Did you mean 'summary'?*, Raticode can make the change for you (from 0.6.2):
+
+- **In the code editor**, put the cursor on the underlined name and press `Ctrl+.` (`Cmd+.` on a Mac), or click the light bulb, or choose **Quick Fix...** in the hover. Pick **Change 'sumary' to 'summary'**.
+- **In Problems**, click the **Change 'sumary' to 'summary'** button next to **Ask Rem**. It opens the workflow's source and makes the same edit there.
+
+Either way only that name changes, and `Ctrl+Z` (`Cmd+Z`) undoes it like any other edit. When a hint names more than one spelling, each gets its own fix, closest first. This works for a misspelled node type (including `write_file` for `write-file`), field name, route target or `needs` entry, `provider`, and the workflow's `workspace`. A name in quotes or written in capitals gets the hint but no one-click fix. If you've changed the file since the check, the fix waits for the next check rather than editing the wrong text.
 
 [Validation and preflight](../workflows/validation.md) explains the difference.
 

@@ -2,12 +2,12 @@
   "$schema": "../schemas/node-contract.schema.json", "contract_version": 1, "node_type": "approval-gate", "runtime_handler": "raticode.approval_gate",
   "catalog": {"category": "approvals", "summary": "Wait for a person to approve or reject", "docs_path": "/docs/nodes/approval-gate"},
   "configuration_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {
-    "message": {"type": "string"}, "decision_timeout": {"type": ["string", "null"], "pattern": "^[1-9][0-9]*(?:ms|s|m|h|d)$"},
-    "timeout_decision": {"enum": ["reject", "timeout"], "x-rattish-case-insensitive": true}, "approvers": {"type": "array", "items": {"type": "string"}},
-    "notify": {"type": "boolean"}, "notification_title": {"type": "string"}, "subject": {"type": ["string", "null"]},
-    "options": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1, "maxLength": 60, "pattern": "^\\S(?:.*\\S)?$"}, "minItems": 2, "maxItems": 8, "uniqueItems": true},
-    "reject_options": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-    "reply": {"enum": ["none", "optional", "required", null], "x-rattish-case-insensitive": true}
+    "message": {"description": "Decision prompt or explanatory text.", "type": "string"}, "decision_timeout": {"description": "Optional human-decision deadline.", "type": ["string", "null"], "pattern": "^[1-9][0-9]*(?:ms|s|m|h|d)$"},
+    "timeout_decision": {"description": "Decision recorded when the deadline expires.", "enum": ["reject", "timeout"], "x-rattish-case-insensitive": true}, "approvers": {"description": "Intended approver identities.", "type": "array", "items": {"type": "string"}},
+    "notify": {"description": "Request an approval notification.", "type": "boolean"}, "notification_title": {"description": "Approval notification title.", "type": "string"}, "subject": {"description": "Optional approval subject.", "type": ["string", "null"]},
+    "options": {"description": "Answer labels shown instead of Approve and Reject.", "type": ["array", "null"], "items": {"type": "string", "minLength": 1, "maxLength": 60, "pattern": "^\\S(?:.*\\S)?$"}, "minItems": 2, "maxItems": 8, "uniqueItems": true},
+    "reject_options": {"description": "Options that record a rejection (approved: false).", "type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "reply": {"description": "Ask for a typed reply with the answer.", "enum": ["none", "optional", "required", null], "x-rattish-case-insensitive": true}
   }, "required": ["message"], "additionalProperties": false},
   "defaults": {"decision_timeout": null, "timeout_decision": "timeout", "approvers": [], "notify": false, "notification_title": "Raticode approval needed", "subject": null, "options": null, "reject_options": [], "reply": "none"},
   "computed_defaults": {}, "input_ports": {"mode": "closed", "ports": {"message": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"}, "subject": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"}}},

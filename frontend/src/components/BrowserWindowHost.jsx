@@ -4,7 +4,7 @@ import { AppWindow } from "lucide-react";
 import { BrowserHostContext, MOVE_NOTE, mirrorStudioStyles } from "../lib/browserHost.js";
 
 // Must match FRAME_NAME in electron/browser-window.cjs.
-export const BROWSER_WINDOW_NAME = "raticode-browser-window";
+const BROWSER_WINDOW_NAME = "raticode-browser-window";
 const ROOT_ID = "raticode-browser-root";
 const BUTTON = "h-8 rounded-md border border-line bg-white px-3 text-xs font-semibold text-ink transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand";
 

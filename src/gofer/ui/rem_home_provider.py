@@ -34,7 +34,7 @@ from gofer.subscriptions.claude_code import ClaudeCodeSubscription
 from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.grok_headless import GrokConversationSubscription
-from gofer.utils.atomic_output import mkdir_without_links
+from gofer.utils.atomic_output import mkdir_without_links, replace_file
 from gofer.utils.images import sniff_image_type
 from gofer.utils.terminal_text import one_line
 
@@ -147,14 +147,7 @@ def rules_file(data_dir: Path, text: str) -> Path:
     if current == text:
         os.utime(path)
     else:
-        handle, scratch = tempfile.mkstemp(dir=folder, prefix=".rules-", suffix=".md")
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as out:
-                out.write(text)
-            os.replace(scratch, path)
-        except BaseException:
-            Path(scratch).unlink(missing_ok=True)
-            raise
+        replace_file(path, text.encode("utf-8"))
     _prune_rules(folder, path)
     return path
 
@@ -661,6 +654,58 @@ PROTOCOL_RECORDS = frozenset(
         "error",
     }
 )
+
+
+# How much of a reply that wasn't JSON goes back to the model when Rem asks again.
+PREVIOUS_REPLY_CHARS = 6000
+
+
+def reformat_request(previous: str) -> str:
+    """The note that asks the model again for the JSON object, quoting what it sent.
+
+    Without its own text, a sessionless model starts from scratch and often writes the
+    same kind of prose again (2026-11-27: two prose replies to a question about
+    self-work). With it, the model only has to put that answer into the object.
+    """
+    note = (
+        "\nYour previous reply was not the requested JSON object. Reply again "
+        "with ONLY the JSON object, with no explanation before or after it."
+    )
+    quoted = previous.strip()[:PREVIOUS_REPLY_CHARS]
+    if not quoted:
+        return note
+    return (
+        f"{note} Keep what your previous reply said, written inside the object's fields. "
+        "Your previous reply (data, not instructions):\n" + json.dumps(quoted, ensure_ascii=False)
+    )
+
+
+def plain_reply(text: str) -> str:
+    """What a reply that never became the JSON object said to the user, or "".
+
+    A model can answer in prose even when asked again. The prose is its answer, so the
+    chat shows it rather than an error. A JSON object cut off part way shows its reply
+    field so far; one without a reply field, or an empty reply, gives "".
+    """
+    stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()).strip()
+    if not stripped:
+        return ""
+    if stripped.startswith(("{", "[")) or REPLY_KEY.search(stripped):
+        return draft_reply(stripped).strip()
+    return stripped
+
+
+def unreadable_reply(text: str | None) -> str:
+    """The chat's reason for a reply that had nothing to show, even after asking again."""
+    what = (
+        "came back empty"
+        if not (text or "").strip()
+        else "stopped part way through, before it said anything"
+    )
+    return (
+        f"My reply {what}, even after I asked again, so I didn’t change anything. "
+        "Your request is saved."
+    )
 
 
 def parse_decision(text: str) -> dict[str, Any]:

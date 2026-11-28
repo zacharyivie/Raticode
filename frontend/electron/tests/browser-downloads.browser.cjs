@@ -13,6 +13,8 @@ const electron = require("electron");
 const { app, BrowserWindow } = electron;
 const { createBrowserSessions } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 10_000, interval: 50 };
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-browser-downloads-test-"));
 const downloadsDir = path.join(profile, "Downloads");
@@ -76,16 +78,6 @@ function finish(error) {
   app.exit(error ? 1 : 0);
 }
 
-async function waitFor(check, label, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = check();
-    if (value) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}
-
 app.whenReady().then(async () => {
   server = http.createServer((request, response) => {
     if (request.url === "/file.html") {
@@ -137,7 +129,7 @@ app.whenReady().then(async () => {
   }
 
   async function downloaded(filename) {
-    const entry = await waitFor(() => store.listDownloads().find((item) => item.filename === filename && item.state !== "progressing"), `${filename} to finish`);
+    const entry = await waitFor(() => store.listDownloads().find((item) => item.filename === filename && item.state !== "progressing"), `Timed out waiting for ${filename} to finish`, WAIT);
     assert.equal(entry.state, "completed", `${filename}: ${entry.state}`);
     assert.equal(entry.path, path.join(downloadsDir, filename));
     assert.equal(fs.readFileSync(entry.path, "utf8"), HTML, filename);
@@ -162,7 +154,7 @@ app.whenReady().then(async () => {
   // Private tabs download too, and their list entries stay out of the saved list.
   const privateTab = await openTab({ url: base, private: true });
   await trigger(privateTab.guest, "fileSaver", "private.html");
-  const privateEntry = await waitFor(() => store.listDownloads().find((item) => item.filename === "private.html" && item.state === "completed"), "the private download");
+  const privateEntry = await waitFor(() => store.listDownloads().find((item) => item.filename === "private.html" && item.state === "completed"), "Timed out waiting for the private download", WAIT);
   assert.equal(privateEntry.private, true);
   assert.equal(fs.readFileSync(path.join(downloadsDir, "private.html"), "utf8"), HTML);
   store.flush();
@@ -174,7 +166,7 @@ app.whenReady().then(async () => {
   const kept = await user.guest.executeJavaScript(`URL.createObjectURL(new Blob([${JSON.stringify(HTML)}], { type: "text/html" }))`);
   assert.match(kept, /^blob:http:\/\/127\.0\.0\.1:\d+\//);
   user.guest.downloadURL(kept);
-  const linkEntry = await waitFor(() => store.listDownloads().find((item) => item.url === kept && item.state !== "progressing"), "the saved blob link");
+  const linkEntry = await waitFor(() => store.listDownloads().find((item) => item.url === kept && item.state !== "progressing"), "Timed out waiting for the saved blob link", WAIT);
   assert.equal(linkEntry.state, "completed");
   assert.equal(fs.readFileSync(linkEntry.path, "utf8"), HTML);
 

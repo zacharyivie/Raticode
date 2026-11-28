@@ -8,9 +8,9 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
-      "allow_actions": {"type": "boolean"},
-      "wait_for_tasks": {"type": "boolean"}
+      "prompt": {"description": "The message Rem receives.", "type": "string", "minLength": 1, "maxLength": 100000},
+      "allow_actions": {"description": "Let Rem start or change tasks, memories and files for this prompt.", "type": "boolean"},
+      "wait_for_tasks": {"description": "Wait for any work Rem started and include its result.", "type": "boolean"}
     },
     "required": ["prompt"],
     "additionalProperties": false

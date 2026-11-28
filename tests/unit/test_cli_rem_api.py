@@ -1147,3 +1147,102 @@ def test_ticket_line_names_the_desktop_a_proposal_came_from():
     assert _line({**base, "proposed": True, "proposed_on": ""}).endswith("(proposal)")
     # Once approved it is an ordinary ticket again.
     assert _line({**base, "proposed": False, "proposed_on": "Desk B"}).endswith("Cache the index")
+
+
+def test_selfwork_sets_levels_of_effort_and_each_projects_own_objectives(backend, tmp_path):
+    service, project, _ = backend
+    trading = tmp_path / "agent-trading"
+    trading.mkdir()
+    service.configure(
+        {
+            "provider": "codex",
+            "projects": [
+                {"root": str(project), "name": "project"},
+                {"root": str(trading), "name": "agent-trading"},
+            ],
+        }
+    )
+    service.kanban.set_participant_projects(
+        "user",
+        {"participant_id": "rem", "projects": [str(project), str(trading)], "expected_revision": 0},
+    )
+    status = cli("selfwork", "status")["data"]
+    assert [(r["name"], r["effort_percent"]) for r in status["projects"]] == [
+        ("project", 50),
+        ("agent-trading", 50),
+    ]
+    revision = str(status["settings"]["revision"])
+    changed = cli("selfwork", "set", "--expected-revision", revision, "--effort", "project=70")
+    assert changed["data"]["settings"]["project_effort"] == {str(project): 70, str(trading): 30}
+    text = runner.invoke(app, ["selfwork", "status", "--output", "text"]).stdout
+    assert "agent-trading: level of effort 30%" in " ".join(text.split())
+    refused = cli("selfwork", "set", "--expected-revision", "9", "--effort", "nowhere=5", code=2)
+    assert "isn't one of Rem's projects" in refused["error"]["message"]
+    cli("selfwork", "objectives", "add", "--text", "Improve reliability everywhere")
+    cli(
+        "selfwork",
+        "objectives",
+        "add",
+        "--project",
+        "agent-trading",
+        "--text",
+        "Cut the trading strategy's drawdowns",
+    )
+    listed = cli("selfwork", "objectives")["data"]
+    assert [i["text"] for i in listed["items"]] == ["Improve reliability everywhere"]
+    assert [i["text"] for i in listed["projects"][str(trading)]["items"]] == [
+        "Cut the trading strategy's drawdowns"
+    ]
+    own = cli("selfwork", "objectives", "--project", "agent-trading")["data"]
+    assert [i["text"] for i in own["items"]] == ["Cut the trading strategy's drawdowns"]
+    text = runner.invoke(app, ["selfwork", "objectives", "--output", "text"]).stdout
+    assert "agent-trading's own objectives" in text
+    # edit --project moves a global objective there, and --global brings it back; same ID.
+    goal = listed["items"][0]["id"]
+    moved = cli("selfwork", "objectives", "edit", "--id", goal, "--project", "agent-trading")
+    assert moved["data"]["items"] == []
+    assert goal in [i["id"] for i in moved["data"]["projects"][str(trading)]["items"]]
+    back = cli(
+        "selfwork", "objectives", "edit", "--id", goal, "--global", "--done-when", "No flaky runs"
+    )["data"]
+    assert (back["items"][0]["id"], back["items"][0]["done_when"]) == (goal, "No flaky runs")
+    both = cli(
+        "selfwork", "objectives", "edit", "--id", goal, "--global", "--project", "project", code=2
+    )
+    assert "--global goes with edit" in both["error"]["message"]
+    assert cli("selfwork", "objectives", "remove", "--id", goal, "--global", code=2)
+
+
+def test_selfwork_objectives_ask_is_the_ask_rem_button(backend, monkeypatch):
+    service, project, _ = backend
+    from gofer.ui import rem_objective_ideas
+
+    service.kanban.set_participant_projects(
+        "user", {"participant_id": "rem", "projects": [str(project)], "expected_revision": 0}
+    )
+    broad = [
+        "Improve UX across the project's features",
+        "Audit unit tests and rewrite or remove unhelpful ones",
+        "Harden error handling across the project",
+    ]
+    usual = service.generate
+
+    def generate(prompt: str, config: Any, cancel: Any) -> Any:
+        if prompt.startswith(rem_objective_ideas.RULES):
+            return {"objectives": [{"text": t} for t in broad]}
+        return usual(prompt, config, cancel)
+
+    service.generate = generate
+    refused = cli("selfwork", "objectives", "ask", code=2)
+    assert "ask needs --project" in refused["error"]["message"]
+    asked = runner.invoke(
+        app, ["selfwork", "objectives", "ask", "--project", "project", "--output", "text"]
+    )
+    assert asked.exit_code == 0, asked.stdout
+    assert "selfwork objectives list --project project" in asked.stdout
+    service.self_work.ideas._threads[str(project)].join(timeout=10)
+    own = cli("selfwork", "objectives", "--project", "project")["data"]
+    assert [i["text"] for i in own["items"]] == broad
+    assert own["asking"][str(project)]["state"] == "added"
+    monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
+    assert cli("selfwork", "objectives", "ask", "--project", "project", code=5)

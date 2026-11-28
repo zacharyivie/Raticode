@@ -14,7 +14,7 @@ const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const minutes = clock => Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5));
 // Minutes on the clock; the same start and end is a whole day.
-export const blockLength = block => ((minutes(block.end) - minutes(block.start)) % DAY + DAY) % DAY || DAY;
+const blockLength = block => ((minutes(block.end) - minutes(block.start)) % DAY + DAY) % DAY || DAY;
 
 function timeRange(block) {
   if (block.start === block.end) return block.start === "00:00" ? "all day" : `${block.start} for 24 hours`;

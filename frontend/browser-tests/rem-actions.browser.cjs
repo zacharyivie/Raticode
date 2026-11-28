@@ -51,7 +51,7 @@ createRoot(document.getElementById("root")).render(<div style={{display:"flex",h
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ cacheDir: testViteCacheDir(), root:path.join(__dirname,".."), server:{host:"127.0.0.1",port:0}, plugins:[{
+  vite = await createServer({ configLoader: "runner", cacheDir: testViteCacheDir(), root:path.join(__dirname,".."), server:{host:"127.0.0.1",port:0}, plugins:[{
     name:"rem-actions-regression",
     resolveId(id) { if (id === "/rem-actions-entry.jsx") return id; },
     load(id) { if (id === "/rem-actions-entry.jsx") return entry; },

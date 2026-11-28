@@ -3180,6 +3180,7 @@
                   "rem.task.resume",
                   "rem.task.run",
                   "rem.tidy",
+                  "selfwork.objectives",
                   "selfwork.report.seen",
                   "selfwork.settings",
                   "selfwork.stop",
@@ -3463,7 +3464,7 @@
             }
           },
           {
-            "$comment": "posts.decide is the user's decision on a social post from the phone's Posts screen: approve (approve_now also sets the time to now), decline, request_changes, cancel, publish or mark_posted for one variant, and pause or resume all publishing. content_hash is the one posts.list showed; a post that changed since is refused as a conflict. When posts.list marked the post unseen (text cut for the phone, or media the phone can't show), approving also needs unseen_confirmed, sent after the phone asked a second time. Phones send it only to desktops whose overview has posts. Like every phone request it passes the phone guard first.",
+            "$comment": "posts.decide is the user's decision on a social post from the phone's Posts screen: approve (approve_now also sets the time to now), decline, request_changes, cancel, publish or mark_posted for one variant, retry_copy (try deleting it again) or copy_deleted (the user deleted it) for one copy_id from the post's copies, platform copies Raticode couldn't delete, and pause or resume all publishing. content_hash is the one posts.list showed; a post that changed since is refused as a conflict. When posts.list marked the post unseen (text cut for the phone, or media the phone can't show), approving also needs unseen_confirmed, sent after the phone asked a second time. Phones send it only to desktops whose overview has posts. Like every phone request it passes the phone guard first.",
             "if": {
               "properties": {
                 "payload": {
@@ -3494,6 +3495,8 @@
                             "cancel",
                             "publish",
                             "mark_posted",
+                            "retry_copy",
+                            "copy_deleted",
                             "pause",
                             "resume"
                           ]
@@ -3523,6 +3526,11 @@
                         },
                         "unseen_confirmed": {
                           "type": "boolean"
+                        },
+                        "copy_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
                         }
                       },
                       "required": [
@@ -3998,7 +4006,80 @@
             }
           },
           {
-            "$comment": "selfwork.settings changes Settings > Rem > Self-work. provider_accounts names the account the runs self-work starts use with each provider: \"\" for Rem's setting, \"@default\" for the provider's default sign-in, \"auto\" to choose by usage, or an account name. It holds only the providers that change. The desktop refuses an unknown provider.",
+            "$comment": "selfwork.objectives changes the self-work objectives, as Rem's side pane does: add (text, done_when, and project_id for one of Rem's projects' own objectives, or none for a global one), edit (id, text, done_when, and project_id to move it to that project or global true to move it to the global ones; with neither it stays where it is), remove, check or uncheck (id). expected_revision is the objectives' revision the phone showed; a stale one is refused (conflict). The desktop refuses a project that isn't one of Rem's projects (invalid) an objective no longer on the list (not_found), and a move into a list that is full (invalid) or already has the same open objective (conflict); a refused move leaves the objective where it was. Only a desktop whose objectives view has movable true takes project_id or global with edit. ask (project_id) is the Ask Rem button: the desktop starts Rem writing three to five broad, open-ended objectives for that project in the background and refuses one already under way for it (conflict) or a full list (invalid); only a desktop whose objectives view has askable true takes it. The objectives view's asking holds each project's latest ask by project ID: state asking, added or failed, a message for the user, added (how many) and at. The answer is the selfwork.read view; a desktop whose selfwork.read view has no projects field doesn't take this op.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "selfwork.objectives"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "action": {
+                          "enum": [
+                            "add",
+                            "edit",
+                            "remove",
+                            "check",
+                            "uncheck",
+                            "ask"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                        },
+                        "text": {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        "done_when": {
+                          "type": "string",
+                          "maxLength": 500
+                        },
+                        "project_id": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "global": {
+                          "const": true
+                        },
+                        "expected_revision": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "action"
+                      ],
+                      "not": {
+                        "required": [
+                          "project_id",
+                          "global"
+                        ]
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "selfwork.settings changes Settings > Rem > Self-work. provider_accounts names the account the runs self-work starts use with each provider: \"\" for Rem's setting, \"@default\" for the provider's default sign-in, \"auto\" to choose by usage, or an account name. It holds only the providers that change. The desktop refuses an unknown provider. project_effort sets the level of effort of some of Rem's projects, by project ID from the phone's projects: each one's share of self-work's threads in whole percent; the desktop rescales Rem's other projects to fill the rest so they total 100, and refuses a project that isn't one of Rem's projects right now (invalid).",
             "if": {
               "properties": {
                 "payload": {
@@ -4030,6 +4111,18 @@
                             "type": "string",
                             "maxLength": 128,
                             "pattern": "^(|@default|auto|[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$"
+                          }
+                        },
+                        "project_effort": {
+                          "type": "object",
+                          "maxProperties": 40,
+                          "propertyNames": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                          },
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100
                           }
                         }
                       }
@@ -4266,8 +4359,8 @@
                   "browser.tabs",
                   "computers.list",
                   "computers.place",
-                  "computers.run_there",
                   "computers.placement",
+                  "computers.run_there",
                   "computers.set",
                   "developer.log",
                   "files.link",
@@ -4327,6 +4420,7 @@
                   "rem.task.run",
                   "rem.thread",
                   "rem.tidy",
+                  "selfwork.objectives",
                   "selfwork.read",
                   "selfwork.report.seen",
                   "selfwork.settings",

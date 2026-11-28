@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { Building2, Check, ChevronDown, ChevronUp, ExternalLink, FolderX, Gauge, Hourglass, Monitor, PauseCircle, Play, Plus, Search, ShieldAlert, ShieldCheck, Sparkles, Target, TriangleAlert, X } from "lucide-react";
-import { COLUMNS, PRIORITIES, STATUS_LABELS, canDropOn, canEditWaits, canUndoMove, columnTickets, filterTickets, findRequestedTicket, guardrailTag, modeLabel, moveNotice, objectiveLine, onKanbanTicket, ownerFilters, participantOf, pausedLabel, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, usageSentence, usageShort, useKanban, violatesLine, waitChoices, waitsChange, waitsLine } from "../lib/remKanban.js";
+import { Building2, Check, ChevronDown, ChevronUp, ExternalLink, FolderX, Gauge, Hourglass, Monitor, PauseCircle, Pencil, Play, Plus, Search, ShieldAlert, ShieldCheck, Sparkles, Target, TriangleAlert, X } from "lucide-react";
+import { COLUMNS, PRIORITIES, STATUS_LABELS, canDropOn, canEditTicket, canEditWaits, canUndoMove, columnTickets, descriptionCut, doneWhenText, draftConflictNotice, draftConflicts, filterTickets, findRequestedTicket, guardrailTag, kindChoices, kindLabel, modeLabel, moveNotice, objectiveLine, onKanbanTicket, ownerFilters, participantOf, pausedLabel, rebaseDraft, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, ticketDraft, ticketEdit, usageSentence, usageShort, useKanban, violatesLine, waitChoices, waitsChange, waitsLine } from "../lib/remKanban.js";
 import { openRemThread } from "../lib/remHomeStore.js";
 import { GLOBAL_BOARD, GLOBAL_BOARD_FILTERS, GLOBAL_FILTER_KEYS, activeFilterCount, liveGlobalFilters, resetFilters, useBoardFilters } from "../lib/boardFilters.js";
 import KanbanPeople, { PersonAvatar } from "./KanbanPeople.jsx";
@@ -45,6 +45,12 @@ export default function KanbanWorkspace() {
   const grouped = columnTickets(tickets);
   const current = board?.tickets.find(ticket => ticket.ticket_id === selected) || null;
   const act = change => run(() => sendTicket(change));
+  // An open sheet with unsaved edits asks before another ticket replaces it.
+  const sheetLeave = useRef(null);
+  const openTicket = id => {
+    if (id !== selected && sheetLeave.current) sheetLeave.current(() => setSelected(id));
+    else setSelected(id);
+  };
   // Closing a sheet gives keyboard focus back to the card that opened it, or to the board's
   // first card when that ticket has left the board.
   const cards = useRef(new Map());
@@ -142,13 +148,13 @@ export default function KanbanWorkspace() {
             <div className={`col-body ${over === column ? "over" : ""}`} data-col={column}
               onDragOver={event => { event.preventDefault(); setOver(column); }}
               onDragLeave={() => setOver("")} onDrop={drop(column)}>
-              {grouped[column].map(ticket => <Card key={ticket.ticket_id} ticket={ticket} person={participantOf(ticket, participants)} open={ticket.ticket_id === selected} cardRef={card => { if (card) cards.current.set(ticket.ticket_id, card); else cards.current.delete(ticket.ticket_id); }} onOpen={() => setSelected(ticket.ticket_id)} />)}
+              {grouped[column].map(ticket => <Card key={ticket.ticket_id} ticket={ticket} person={participantOf(ticket, participants)} open={ticket.ticket_id === selected} cardRef={card => { if (card) cards.current.set(ticket.ticket_id, card); else cards.current.delete(ticket.ticket_id); }} onOpen={() => openTicket(ticket.ticket_id)} />)}
             </div>
           </section>)}
         </div></div>
       </div>}
     </div>
-    {current ? <TicketSheet key={current.ticket_id} ticket={current} board={board} act={act} onMove={column => move(current, column)} onDecline={reason => decline(current, reason)} apply={response => run(async () => response)} onClose={closeSheet} /> : null}
+    {current ? <TicketSheet key={current.ticket_id} ticket={current} board={board} act={act} onMove={column => move(current, column)} onDecline={reason => decline(current, reason)} apply={response => run(async () => response)} onClose={closeSheet} leaveRef={sheetLeave} /> : null}
     {creating && board ? <NewTicket board={board} act={act} onClose={() => setCreating(false)} /> : null}
     <NoticeStack notices={notices} onDismiss={dismiss} />
   </div>;
@@ -202,7 +208,9 @@ const hasPatch = ticket => !ticket.running && !ticket.proposed && ticket.status 
 // Accept and change requests: Rem's finished or blocked tickets, an organization's in review or done.
 const canDecide = ticket => (ticket.scope === "organization" ? ["in_review", "done"] : ["done", "blocked"]).includes(ticket.status) && !ticket.paused;
 
-function TicketSheet({ ticket, board, act, onMove, onDecline, apply, onClose }) {
+const priorityLabel = priority => PRIORITIES.find(([value]) => value === priority)?.[1] || (priority ? priority[0].toUpperCase() + priority.slice(1) : "Medium");
+
+function TicketSheet({ ticket, board, act, onMove, onDecline, apply, onClose, leaveRef }) {
   const [reviewing, setReviewing] = useState(false);
   const projects = board.participants.find(item => item.kind === "rem")?.assignable || [];
   const note = scopeNote(ticket);
@@ -212,29 +220,114 @@ function TicketSheet({ ticket, board, act, onMove, onDecline, apply, onClose }) 
   const [worker, setWorker] = useState("");
   const organization = board.organizations.find(org => org.organization_id === (destination || ticket.organization_id));
   const base = { ticket_id: ticket.ticket_id, scope: ticket.scope, organization_id: ticket.organization_id || undefined, expected_revision: ticket.revision };
-  // Escape closes the sheet, but not while a Decline reason is typed in it.
+  // The edit form: the fields it started from, at which revision, and what's typed now.
+  const [edit, setEdit] = useState(null);
+  const changed = Boolean(edit && ticketEdit(ticket, edit.start, edit.draft, edit.revision));
+  const changedRef = useRef(changed);
+  changedRef.current = changed;
+  const after = useRef(null);
+  const guard = useDiscardGuard({ changed: () => changedRef.current, onClose: () => after.current?.(), message: "Discard your changes to this ticket? They aren't saved." });
+  // Leaving the form, closing the sheet or opening another ticket asks first while the form
+  // has unsaved changes.
+  const leave = action => {
+    if (!changedRef.current) { action(); return; }
+    after.current = action;
+    void guard.requestClose();
+  };
+  const leaveNow = useRef(leave);
+  leaveNow.current = leave;
+  const editingRef = useRef(false);
+  editingRef.current = Boolean(edit);
+  useEffect(() => {
+    if (!leaveRef) return undefined;
+    leaveRef.current = action => leaveNow.current(action);
+    return () => { leaveRef.current = null; };
+  }, [leaveRef]);
+  // A newer copy of the ticket, from a poll or another change, carries the fields the user
+  // hasn't touched along, so Save doesn't undo them. When it changed a field the user
+  // changed too, the form stays on its revision, so the desktop refuses the save.
+  useEffect(() => {
+    setEdit(current => {
+      if (!current || current.busy || current.revision === ticket.revision) return current;
+      const newer = ticketDraft(ticket);
+      const conflicts = draftConflicts(current.start, current.draft, newer);
+      if (conflicts.length) return { ...current, error: draftConflictNotice(conflicts) };
+      return { ...current, start: newer, revision: ticket.revision, draft: rebaseDraft(current.start, current.draft, newer) };
+    });
+  }, [ticket]);
+  const startEdit = () => setEdit({ start: ticketDraft(ticket), revision: ticket.revision, draft: ticketDraft(ticket), busy: false, error: "" });
+  const draftChange = values => setEdit(current => current && { ...current, draft: { ...current.draft, ...values } });
+  const save = async event => {
+    event.preventDefault();
+    if (!edit || edit.busy || !edit.draft.title.trim()) return;
+    const change = ticketEdit(ticket, edit.start, edit.draft, edit.revision);
+    if (!change) { setEdit(null); return; }
+    setEdit(current => ({ ...current, busy: true, error: "" }));
+    try {
+      const response = await sendTicket(change);
+      await apply(response);
+      setEdit(null);
+    } catch (failure) {
+      // A refusal (a newer revision, or a run that started) keeps what was typed.
+      setEdit(current => current && { ...current, busy: false, error: failure.message });
+    }
+  };
+  // Escape closes the sheet, but not while a Decline reason is typed in it. In the edit form
+  // it closes the form, asking first when something changed.
   const reasonRef = useRef(reason);
   reasonRef.current = reason;
-  // Opening a ticket moves keyboard focus into its sheet, at its title.
+  // Opening a ticket moves keyboard focus into its sheet, at its title; the edit form starts
+  // at its Title field and gives focus back to Edit when it closes.
   const heading = useRef(null);
+  const editButton = useRef(null);
+  const titleField = useRef(null);
+  const wasEditing = useRef(false);
   useEffect(() => { heading.current?.focus(); }, []);
   useEffect(() => {
-    const close = event => { if (event.key === "Escape" && !reasonRef.current.trim()) onClose(); };
+    if (edit && !wasEditing.current) titleField.current?.focus();
+    if (!edit && wasEditing.current) (editButton.current || heading.current)?.focus();
+    wasEditing.current = Boolean(edit);
+  }, [edit]);
+  useEffect(() => {
+    const close = event => {
+      if (event.key !== "Escape") return;
+      if (editingRef.current) leaveNow.current(() => setEdit(null));
+      else if (!reasonRef.current.trim()) onClose();
+    };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [onClose]);
+  const cut = edit ? descriptionCut(edit.start) : false;
   return <aside className={`kb-sheet ${reviewing ? "is-reviewing" : ""}`} aria-label={`Ticket ${ticket.key}`}>
-    <header className="kb-sheet-head"><span className="oh-key">{ticket.key}</span><span className="grow" /><button className="oh-btn icon ghost" type="button" aria-label="Close" onClick={onClose}><X size={15} /></button></header>
-    <h2 ref={heading} tabIndex={-1}>{ticket.title}</h2>
+    <header className="kb-sheet-head"><span className="oh-key">{ticket.key}</span><span className="grow" />
+      {canEditTicket(ticket) && !edit ? <button ref={editButton} className="oh-btn small" type="button" onClick={startEdit}><Pencil size={13} aria-hidden="true" />Edit</button> : null}
+      <button className="oh-btn icon ghost" type="button" aria-label="Close" onClick={() => leave(onClose)}><X size={15} /></button></header>
+    {edit ? <form className="oh-form kb-edit" aria-label={`Edit ${ticket.key}`} onSubmit={save}>
+      <label>Title<input ref={titleField} maxLength={500} value={edit.draft.title} onChange={event => draftChange({ title: event.target.value })} /></label>
+      <label>Description<textarea rows={6} readOnly={cut} value={edit.draft.description} onChange={event => draftChange({ description: event.target.value })} />
+        {cut ? <small>Too long to edit here, so Save leaves it as it is.</small> : null}</label>
+      <div className="kb-edit-row">
+        <label>Priority<select value={edit.draft.priority} onChange={event => draftChange({ priority: event.target.value })}>{PRIORITIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <label>Kind<select value={edit.draft.type} onChange={event => draftChange({ type: event.target.value })}>{kindChoices(edit.start.type).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      </div>
+      <label>Done when<textarea rows={3} maxLength={1000} placeholder="One check per line" value={edit.draft.done_when} onChange={event => draftChange({ done_when: event.target.value })} />
+        <small>One check per line. Its review checks each one.</small></label>
+      {edit.error ? <p className="kb-edit-error" role="alert">{edit.error}</p> : null}
+      <div className="kb-actions">
+        <button className="oh-btn primary" type="submit" disabled={edit.busy || !changed || !edit.draft.title.trim()}>{edit.busy ? "Saving…" : "Save"}</button>
+        <button className="oh-btn ghost" type="button" onClick={() => leave(() => setEdit(null))}>Cancel</button>
+      </div>
+    </form> : <h2 ref={heading} tabIndex={-1}>{ticket.title}</h2>}
     <p className="oh-sheet-sub"><span className={`oh-pill st-${ticket.status === "in_progress" ? "running" : ticket.status}`}>{COLUMNS.find(([key]) => key === ticket.status)?.[1] || ticket.status}</span><span>{ticket.scope === "rem" ? "Rem" : ticket.organization_name}</span>{ticket.assignee && ticket.scope !== "rem" ? <span>{ticket.assignee}</span> : null}{ticket.project ? <span>{ticket.project}</span> : null}</p>
+    {!edit ? <dl className="kb-facts"><div><dt>Priority</dt><dd>{priorityLabel(ticket.priority)}</dd></div>{ticket.scope === "rem" ? <div><dt>Kind</dt><dd>{kindLabel(ticket.type)}</dd></div> : null}</dl> : null}
     {note ? <p className="kb-scope" role="status"><FolderX size={13} aria-hidden="true" /><span>{note}</span></p> : null}
-    {ticket.scope === "rem" && !ticket.running && !ticket.paused && ["backlog", "todo", "blocked"].includes(ticket.status) ? <label className="kb-field"><span>Project</span>
+    {canEditTicket(ticket) ? <label className="kb-field"><span>Project</span>
       <select className="kb-input" value={ticket.project_dir || ""} onChange={event => act({ ...base, action: "edit", project_dir: event.target.value || null })}>
         <option value="">No project</option>
         {[...new Set([...projects, ...(ticket.project_dir ? [ticket.project_dir] : [])])].map(root => <option key={root} value={root}>{projectLabel(board, root)}</option>)}
       </select></label> : null}
-    {ticket.description ? <TicketDescription text={ticket.description} /> : null}
-    <DoneWhen ticket={ticket} />
+    {ticket.description && !edit ? <TicketDescription text={ticket.description} /> : null}
+    {!edit ? <DoneWhen ticket={ticket} /> : null}
     <WaitsFor ticket={ticket} board={board} act={act} />
     {ticket.auto_approved ? <p className="kb-auto-note" role="note" data-testid="ticket-auto-approved"><Sparkles size={13} aria-hidden="true" /><span>Approved by self-work, not by you, because auto-approval is on in Settings &gt; Rem. Edit, move or cancel it like any ticket.</span></p> : null}
     {ticket.proposed_on ? <p className="kb-auto-note" role="note" data-testid="ticket-proposed-on-note"><Monitor size={13} aria-hidden="true" /><span>Proposed by a self-work pass that ran on {ticket.proposed_on}.{ticket.proposed ? " What another computer proposes always waits for your approval, even with auto-approval on." : ""}</span></p> : null}
@@ -278,6 +371,7 @@ function TicketSheet({ ticket, board, act, onMove, onDecline, apply, onClose }) 
       </>}
     </div></div> : null}
     <TicketTimeline ticket={ticket} />
+    {guard.confirmDialog}
   </aside>;
 }
 
@@ -354,7 +448,7 @@ function NewTicket({ board, act, onClose }) {
   const rem = board.participants.find(item => item.kind === "rem");
   const openProjects = rem?.assignable || [];
   // Starts on one of Rem's assigned projects, so a new ticket can be picked up on its own.
-  const [start] = useState(() => ({ title: "", description: "", priority: "medium", status: "todo", owner: "rem", worker: "", project: rem?.projects.find(root => openProjects.includes(root)) || "" }));
+  const [start] = useState(() => ({ title: "", description: "", done_when: "", priority: "medium", status: "todo", owner: "rem", worker: "", project: rem?.projects.find(root => openProjects.includes(root)) || "" }));
   const [form, setForm] = useState(start);
   const [busy, setBusy] = useState(false);
   const change = values => setForm(current => ({ ...current, ...values }));
@@ -365,7 +459,8 @@ function NewTicket({ board, act, onClose }) {
     setBusy(true);
     const saved = await act({
       action: "create", title: form.title.trim(), description: form.description.trim(), priority: form.priority, status: form.status,
-      ...(organization ? { scope: "organization", organization_id: organization.organization_id, assignee_id: form.worker || undefined } : { project_dir: form.project || undefined }),
+      ...(organization ? { scope: "organization", organization_id: organization.organization_id, assignee_id: form.worker || undefined }
+        : { project_dir: form.project || undefined, ...(doneWhenText(form.done_when) ? { done_when: doneWhenText(form.done_when) } : {}) }),
     });
     setBusy(false);
     if (saved) onClose();
@@ -385,6 +480,7 @@ function NewTicket({ board, act, onClose }) {
           {board.organizations.map(org => <option key={org.organization_id} value={org.organization_id}>{org.name}</option>)}
         </select>
       </label>
+      {!organization ? <label>Done when <small>(optional)</small><textarea maxLength={1000} placeholder="One check per line" value={form.done_when} onChange={event => change({ done_when: event.target.value })} /></label> : null}
       {!organization ? <label>Project<select value={form.project} onChange={event => change({ project: event.target.value })}><option value="">No project</option>{openProjects.map(root => <option key={root} value={root}>{projectLabel(board, root)}</option>)}</select></label> : null}
       {organization ? <label>Worker<select value={form.worker} onChange={event => change({ worker: event.target.value })}><option value="">Unassigned</option>{organization.employees.map(employee => <option key={employee.employee_id} value={employee.employee_id}>{employee.name}</option>)}</select></label> : null}
       <label>Priority<select value={form.priority} onChange={event => change({ priority: event.target.value })}>{PRIORITIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
